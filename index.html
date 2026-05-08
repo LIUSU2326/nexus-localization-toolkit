@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEXUS - 文件工具集</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body>
+    <div class="main-container">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1 class="logo">NEXUS</h1>
+                <p class="tagline">本地化工具集</p>
+            </div>
+            
+            <nav class="nav-menu">
+                <button class="nav-item active" data-tool="split">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M16 3h5v5"/>
+                        <path d="M8 21H3v-5"/>
+                        <path d="M21 3l-9 9"/>
+                        <path d="M3 21l9-9"/>
+                    </svg>
+                    <span>文件拆分</span>
+                </button>
+                
+                <button class="nav-item" data-tool="translate">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M5 8l6 6"/>
+                        <path d="M4 14l6-6 2-2"/>
+                        <path d="M2 5h12"/>
+                        <path d="M7 2v3"/>
+                        <path d="M22 22l-5-10-5 10"/>
+                        <path d="M14 18h6"/>
+                    </svg>
+                    <span>文本翻译</span>
+                </button>
+                
+                <button class="nav-item" data-tool="convert">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 20V10"/>
+                        <path d="M18 20V4"/>
+                        <path d="M6 20v-6"/>
+                    </svg>
+                    <span>格式转换</span>
+                </button>
+                
+                <button class="nav-item" data-tool="l10n-check">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 12l2 2 4-4"/>
+                    </svg>
+                    <span>本地化检测</span>
+                </button>
+                
+                <button class="nav-item" data-tool="glossary">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 20H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v3"/>
+                        <path d="M16 20V7L6 13"/>
+                    </svg>
+                    <span>术语表</span>
+                </button>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <p class="version">v1.0.0</p>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <div class="status-bar" id="statusBar" style="display: none;">
+                <div class="status-icon" id="statusIcon"></div>
+                <div class="status-content">
+                    <span class="status-text" id="statusText"></span>
+                    <span class="status-subtext" id="statusSubtext"></span>
+                </div>
+                <button class="status-action" id="statusAction" style="display: none;">查看</button>
+            </div>
+
+            <div class="api-config-panel" id="apiConfigPanel">
+                <div class="api-config-header">
+                    <h3>⚙️ API 配置</h3>
+                    <button class="icon-btn-small" id="toggleApiConfig" title="收起/展开">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="6,9 12,15 18,9"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="api-config-content" id="apiConfigContent">
+                    <div class="setting-row">
+                        <label for="apiProvider">API 平台</label>
+                        <select id="apiProvider">
+                            <option value="deepseek" selected>DeepSeek 官方</option>
+                            <option value="custom">自定义平台</option>
+                        </select>
+                    </div>
+                    <div class="setting-row" id="baseUrlRow">
+                        <label for="baseUrl">Base URL</label>
+                        <input type="text" id="baseUrl" placeholder="https://api.deepseek.com">
+                    </div>
+                    <div class="setting-row">
+                        <label for="apiKey">API Key</label>
+                        <input type="password" id="apiKey" placeholder="必须填写您自己的 API Key">
+                        <button class="action-btn secondary" id="saveApiKeyBtn">保存</button>
+                        <button class="action-btn secondary" id="clearApiKeyBtn">清除</button>
+                    </div>
+                    <div class="api-status" id="apiStatus"></div>
+                    <div class="api-help">
+                        <p><strong>说明：</strong>本工具不提供免费 AI 服务，必须使用您自己购买的 API Key</p>
+                        <p><strong>DeepSeek：</strong><a href="https://platform.deepseek.com" target="_blank">官网购买</a></p>
+                        <p><strong>提示：</strong>模型选择在翻译/检测功能的设置面板中</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-content" id="split-tool">
+                <div class="tool-header">
+                    <h2>📄 文件拆分</h2>
+                    <p>将大型 CSV/XLSX 文件按行数拆分成多个小文件</p>
+                </div>
+                
+                <div class="tool-body">
+                    <div class="upload-area-large" id="splitUploadArea">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="upload-text">拖拽文件到此处或点击上传</p>
+                        <p class="upload-hint">支持 .csv 和 .xlsx 格式</p>
+                        <input type="file" id="splitFileInput" accept=".csv,.xlsx,.xls" hidden>
+                    </div>
+
+                    <div class="settings-panel">
+                        <div class="setting-row">
+                            <label for="rowsPerFile">每个文件行数</label>
+                            <input type="number" id="rowsPerFile" min="1" value="5000" placeholder="输入每个文件的行数">
+                        </div>
+                        <button class="action-btn primary" id="splitBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M16 3h5v5"/>
+                                <path d="M8 21H3v-5"/>
+                                <path d="M21 3l-9 9"/>
+                                <path d="M3 21l9-9"/>
+                            </svg>
+                            开始拆分
+                        </button>
+                    </div>
+
+                    <div class="info-panel" id="splitFileInfo" style="display: none;">
+                        <h3>文件信息</h3>
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">文件名</span>
+                                <span class="info-value" id="splitFileName">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">文件大小</span>
+                                <span class="info-value" id="splitFileSize">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">检测编码</span>
+                                <span class="info-value" id="splitFileEncoding">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总行数</span>
+                                <span class="info-value highlight" id="splitTotalRows">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总列数</span>
+                                <span class="info-value" id="splitTotalCols">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">预估文件数</span>
+                                <span class="info-value" id="splitEstimatedFiles">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="progress-panel" id="splitProgressSection" style="display: none;">
+                        <h3>拆分进度</h3>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="splitProgressFill"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="splitProgressText">0 / 0</span>
+                            <span id="splitProgressPercent">0%</span>
+                        </div>
+                    </div>
+
+                    <div class="download-panel" id="splitDownloadSection" style="display: none;">
+                        <h3>拆分完成</h3>
+                        <div class="download-list" id="splitDownloadList"></div>
+                        <div class="download-actions">
+                            <button class="action-btn primary" id="splitDownloadAllBtn">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                    <polyline points="7,10 12,15 17,10"/>
+                                    <line x1="12" y1="15" x2="12" y2="3"/>
+                                </svg>
+                                打包下载全部 (ZIP)
+                            </button>
+                            <button class="action-btn secondary" id="splitResetBtn">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                    <path d="M3 3v5h5"/>
+                                </svg>
+                                处理新文件
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-content" id="translate-tool" style="display: none;">
+                <div class="tool-header">
+                    <h2>🌍 文本翻译</h2>
+                    <p>AI 驱动的游戏文本翻译，支持多语言</p>
+                </div>
+                
+                <div class="tool-body">
+                    <div class="project-selector">
+                        <h3>游戏项目</h3>
+                        <div class="project-list" id="projectList"></div>
+                        <button class="icon-btn" id="addProjectBtn" title="添加项目">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"/>
+                                <line x1="5" y1="12" x2="19" y2="12"/>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <div class="upload-area-large" id="translateUploadArea">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="upload-text">拖拽文件到此处或点击上传</p>
+                        <p class="upload-hint">支持 .csv 和 .xlsx 格式</p>
+                        <input type="file" id="translateFileInput" accept=".csv,.xlsx,.xls" hidden>
+                    </div>
+
+                    <div class="info-panel" id="translateFileInfo" style="display: none;">
+                        <h3>文件信息</h3>
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">文件名</span>
+                                <span class="info-value" id="translateFileName">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">检测编码</span>
+                                <span class="info-value" id="translateFileEncoding">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总行数</span>
+                                <span class="info-value" id="translateTotalRows">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总列数</span>
+                                <span class="info-value" id="translateTotalCols">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="column-select-panel" id="translateColumnSelect" style="display: none;">
+                        <h3>选择要翻译的列</h3>
+                        <div class="column-list" id="translateColumnList"></div>
+                        <button class="action-btn primary" id="translateConfirmColumnBtn">确认选择</button>
+                    </div>
+
+                    <div class="settings-panel">
+                        <div class="setting-row">
+                            <label for="sourceLang">源语言</label>
+                            <select id="sourceLang">
+                                <option value="zh-CN">中文（简体）</option>
+                            </select>
+                        </div>
+                        <div class="setting-row">
+                            <label for="targetLang">目标语言</label>
+                            <select id="targetLang">
+                                <option value="en">英语</option>
+                                <option value="ja">日语</option>
+                                <option value="ko">韩语</option>
+                                <option value="zh-TW">中文（繁体）</option>
+                                <option value="fr">法语</option>
+                                <option value="de">德语</option>
+                                <option value="es">西班牙语</option>
+                                <option value="pt">葡萄牙语</option>
+                                <option value="ru">俄语</option>
+                                <option value="th">泰语</option>
+                                <option value="vi">越南语</option>
+                                <option value="id">印尼语</option>
+                            </select>
+                        </div>
+                        <div class="setting-row model-select-row">
+                            <label for="aiModel">AI模型</label>
+                            <select id="aiModel">
+                                <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro - 推荐</option>
+                                <option value="deepseek-v4-flash">DeepSeek V4 Flash - 高速</option>
+                            </select>
+                        </div>
+                        <p class="model-hint">💡 当前选择的模型将用于翻译</p>
+                        <button class="action-btn primary" id="translateBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M5 8l6 6"/>
+                                <path d="M4 14l6-6 2-2"/>
+                                <path d="M2 5h12"/>
+                                <path d="M7 2v3"/>
+                                <path d="M22 22l-5-10-5 10"/>
+                                <path d="M14 18h6"/>
+                            </svg>
+                            开始翻译
+                        </button>
+                    </div>
+
+                    <div class="progress-panel" id="translateProgressSection" style="display: none;">
+                        <h3>翻译进度</h3>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="translateProgressFill"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="translateProgressText">0 / 0</span>
+                            <span id="translateProgressPercent">0%</span>
+                        </div>
+                        <div class="progress-info" id="translateProgressInfo"></div>
+                        
+                        <div class="translation-preview">
+                            <h4>实时翻译内容</h4>
+                            <div class="translation-list" id="translationList"></div>
+                        </div>
+                    </div>
+
+                    <div class="download-panel" id="translateDownloadSection" style="display: none;">
+                        <h3>翻译完成</h3>
+                        <div class="download-info">
+                            <span id="translatedCount">0</span> 条文本已翻译
+                        </div>
+                        <button class="action-btn primary" id="translateDownloadBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            下载翻译文件
+                        </button>
+                        <button class="action-btn secondary" id="translateResetBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                <path d="M3 3v5h5"/>
+                            </svg>
+                            处理新文件
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-content" id="convert-tool" style="display: none;">
+                <div class="tool-header">
+                    <h2>🔄 格式转换</h2>
+                    <p>转换 CSV 文件编码格式</p>
+                </div>
+                
+                <div class="tool-body">
+                    <div class="upload-area-large" id="convertUploadArea">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="upload-text">拖拽文件到此处或点击上传</p>
+                        <p class="upload-hint">支持 .csv 和 .xlsx 格式</p>
+                        <input type="file" id="convertFileInput" accept=".csv,.xlsx,.xls" hidden>
+                    </div>
+
+                    <div class="info-panel" id="convertFileInfo" style="display: none;">
+                        <h3>文件信息</h3>
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">文件名</span>
+                                <span class="info-value" id="convertFileName">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">文件大小</span>
+                                <span class="info-value" id="convertFileSize">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">检测编码</span>
+                                <span class="info-value highlight" id="convertFileEncoding">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总行数</span>
+                                <span class="info-value" id="convertTotalRows">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总列数</span>
+                                <span class="info-value" id="convertTotalCols">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="settings-panel">
+                        <div class="setting-row">
+                            <label for="outputFormat">输出格式</label>
+                            <select id="outputFormat">
+                                <option value="utf8">UTF-8（无 BOM）</option>
+                                <option value="utf8-bom">UTF-8（带 BOM）</option>
+                                <option value="gbk">GBK</option>
+                                <option value="gb2312">GB2312</option>
+                                <option value="utf16">UTF-16 LE</option>
+                            </select>
+                        </div>
+                        <div class="setting-row">
+                            <label for="delimiter">分隔符</label>
+                            <select id="delimiter">
+                                <option value=",">逗号 (,)</option>
+                                <option value=";">分号 (;)</option>
+                                <option value="\t">制表符 (Tab)</option>
+                                <option value="|">竖线 (|)</option>
+                            </select>
+                        </div>
+                        <div class="setting-row">
+                            <label for="newline">换行符</label>
+                            <select id="newline">
+                                <option value="\n">Unix (LF)</option>
+                                <option value="\r\n">Windows (CRLF)</option>
+                                <option value="\r">Mac (CR)</option>
+                            </select>
+                        </div>
+                        <button class="action-btn primary" id="convertBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 20V10"/>
+                                <path d="M18 20V4"/>
+                                <path d="M6 20v-6"/>
+                            </svg>
+                            开始转换
+                        </button>
+                    </div>
+
+                    <div class="download-panel" id="convertDownloadSection" style="display: none;">
+                        <h3>转换完成</h3>
+                        <div class="download-info">
+                            <span>已转换为 </span>
+                            <span id="convertOutputFormat" class="highlight">UTF-8（无 BOM）</span>
+                        </div>
+                        <button class="action-btn primary" id="convertDownloadBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            下载转换文件
+                        </button>
+                        <button class="action-btn secondary" id="convertResetBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                <path d="M3 3v5h5"/>
+                            </svg>
+                            转换新文件
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-content" id="l10n-check-tool" style="display: none;">
+                <div class="tool-header">
+                    <h2>✅ 本地化检测</h2>
+                    <p>检测英文文本的本地化质量</p>
+                </div>
+                
+                <div class="tool-body">
+                    <div class="upload-area-large" id="l10nUploadArea">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="upload-text">拖拽文件到此处或点击上传</p>
+                        <p class="upload-hint">支持 .csv 和 .xlsx 格式</p>
+                        <input type="file" id="l10nFileInput" accept=".csv,.xlsx,.xls" hidden>
+                    </div>
+
+                    <div class="info-panel" id="l10nFileInfo" style="display: none;">
+                        <h3>文件信息</h3>
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">文件名</span>
+                                <span class="info-value" id="l10nFileName">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总行数</span>
+                                <span class="info-value" id="l10nTotalRows">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总列数</span>
+                                <span class="info-value" id="l10nTotalCols">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="column-select-panel" id="l10nColumnSelect" style="display: none;">
+                        <h3>选择原文列和译文列</h3>
+                        <div class="column-select-row">
+                            <div class="column-select-group">
+                                <label>选择原文列</label>
+                                <div class="column-list" id="l10nSourceColumnList"></div>
+                            </div>
+                            <div class="column-select-group">
+                                <label>选择译文列</label>
+                                <div class="column-list" id="l10nTargetColumnList"></div>
+                            </div>
+                        </div>
+                        <button class="action-btn primary" id="l10nConfirmColumnBtn">确认选择</button>
+                    </div>
+
+                    <div class="settings-panel">
+                        <div class="setting-row">
+                            <label for="l10nScene">场景类型</label>
+                            <select id="l10nScene">
+                                <option value="all">全部场景</option>
+                                <option value="ui">UI 按钮</option>
+                                <option value="popup">弹窗提示</option>
+                                <option value="story">剧情对白</option>
+                                <option value="quest">任务描述</option>
+                                <option value="item">道具说明</option>
+                                <option value="system">系统提示</option>
+                            </select>
+                        </div>
+                        <div class="setting-row">
+                            <label for="l10nStrictness">检测严格度</label>
+                            <select id="l10nStrictness">
+                                <option value="lenient">宽松 - 仅检测严重错误</option>
+                                <option value="normal" selected>标准 - 常规问题检测</option>
+                                <option value="strict">严格 - 全面问题检测</option>
+                            </select>
+                            <div class="strictness-hint" id="strictnessHint">
+                                <p><strong>宽松：</strong>仅检测严重语法错误、拼写错误、漏译/误译等重大问题</p>
+                                <p><strong>标准：</strong>在宽松基础上，增加时态、介词、表达流畅度等常规检测</p>
+                                <p><strong>严格：</strong>在标准基础上，增加术语一致性、风格统一、标点规范等全面检测</p>
+                            </div>
+                        </div>
+                        <div class="setting-row model-select-row">
+                            <label for="l10nAiModel">AI模型</label>
+                            <select id="l10nAiModel">
+                                <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro - 推荐</option>
+                                <option value="deepseek-v4-flash">DeepSeek V4 Flash - 高速</option>
+                            </select>
+                        </div>
+                        <p class="model-hint">💡 当前选择的模型将用于检测</p>
+                        <button class="action-btn primary" id="l10nCheckBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M9 12l2 2 4-4"/>
+                            </svg>
+                            开始检测
+                        </button>
+                    </div>
+
+                    <div class="progress-panel" id="l10nProgressSection" style="display: none;">
+                        <h3>检测进度</h3>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="l10nProgressFill"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="l10nProgressText">0 / 0</span>
+                            <span id="l10nProgressPercent">0%</span>
+                        </div>
+                        <div class="progress-info" id="l10nProgressInfo"></div>
+                        
+                        <div class="check-preview">
+                            <h4>实时检测内容</h4>
+                            <div class="check-list" id="l10nCheckList"></div>
+                        </div>
+                    </div>
+
+                    <div class="results-panel" id="l10nResults" style="display: none;">
+                        <h3>检测结果</h3>
+                        <div class="results-summary">
+                            <div class="summary-item">
+                                <span class="summary-label">检测文本数</span>
+                                <span class="summary-value" id="l10nTotalChecked">0</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">发现问题数</span>
+                                <span class="summary-value error" id="l10nTotalIssues">0</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">通过率</span>
+                                <span class="summary-value success" id="l10nPassRate">0%</span>
+                            </div>
+                        </div>
+                        <div class="results-table-container">
+                            <table class="results-table" id="l10nResultsTable">
+                                <thead>
+                                    <tr>
+                                        <th>原文</th>
+                                        <th>译文</th>
+                                        <th>错误问题说明</th>
+                                        <th>修正后标准文本</th>
+                                        <th>优化理由</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="l10nResultsBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="download-buttons">
+                            <button class="action-btn primary" id="l10nDownloadBtn">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                    <polyline points="7 10 12 15 17 10"/>
+                                    <line x1="12" y1="15" x2="12" y2="3"/>
+                                </svg>
+                                下载检测报告
+                            </button>
+                            <button class="action-btn secondary" id="l10nDownloadGlossaryBtn">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 20H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v3"/>
+                                    <path d="M16 20V7L6 13"/>
+                                </svg>
+                                下载术语表
+                            </button>
+                        </div>
+                        <button class="action-btn secondary" id="l10nResetBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                <path d="M3 3v5h5"/>
+                            </svg>
+                            检测新文件
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-content" id="glossary-tool" style="display: none;">
+                <div class="tool-header">
+                    <h2>📚 术语表</h2>
+                    <p>提取和管理游戏术语</p>
+                </div>
+                
+                <div class="tool-body">
+                    <div class="upload-section-double">
+                        <div class="upload-card">
+                            <h3>提取术语表</h3>
+                            <p class="upload-hint">从文件中自动提取术语</p>
+                            <div class="upload-area-small" id="glossaryExtractArea">
+                                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                    <polyline points="17 8 12 3 7 8"/>
+                                    <line x1="12" y1="3" x2="12" y2="15"/>
+                                </svg>
+                                <p>拖拽或点击上传</p>
+                                <input type="file" id="glossaryExtractInput" accept=".csv,.xlsx,.xls" hidden>
+                            </div>
+                        </div>
+                        
+                        <div class="upload-card">
+                            <h3>上传已有术语表</h3>
+                            <p class="upload-hint">上传已有的术语表文件</p>
+                            <div class="upload-area-small" id="glossaryUploadArea">
+                                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                    <polyline points="17 8 12 3 7 8"/>
+                                    <line x1="12" y1="3" x2="12" y2="15"/>
+                                </svg>
+                                <p>拖拽或点击上传</p>
+                                <input type="file" id="glossaryUploadInput" accept=".csv,.xlsx,.xls" hidden>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="info-panel" id="glossaryInfo" style="display: none;">
+                        <h3>当前术语表</h3>
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">术语数量</span>
+                                <span class="info-value highlight" id="glossaryTermCount">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">来源文件</span>
+                                <span class="info-value" id="glossarySourceFile">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="terms-panel" id="glossaryTerms" style="display: none;">
+                        <h3>术语列表</h3>
+                        <div class="terms-table-container">
+                            <table class="terms-table" id="glossaryTermsTable">
+                                <thead>
+                                    <tr>
+                                        <th>术语</th>
+                                        <th>类型</th>
+                                        <th>出现次数</th>
+                                        <th>翻译</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="glossaryTermsBody"></tbody>
+                            </table>
+                        </div>
+                        <button class="action-btn primary" id="glossaryDownloadBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            下载术语表
+                        </button>
+                        <button class="action-btn secondary" id="glossaryResetBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                <path d="M3 3v5h5"/>
+                            </svg>
+                            重置
+                        </button>
+                    </div>
+
+                    <div class="progress-panel" id="glossaryProgressSection" style="display: none;">
+                        <h3>提取进度</h3>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="glossaryProgressFill"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="glossaryProgressText">0 / 0</span>
+                            <span id="glossaryProgressPercent">0%</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <div class="modal" id="projectModal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">添加项目</h3>
+                <button class="icon-btn close-btn" id="closeModalBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="projectName">项目名称</label>
+                    <input type="text" id="projectName" placeholder="例如：佣兵小镇">
+                </div>
+                <div class="form-group">
+                    <label for="projectRules">翻译标准</label>
+                    <textarea id="projectRules" placeholder="输入项目的翻译标准和规范..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="action-btn secondary" id="cancelProjectBtn">取消</button>
+                <button class="action-btn primary" id="saveProjectBtn">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

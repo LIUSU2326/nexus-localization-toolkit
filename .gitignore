@@ -1,0 +1,7 @@
+.trae/
+node_modules/
+*.log
+.DS_Store
+*.tmp
+.vscode/
+.idea/
