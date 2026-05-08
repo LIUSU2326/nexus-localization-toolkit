@@ -91,6 +91,72 @@ function waitForNetwork() {
     });
 }
 
+const PLATFORM_CONFIG = {
+    deepseek: { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', models: [
+        { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+        { id: 'deepseek-chat', name: 'DeepSeek Chat' }
+    ]},
+    openai: { name: 'OpenAI', baseUrl: 'https://api.openai.com', models: [
+        { id: 'gpt-4o', name: 'GPT-4o' },
+        { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
+        { id: 'gpt-4-turbo', name: 'GPT-4 Turbo' },
+        { id: 'gpt-4', name: 'GPT-4' },
+        { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo' }
+    ]},
+    gemini: { name: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', models: [
+        { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro' },
+        { id: 'gemini-3.1-pro-exp', name: 'Gemini 3.1 Pro Exp' },
+        { id: 'gemini-3.1-flash', name: 'Gemini 3.1 Flash' },
+        { id: 'gemini-3.1-flash-exp', name: 'Gemini 3.1 Flash Exp' },
+        { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+        { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+        { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash-Lite' }
+    ]},
+    azure: { name: 'Azure OpenAI', baseUrl: 'https://YOUR_RESOURCE_NAME.openai.azure.com', models: [
+        { id: 'gpt-4o', name: 'GPT-4o' },
+        { id: 'gpt-4', name: 'GPT-4' },
+        { id: 'gpt-4-turbo', name: 'GPT-4 Turbo' },
+        { id: 'gpt-35-turbo', name: 'GPT-3.5 Turbo' }
+    ]},
+    aliyun: { name: '阿里云通义千问', baseUrl: 'https://dashscope.aliyuncs.com/api/v1', models: [
+        { id: 'qwen-plus', name: '通义千问 Plus' },
+        { id: 'qwen-turbo', name: '通义千问 Turbo' },
+        { id: 'qwen-max', name: '通义千问 Max' },
+        { id: 'qwen-long', name: '通义千问 Long' }
+    ]},
+    tencent: { name: '腾讯云混元', baseUrl: 'https://hunyuan.cloud.tencent.com/api/v1', models: [
+        { id: 'hunyuan-pro', name: '混元 Pro' },
+        { id: 'hunyuan-standard', name: '混元 Standard' },
+        { id: 'hunyuan-lite', name: '混元 Lite' }
+    ]},
+    baidu: { name: '百度文心一言', baseUrl: 'https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/chat', models: [
+        { id: 'ernie-4.0-8k', name: '文心一言 4.0 8K' },
+        { id: 'ernie-3.5-8k', name: '文心一言 3.5 8K' },
+        { id: 'ernie-speed-8k', name: '文心一言 Speed 8K' },
+        { id: 'ernie-speed-128k', name: '文心一言 Speed 128K' }
+    ]},
+    doubao: { name: '字节跳动豆包', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', models: [
+        { id: 'doubao-pro', name: '豆包 Pro' },
+        { id: 'doubao-lite', name: '豆包 Lite' },
+        { id: 'doubao-endpoint', name: '豆包 Endpoint' }
+    ]},
+    qwen: { name: '通义千问 API', baseUrl: 'https://api.qwenlm.com/v1', models: [
+        { id: 'qwen-2.5-72b-chat', name: 'Qwen 2.5 72B' },
+        { id: 'qwen-2.5-14b-chat', name: 'Qwen 2.5 14B' },
+        { id: 'qwen-2.5-7b-chat', name: 'Qwen 2.5 7B' },
+        { id: 'qwen-2-72b-chat', name: 'Qwen 2 72B' }
+    ]},
+    youdao: { name: '有道智云', baseUrl: 'https://openapi.youdao.com/api', models: [
+        { id: 'general', name: '通用翻译' },
+        { id: 'game', name: '游戏领域' },
+        { id: 'computers', name: '计算机领域' },
+        { id: 'medicine', name: '医学领域' },
+        { id: 'finance', name: '金融领域' }
+    ]},
+    custom: { name: '自定义平台', baseUrl: '', models: [] }
+};
+
 function initApiConfig() {
     const providerSelect = document.getElementById('apiProvider');
     const baseUrlInput = document.getElementById('baseUrl');
@@ -104,14 +170,19 @@ function initApiConfig() {
 
     loadApiConfig();
 
-    // 切换平台时更新 UI
     providerSelect.addEventListener('change', () => {
-        if (providerSelect.value === 'deepseek') {
-            baseUrlInput.value = 'https://api.deepseek.com';
-            baseUrlRow.style.display = 'none';
-        } else {
-            baseUrlRow.style.display = 'flex';
+        const platform = PLATFORM_CONFIG[providerSelect.value];
+        if (platform) {
+            baseUrlInput.value = platform.baseUrl;
         }
+        
+        if (providerSelect.value === 'custom') {
+            baseUrlRow.style.display = 'flex';
+        } else {
+            baseUrlRow.style.display = 'none';
+        }
+        
+        updateModelSelect(providerSelect.value);
     });
 
     toggleBtn.addEventListener('click', () => {
@@ -166,10 +237,12 @@ function initApiConfig() {
                 apiKeyInput.value = config.apiKey || '';
                 baseUrlInput.value = config.baseUrl || 'https://api.deepseek.com';
                 
-                if (config.provider === 'deepseek') {
-                    baseUrlRow.style.display = 'none';
-                } else {
+                updateModelSelect(config.provider || 'deepseek');
+                
+                if (config.provider === 'custom') {
                     baseUrlRow.style.display = 'flex';
+                } else {
+                    baseUrlRow.style.display = 'none';
                 }
             } catch (e) {
                 console.error('Failed to load API config:', e);
@@ -193,10 +266,83 @@ function getApiConfig() {
 }
 
 function getApiBaseUrl(provider, configBaseUrl) {
-    if (provider === 'deepseek') {
-        return 'https://api.deepseek.com';
+    const platform = PLATFORM_CONFIG[provider];
+    if (platform && platform.baseUrl) {
+        return platform.baseUrl;
     }
     return configBaseUrl || 'https://api.deepseek.com';
+}
+
+async function callAPI(prompt, model, provider) {
+    const apiConfig = getApiConfig();
+    const baseUrl = getApiBaseUrl(apiConfig.provider, apiConfig.baseUrl);
+    
+    if (!apiConfig.apiKey) {
+        throw new Error('请先配置 API Key');
+    }
+
+    console.log('📡 准备调用API');
+    console.log('📍 Base URL:', baseUrl);
+    console.log('🧠 Model:', model);
+    console.log('🔑 API Key长度:', apiConfig.apiKey.length);
+    
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiConfig.apiKey}`
+        },
+        body: JSON.stringify({
+            model: model,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.3
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.choices[0].message.content.trim();
+}
+
+function updateModelSelect(provider) {
+    const aiModelSelect = document.getElementById('aiModel');
+    const l10nAiModelSelect = document.getElementById('l10nAiModel');
+    const glossaryModelSelect = document.getElementById('glossaryModel');
+    const globalAiModelSelect = document.getElementById('globalAiModel');
+    
+    const platform = PLATFORM_CONFIG[provider];
+    if (!platform) return;
+    
+    const models = platform.models;
+    
+    if (models.length > 0) {
+        [aiModelSelect, l10nAiModelSelect, glossaryModelSelect, globalAiModelSelect].forEach(select => {
+            if (select) {
+                const currentValue = select.value;
+                select.innerHTML = models.map(model => {
+                    const isSelected = currentValue === model.id;
+                    return `<option value="${model.id}" ${isSelected ? 'selected' : ''}>${model.name} (${model.id})</option>`;
+                }).join('');
+            }
+        });
+    }
+}
+
+function syncGlobalModel() {
+    const globalAiModelSelect = document.getElementById('globalAiModel');
+    const aiModelSelect = document.getElementById('aiModel');
+    const l10nAiModelSelect = document.getElementById('l10nAiModel');
+    const glossaryModelSelect = document.getElementById('glossaryModel');
+    
+    globalAiModelSelect.addEventListener('change', () => {
+        const selectedModel = globalAiModelSelect.value;
+        if (aiModelSelect) aiModelSelect.value = selectedModel;
+        if (l10nAiModelSelect) l10nAiModelSelect.value = selectedModel;
+        if (glossaryModelSelect) glossaryModelSelect.value = selectedModel;
+    });
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -226,6 +372,7 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     initApiConfig();
+    syncGlobalModel();
 
     if ('Notification' in window) {
         Notification.requestPermission();
@@ -237,6 +384,54 @@ document.addEventListener('DOMContentLoaded', function() {
     initL10nCheckTool();
     initGlossaryTool();
 });
+
+function encodeCSVContent(content, encoding) {
+    let bytes;
+    let type;
+
+    switch (encoding.toLowerCase()) {
+        case 'gbk':
+            if (typeof iconv !== 'undefined' && iconv.encode) {
+                bytes = iconv.encode(content, 'GBK');
+            } else {
+                bytes = new TextEncoder().encode(content);
+            }
+            type = 'text/csv;charset=GBK';
+            break;
+        case 'gb2312':
+            if (typeof iconv !== 'undefined' && iconv.encode) {
+                bytes = iconv.encode(content, 'GB2312');
+            } else {
+                bytes = new TextEncoder().encode(content);
+            }
+            type = 'text/csv;charset=GB2312';
+            break;
+        case 'big5':
+            if (typeof iconv !== 'undefined' && iconv.encode) {
+                bytes = iconv.encode(content, 'Big5');
+            } else {
+                bytes = new TextEncoder().encode(content);
+            }
+            type = 'text/csv;charset=Big5';
+            break;
+        case 'utf-16':
+            const utf16Buffer = new ArrayBuffer(content.length * 2);
+            const utf16View = new Uint16Array(utf16Buffer);
+            for (let i = 0; i < content.length; i++) {
+                utf16View[i] = content.charCodeAt(i);
+            }
+            bytes = utf16Buffer;
+            type = 'text/csv;charset=UTF-16';
+            break;
+        case 'utf-8':
+        default:
+            bytes = new TextEncoder().encode(content);
+            type = 'text/csv;charset=UTF-8';
+            break;
+    }
+
+    return { bytes, type };
+}
 
 function initSplitTool() {
     const uploadArea = document.getElementById('splitUploadArea');
@@ -324,6 +519,7 @@ function initSplitTool() {
 
     async function startSplit() {
         const rowsPerFile = parseInt(rowsPerFileInput.value) || 1;
+        const outputEncoding = document.getElementById('splitEncoding').value;
         const totalRows = sheetData.length;
         const totalFiles = Math.ceil(totalRows / rowsPerFile);
 
@@ -343,8 +539,9 @@ function initSplitTool() {
 
                 const ws = XLSX.utils.aoa_to_sheet(chunkData);
                 const csvContent = XLSX.utils.sheet_to_csv(ws);
-                const utf8Bytes = new TextEncoder().encode(csvContent);
-                const blob = new Blob([utf8Bytes], { type: 'text/csv;charset=utf-8' });
+                
+                const { bytes, type } = encodeCSVContent(csvContent, outputEncoding);
+                const blob = new Blob([bytes], { type: type });
 
                 const fileName = `${originalFileName}_${fileIndex}.csv`;
                 splitFiles.push({ name: fileName, blob: blob });
@@ -466,8 +663,16 @@ function initTranslateTool() {
     const closeModalBtn = document.getElementById('closeModalBtn');
     const saveProjectBtn = document.getElementById('saveProjectBtn');
     const cancelProjectBtn = document.getElementById('cancelProjectBtn');
+    const viewProjectBtn = document.getElementById('viewProjectBtn');
+    const editProjectBtn = document.getElementById('editProjectBtn');
     const progressSection = document.getElementById('translateProgressSection');
     const downloadSection = document.getElementById('translateDownloadSection');
+    const pauseBtn = document.getElementById('translatePauseBtn');
+    const resumeBtn = document.getElementById('translateResumeBtn');
+    const downloadProgressBtn = document.getElementById('translateDownloadProgressBtn');
+
+    let isPaused = false;
+    let resumeResolve = null;
 
     const DEFAULT_PROJECTS = [
         {
@@ -525,14 +730,92 @@ function initTranslateTool() {
     closeModalBtn.addEventListener('click', () => closeModal());
     cancelProjectBtn.addEventListener('click', () => closeModal());
     saveProjectBtn.addEventListener('click', saveProject);
+    viewProjectBtn.addEventListener('click', toggleViewMode);
+    editProjectBtn.addEventListener('click', toggleEditMode);
     translateBtn.addEventListener('click', startTranslate);
     downloadBtn.addEventListener('click', downloadTranslated);
     resetBtn.addEventListener('click', resetTranslateTool);
     confirmColumnBtn.addEventListener('click', confirmColumnSelection);
+    pauseBtn.addEventListener('click', pauseTranslate);
+    resumeBtn.addEventListener('click', resumeTranslate);
+    downloadProgressBtn.addEventListener('click', downloadCurrentProgress);
 
     projectModal.addEventListener('click', (e) => {
         if (e.target === projectModal) closeModal();
     });
+
+    function pauseTranslate() {
+        isPaused = true;
+        pauseBtn.style.display = 'none';
+        resumeBtn.style.display = 'inline-flex';
+        downloadProgressBtn.style.display = 'inline-flex';
+        setStatus('warning', '翻译已暂停', '点击"继续"按钮恢复翻译');
+        
+        if (translatedDataLocal && translatedDataLocal.length > 0) {
+            saveTranslationProgress({
+                fileName: originalFileName,
+                totalRows: sheetData.length,
+                currentRow: sheetData.length,
+                translatedData: translatedDataLocal,
+                successCount: successCount,
+                failCount: failCount,
+                selectedColumns: selectedColumns,
+                targetLang: document.getElementById('targetLang').value
+            });
+            console.log('💾 已保存当前翻译进度');
+        }
+    }
+
+    function resumeTranslate() {
+        isPaused = false;
+        pauseBtn.style.display = 'inline-flex';
+        resumeBtn.style.display = 'none';
+        downloadProgressBtn.style.display = 'none';
+        hideStatus();
+        if (resumeResolve) {
+            resumeResolve();
+            resumeResolve = null;
+        }
+    }
+
+    function waitForResume() {
+        return new Promise(resolve => {
+            resumeResolve = resolve;
+        });
+    }
+
+    async function downloadCurrentProgress() {
+        let dataToDownload = translatedData;
+        
+        if (!dataToDownload) {
+            const saved = loadTranslationProgress();
+            if (saved) {
+                dataToDownload = saved.translatedData;
+            }
+        }
+        
+        if (!dataToDownload) {
+            alert('没有可下载的进度数据');
+            return;
+        }
+
+        const ws = XLSX.utils.aoa_to_sheet(dataToDownload);
+        const csvContent = XLSX.utils.sheet_to_csv(ws);
+        const utf8Bytes = new TextEncoder().encode(csvContent);
+        const blob = new Blob([utf8Bytes], { type: 'text/csv;charset=utf-8' });
+
+        const fileName = `${originalFileName}_progress.csv`;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        setStatus('success', '进度文件已下载', fileName);
+    }
 
     function loadProjects() {
         const stored = localStorage.getItem('translationProjects');
@@ -559,15 +842,24 @@ function initTranslateTool() {
             div.innerHTML = `
                 <div class="project-info">
                     <span class="project-name">${project.name}</span>
+                    <span class="project-hint">点击选择 | 双击编辑</span>
                 </div>
                 <div class="project-actions">
-                    <button class="icon-btn-small edit-btn" data-id="${project.id}" title="编辑">
+                    <button class="action-btn mini" data-id="${project.id}" data-action="view">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                            <circle cx="12" cy="12" r="3"/>
+                        </svg>
+                        <span>查看</span>
+                    </button>
+                    <button class="action-btn mini primary" data-id="${project.id}" data-action="edit">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                             <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                         </svg>
+                        <span>编辑</span>
                     </button>
-                    <button class="icon-btn-small delete-btn ${project.id === 'yongbingxiaozhen' ? 'disabled' : ''}" data-id="${project.id}" title="删除">
+                    <button class="action-btn mini danger ${project.id === 'yongbingxiaozhen' ? 'disabled' : ''}" data-id="${project.id}" data-action="delete">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <polyline points="3 6 5 6 21 6"/>
                             <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -577,17 +869,34 @@ function initTranslateTool() {
             `;
 
             div.addEventListener('click', (e) => {
-                if (e.target.closest('.edit-btn')) {
-                    editProject(project.id);
-                } else if (e.target.closest('.delete-btn') && project.id !== 'yongbingxiaozhen') {
-                    deleteProject(project.id);
-                } else if (!e.target.closest('.project-actions')) {
+                const actionBtn = e.target.closest('[data-action]');
+                if (actionBtn) {
+                    const action = actionBtn.dataset.action;
+                    if (action === 'view') {
+                        viewProject(project.id);
+                    } else if (action === 'edit') {
+                        editProject(project.id);
+                    } else if (action === 'delete' && project.id !== 'yongbingxiaozhen') {
+                        deleteProject(project.id);
+                    }
+                } else {
                     selectProject(project.id);
                 }
             });
 
+            div.addEventListener('dblclick', () => {
+                editProject(project.id);
+            });
+
             projectList.appendChild(div);
         });
+    }
+
+    function viewProject(id) {
+        const project = projects.find(p => p.id === id);
+        if (project) {
+            openModal(project, true);
+        }
     }
 
     function selectProject(id) {
@@ -595,12 +904,47 @@ function initTranslateTool() {
         renderProjects();
     }
 
-    function openModal(project = null) {
-        document.getElementById('modalTitle').textContent = project ? '编辑项目' : '添加项目';
+    function openModal(project = null, viewOnly = false) {
+        const isEdit = project !== null;
+        document.getElementById('modalTitle').textContent = viewOnly ? '查看项目' : (isEdit ? '编辑项目' : '添加项目');
         document.getElementById('projectName').value = project ? project.name : '';
         document.getElementById('projectRules').value = project ? project.rules : '';
         projectModal.dataset.editId = project ? project.id : '';
+        
+        const nameInput = document.getElementById('projectName');
+        const rulesTextarea = document.getElementById('projectRules');
+        
+        if (viewOnly && project) {
+            nameInput.disabled = true;
+            rulesTextarea.disabled = true;
+            saveProjectBtn.style.display = 'none';
+            viewProjectBtn.style.display = 'none';
+            editProjectBtn.style.display = 'inline-flex';
+        } else {
+            nameInput.disabled = false;
+            rulesTextarea.disabled = false;
+            saveProjectBtn.style.display = 'inline-flex';
+            viewProjectBtn.style.display = 'none';
+            editProjectBtn.style.display = 'none';
+        }
+        
         projectModal.style.display = 'flex';
+    }
+
+    function toggleViewMode() {
+        const editId = projectModal.dataset.editId;
+        if (editId) {
+            const project = projects.find(p => p.id === editId);
+            openModal(project, true);
+        }
+    }
+
+    function toggleEditMode() {
+        const editId = projectModal.dataset.editId;
+        if (editId) {
+            const project = projects.find(p => p.id === editId);
+            openModal(project, false);
+        }
     }
 
     function closeModal() {
@@ -742,6 +1086,8 @@ function initTranslateTool() {
     async function startTranslate() {
         const targetLang = document.getElementById('targetLang').value;
 
+        console.log('🚀 开始翻译', { targetLang, currentProject: currentProject?.name, selectedColumns, sheetDataLength: sheetData?.length });
+
         if (!currentProject) {
             alert('请先选择游戏项目');
             return;
@@ -749,6 +1095,12 @@ function initTranslateTool() {
 
         if (selectedColumns.length === 0) {
             alert('请先选择要翻译的列');
+            return;
+        }
+
+        if (!sheetData || sheetData.length === 0) {
+            console.error('❌ sheetData为空');
+            alert('没有可翻译的数据');
             return;
         }
 
@@ -760,6 +1112,8 @@ function initTranslateTool() {
 
         const totalRows = sheetData.length;
         const totalCells = (totalRows - 1) * selectedColumns.length;
+        
+        console.log(`📈 预计翻译 ${totalCells} 个单元格 (共 ${totalRows} 行, ${selectedColumns.length} 列)`);
 
         // 创建新的数据结构：保留原文，在旁边添加译文列
         let translatedDataLocal = [];
@@ -836,11 +1190,22 @@ function initTranslateTool() {
         setStatus('processing', '正在翻译文本...', `预计翻译 ${totalCells} 个单元格`);
 
         try {
+            const concurrency = parseInt(document.getElementById('translateConcurrency').value) || 5;
+            
+            console.log('📊 翻译任务统计:', { totalRows, startRow, selectedColumns });
+            
+            // 收集所有需要翻译的任务
+            const translationTasks = [];
+            let filteredEmpty = 0;
+            let filteredSpecial = 0;
+            
             for (let i = startRow; i < totalRows; i++) {
-                await waitForNetwork();
-
                 const row = sheetData[i];
-
+                if (!row) {
+                    console.log(`⚠️ 第 ${i} 行为空`);
+                    continue;
+                }
+                
                 for (let j = 0; j < selectedColumns.length; j++) {
                     const originalColIndex = selectedColumns[j];
                     const cell = row[originalColIndex];
@@ -857,36 +1222,78 @@ function initTranslateTool() {
                         }
                     }
                     
-                    if (typeof cell === 'string' && cell.trim() && !isSpecialCode(cell)) {
-                        const translated = await translateTextWithRetry(cell, 'zh-CN', targetLang, currentProject.rules);
-                        if (!translated.startsWith('[翻译失败]')) {
-                            successCount++;
-                        } else {
-                            failCount++;
-                        }
-                        translatedDataLocal[i][targetColIndex] = translated;
-                        translateCount++;
-
-                        addTranslationItem(translationList, cell, translated, i, originalColIndex);
+                    if (typeof cell !== 'string') {
+                        filteredEmpty++;
+                        console.log(`🔍 过滤非字符串: 行${i}, 列${originalColIndex}, 值:`, cell);
+                    } else if (!cell.trim()) {
+                        filteredEmpty++;
+                    } else if (isSpecialCode(cell)) {
+                        filteredSpecial++;
+                        console.log(`🔍 过滤特殊代码: 行${i}, 列${originalColIndex}, 值: "${cell}"`);
+                    } else {
+                        translationTasks.push({
+                            rowIndex: i,
+                            colIndex: originalColIndex,
+                            targetColIndex: targetColIndex,
+                            text: cell
+                        });
                     }
                 }
-
-                const progress = Math.round(((i + 1) / totalRows) * 100);
-                updateTranslateProgress(i + 1, totalRows, progress);
-                document.getElementById('translateProgressInfo').textContent = `正在翻译第 ${i + 1} 行... (已翻译 ${translateCount} 个)`;
-
-                if (i % 10 === 0) {
-                    saveTranslationProgress({
-                        fileName: originalFileName,
-                        totalRows: totalRows,
-                        currentRow: i + 1,
-                        translatedData: translatedDataLocal,
-                        successCount: successCount,
-                        failCount: failCount,
-                        selectedColumns: selectedColumns,
-                        targetLang: targetLang
-                    });
-                }
+            }
+            
+            console.log(`✅ 收集到 ${translationTasks.length} 个翻译任务 (过滤空值: ${filteredEmpty}, 过滤特殊代码: ${filteredSpecial})`);
+            
+            // 使用并发池处理翻译任务
+            let completedCount = 0;
+            const totalTasks = translationTasks.length;
+            
+            async function processBatch(tasks) {
+                const batchPromises = tasks.map(async (task) => {
+                    while (isPaused) {
+                        await waitForResume();
+                    }
+                    
+                    await waitForNetwork();
+                    
+                    const translated = await translateTextWithRetry(task.text, 'zh-CN', targetLang, currentProject.rules);
+                    if (!translated.startsWith('[翻译失败]')) {
+                        successCount++;
+                    } else {
+                        failCount++;
+                    }
+                    translatedDataLocal[task.rowIndex][task.targetColIndex] = translated;
+                    translateCount++;
+                    completedCount++;
+                    
+                    addTranslationItem(translationList, task.text, translated, task.rowIndex, task.colIndex);
+                    
+                    // 更新进度
+                    const progress = Math.round((completedCount / totalTasks) * 100);
+                    updateTranslateProgress(completedCount, totalTasks, progress);
+                    document.getElementById('translateProgressInfo').textContent = `正在翻译... (已完成 ${completedCount}/${totalTasks} 个)`;
+                    
+                    // 每10个保存一次进度
+                    if (completedCount % 10 === 0) {
+                        saveTranslationProgress({
+                            fileName: originalFileName,
+                            totalRows: totalRows,
+                            currentRow: Math.max(...translationTasks.slice(0, completedCount).map(t => t.rowIndex)) + 1,
+                            translatedData: translatedDataLocal,
+                            successCount: successCount,
+                            failCount: failCount,
+                            selectedColumns: selectedColumns,
+                            targetLang: targetLang
+                        });
+                    }
+                });
+                
+                await Promise.all(batchPromises);
+            }
+            
+            // 分批处理任务
+            for (let i = 0; i < translationTasks.length; i += concurrency) {
+                const batch = translationTasks.slice(i, i + concurrency);
+                await processBatch(batch);
             }
 
             clearTranslationProgress();
@@ -1236,6 +1643,9 @@ function initL10nCheckTool() {
     const confirmColumnBtn = document.getElementById('l10nConfirmColumnBtn');
     const progressSection = document.getElementById('l10nProgressSection');
     const resultsSection = document.getElementById('l10nResults');
+    const pauseBtn = document.getElementById('l10nPauseBtn');
+    const resumeBtn = document.getElementById('l10nResumeBtn');
+    const downloadProgressBtn = document.getElementById('l10nDownloadProgressBtn');
 
     let sheetData = null;
     let originalFileName = '';
@@ -1243,8 +1653,82 @@ function initL10nCheckTool() {
     let targetColumn = null;
     let checkResults = [];
     let glossaryData = [];
+    let isPaused = false;
+    let resumeResolve = null;
 
     const L10N_PROGRESS_KEY = 'l10n_check_progress';
+
+    pauseBtn.addEventListener('click', pauseCheck);
+    resumeBtn.addEventListener('click', resumeCheck);
+    downloadProgressBtn.addEventListener('click', downloadCurrentCheckProgress);
+
+    function pauseCheck() {
+        isPaused = true;
+        pauseBtn.style.display = 'none';
+        resumeBtn.style.display = 'inline-flex';
+        downloadProgressBtn.style.display = 'inline-flex';
+        setStatus('warning', '检测已暂停', '点击"继续"按钮恢复检测');
+    }
+
+    function resumeCheck() {
+        isPaused = false;
+        pauseBtn.style.display = 'inline-flex';
+        resumeBtn.style.display = 'none';
+        downloadProgressBtn.style.display = 'none';
+        hideStatus();
+        if (resumeResolve) {
+            resumeResolve();
+            resumeResolve = null;
+        }
+    }
+
+    function waitForResume() {
+        return new Promise(resolve => {
+            resumeResolve = resolve;
+        });
+    }
+
+    async function downloadCurrentCheckProgress() {
+        if (checkResults.length === 0) {
+            const saved = loadL10nCheckProgress();
+            if (saved) {
+                checkResults = saved.results;
+            } else {
+                alert('没有可下载的检测结果');
+                return;
+            }
+        }
+
+        const header = ['原文', '译文', '问题类型', '问题描述', '建议修改'];
+        const csvData = [header];
+        
+        checkResults.forEach(result => {
+            csvData.push([
+                result.source || '',
+                result.target || '',
+                result.type || '',
+                result.description || '',
+                result.suggestion || ''
+            ]);
+        });
+
+        const ws = XLSX.utils.aoa_to_sheet(csvData);
+        const csvContent = XLSX.utils.sheet_to_csv(ws);
+        const utf8Bytes = new TextEncoder().encode(csvContent);
+        const blob = new Blob([utf8Bytes], { type: 'text/csv;charset=utf-8' });
+
+        const fileName = `${originalFileName}_check_results.csv`;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        setStatus('success', '检测结果已下载', fileName);
+    }
 
     uploadArea.addEventListener('click', () => fileInput.click());
 
@@ -1522,9 +2006,11 @@ function initL10nCheckTool() {
         setStatus('processing', '正在检测文本...', `预计检测 ${totalRows} 条文本`);
 
         try {
+            const concurrency = parseInt(document.getElementById('l10nConcurrency').value) || 5;
+            
+            // 收集所有需要检测的任务
+            const checkTasks = [];
             for (let i = startRow; i < sheetData.length; i++) {
-                await waitForNetwork();
-
                 const row = sheetData[i];
                 const sourceText = row[sourceColumn];
                 const targetText = row[targetColumn];
@@ -1532,15 +2018,34 @@ function initL10nCheckTool() {
                 if (sourceText && targetText && 
                     typeof sourceText === 'string' && sourceText.trim() &&
                     typeof targetText === 'string' && targetText.trim()) {
-
-                    const result = await checkTextPair(sourceText, targetText, scene, strictness);
+                    checkTasks.push({
+                        rowIndex: i,
+                        sourceText: sourceText,
+                        targetText: targetText
+                    });
+                }
+            }
+            
+            // 使用并发池处理检测任务
+            let completedCount = 0;
+            const totalTasks = checkTasks.length;
+            
+            async function processCheckBatch(tasks) {
+                const batchPromises = tasks.map(async (task) => {
+                    while (isPaused) {
+                        await waitForResume();
+                    }
+                    
+                    await waitForNetwork();
+                    
+                    const result = await checkTextPair(task.sourceText, task.targetText, scene, strictness);
                     const hasIssues = result && result.issues && result.issues.length > 0;
                     
                     if (hasIssues) {
                         result.issues.forEach(issue => {
                             checkResults.push({
-                                source: sourceText,
-                                target: targetText,
+                                source: task.sourceText,
+                                target: task.targetText,
                                 issue: issue.issue,
                                 corrected: issue.corrected,
                                 reason: issue.reason
@@ -1548,25 +2053,36 @@ function initL10nCheckTool() {
                         });
                     }
 
-                    addToGlossary(sourceText, targetText);
+                    addToGlossary(task.sourceText, task.targetText);
                     checkedCount++;
+                    completedCount++;
 
-                    addCheckItem(checkList, sourceText, targetText, hasIssues, i);
-                }
-
-                if (i % 10 === 0) {
-                    saveL10nProgress({
-                        fileName: originalFileName,
-                        currentRow: i,
-                        checkResults: checkResults,
-                        glossaryData: glossaryData,
-                        checkedCount: checkedCount
-                    });
-                }
-
-                const progress = Math.round(((i) / totalRows) * 100);
-                updateProgress(i, totalRows, progress);
-                document.getElementById('l10nProgressInfo').textContent = `正在检测第 ${i} 行... (已检测 ${checkedCount} 条，发现 ${checkResults.length} 个问题)`;
+                    addCheckItem(checkList, task.sourceText, task.targetText, hasIssues, task.rowIndex);
+                    
+                    // 更新进度
+                    const progress = Math.round((completedCount / totalTasks) * 100);
+                    updateProgress(completedCount, totalTasks, progress);
+                    document.getElementById('l10nProgressInfo').textContent = `正在检测... (已完成 ${completedCount}/${totalTasks} 条，发现 ${checkResults.length} 个问题)`;
+                    
+                    // 每10个保存一次进度
+                    if (completedCount % 10 === 0) {
+                        saveL10nProgress({
+                            fileName: originalFileName,
+                            currentRow: task.rowIndex,
+                            checkResults: checkResults,
+                            glossaryData: glossaryData,
+                            checkedCount: checkedCount
+                        });
+                    }
+                });
+                
+                await Promise.all(batchPromises);
+            }
+            
+            // 分批处理任务
+            for (let i = 0; i < checkTasks.length; i += concurrency) {
+                const batch = checkTasks.slice(i, i + concurrency);
+                await processCheckBatch(batch);
             }
 
             clearL10nProgress();
@@ -1918,17 +2434,49 @@ function initGlossaryTool() {
     const extractInput = document.getElementById('glossaryExtractInput');
     const uploadArea = document.getElementById('glossaryUploadArea');
     const uploadInput = document.getElementById('glossaryUploadInput');
-    const infoSection = document.getElementById('glossaryInfo');
+    const infoPanel = document.getElementById('glossaryInfo');
     const termsSection = document.getElementById('glossaryTerms');
     const progressSection = document.getElementById('glossaryProgressSection');
     const downloadBtn = document.getElementById('glossaryDownloadBtn');
     const resetBtn = document.getElementById('glossaryResetBtn');
+    const glossaryMode = document.getElementById('glossaryMode');
+    const glossaryModelRow = document.getElementById('glossaryModelRow');
+    const extractTermsBtn = document.getElementById('extractTermsBtn');
+    const extractUploadStatus = document.getElementById('extractUploadStatus');
+    const uploadGlossaryStatus = document.getElementById('uploadGlossaryStatus');
 
     let terms = [];
     let sourceFileName = '';
+    let extractFile = null;
 
-    extractArea.addEventListener('click', () => extractInput.click());
-    uploadArea.addEventListener('click', () => uploadInput.click());
+    glossaryMode.addEventListener('change', () => {
+        if (glossaryMode.value === 'ai') {
+            glossaryModelRow.style.display = 'flex';
+        } else {
+            glossaryModelRow.style.display = 'none';
+        }
+    });
+
+    if (glossaryMode.value !== 'ai') {
+        glossaryModelRow.style.display = 'none';
+    }
+
+    const rulesHeader = document.getElementById('rulesHeader');
+    const rulesContent = document.getElementById('rulesContent');
+    const formatHeader = document.getElementById('formatHeader');
+    const formatContent = document.getElementById('formatContent');
+
+    rulesHeader.addEventListener('click', () => {
+        const isExpanded = rulesContent.style.display === 'block';
+        rulesContent.style.display = isExpanded ? 'none' : 'block';
+        rulesHeader.querySelector('.collapse-icon').classList.toggle('expanded');
+    });
+
+    formatHeader.addEventListener('click', () => {
+        const isExpanded = formatContent.style.display === 'block';
+        formatContent.style.display = isExpanded ? 'none' : 'block';
+        formatHeader.querySelector('.collapse-icon').classList.toggle('expanded');
+    });
 
     extractArea.addEventListener('dragover', (e) => {
         e.preventDefault();
@@ -1944,13 +2492,13 @@ function initGlossaryTool() {
         extractArea.classList.remove('dragover');
         const files = e.dataTransfer.files;
         if (files.length > 0) {
-            extractTerms(files[0]);
+            handleExtractFileSelect(files[0]);
         }
     });
 
     extractInput.addEventListener('change', (e) => {
         if (e.target.files.length > 0) {
-            extractTerms(e.target.files[0]);
+            handleExtractFileSelect(e.target.files[0]);
         }
     });
 
@@ -1968,24 +2516,54 @@ function initGlossaryTool() {
         uploadArea.classList.remove('dragover');
         const files = e.dataTransfer.files;
         if (files.length > 0) {
-            uploadGlossary(files[0]);
+            handleUploadFileSelect(files[0]);
         }
     });
 
     uploadInput.addEventListener('change', (e) => {
         if (e.target.files.length > 0) {
-            uploadGlossary(e.target.files[0]);
+            handleUploadFileSelect(e.target.files[0]);
+        }
+    });
+
+    extractTermsBtn.addEventListener('click', () => {
+        if (extractFile) {
+            extractTermsBtn.disabled = true;
+            extractTermsBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle class="spin" cx="12" cy="12" r="10" stroke-linecap="round"/></svg> 提取中...';
+            extractTerms(extractFile);
         }
     });
 
     downloadBtn.addEventListener('click', downloadGlossary);
     resetBtn.addEventListener('click', resetTool);
 
+    function handleExtractFileSelect(file) {
+        extractFile = file;
+        sourceFileName = file.name;
+        
+        extractUploadStatus.textContent = `✓ 文件已选择: ${file.name}`;
+        extractUploadStatus.className = 'upload-status success';
+        extractTermsBtn.style.display = 'block';
+    }
+
+    function handleUploadFileSelect(file) {
+        uploadGlossaryStatus.textContent = `✓ 文件已选择: ${file.name}`;
+        uploadGlossaryStatus.className = 'upload-status success';
+        
+        setTimeout(() => {
+            uploadGlossary(file);
+        }, 500);
+    }
+
     async function extractTerms(file) {
         sourceFileName = file.name;
 
         progressSection.style.display = 'block';
         hideStatus();
+        
+        document.getElementById('glossaryProgressText').textContent = `0 / 0`;
+        document.getElementById('glossaryProgressPercent').textContent = `0%`;
+        document.getElementById('glossaryProgressFill').style.width = `0%`;
 
         setStatus('processing', '正在提取术语...', `处理文件: ${file.name}`);
 
@@ -2004,16 +2582,226 @@ function initGlossaryTool() {
                 text = XLSX.utils.sheet_to_csv(sheet);
             }
 
-            terms = extractTermsFromText(text);
+            console.log('📄 文件内容长度:', text.length);
+            
+            const extractMode = document.getElementById('glossaryMode').value;
+            const config = getApiConfig();
+            const apiKey = config.apiKey;
+            
+            console.log('🚀 提取模式:', extractMode);
+            console.log('🔑 API Key 存在:', !!apiKey);
+            console.log('🔧 配置:', config);
+            
+            if (extractMode === 'ai') {
+                console.log('🤖 进入AI提取模式');
+                if (!apiKey) {
+                    setStatus('error', '请先配置API Key', '当前选择的是AI智能提取模式，需要配置API Key才能使用。您可以：1) 在顶部API配置中配置Key；2) 切换到规则提取模式（无需API）');
+                    progressSection.style.display = 'none';
+                    extractTermsBtn.disabled = false;
+                    extractTermsBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4"/><path d="M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 0 1-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg> 开始提取术语';
+                    return;
+                }
+                
+                const model = document.getElementById('glossaryModel').value;
+                const provider = document.getElementById('apiProvider').value;
+                const apiConfig = getApiConfig();
+                const baseUrl = getApiBaseUrl(apiConfig.provider, apiConfig.baseUrl);
+                
+                console.log('🧠 使用模型:', model);
+                console.log('📍 Base URL:', baseUrl);
+                
+                const chunks = text.match(/.{1,3000}/g) || [text];
+                const totalChunks = chunks.length;
+                console.log('📊 文本分块数:', totalChunks);
+                
+                const allTerms = [];
+                const termSet = new Set();
+                
+                for (let i = 0; i < totalChunks; i++) {
+                    const chunk = chunks[i];
+                    const progress = Math.round(((i + 1) / totalChunks) * 100);
+                    
+                    document.getElementById('glossaryProgressText').textContent = `${i + 1} / ${totalChunks}`;
+                    document.getElementById('glossaryProgressPercent').textContent = `${progress}%`;
+                    document.getElementById('glossaryProgressFill').style.width = `${progress}%`;
+                    
+                    setStatus('processing', `正在提取术语... (${i + 1}/${totalChunks})`, '');
+                    console.log(`🔄 正在处理第 ${i + 1}/${totalChunks} 块`);
+                    
+                    const prompt = `请从以下文本中提取专业术语和关键词。文本可能包含游戏内容、技术文档等。
+
+文本内容：
+${chunk}
+
+请以JSON格式输出，包含以下字段：
+- "terms": 术语数组，每个术语包含：
+  - "term": 术语名称
+  - "type": 术语类型（如：专有名词、技术术语、角色名、技能名、物品名、地点名等）
+  - "description": 术语描述或含义（可选）
+
+示例输出格式：
+{
+  "terms": [
+    {"term": "角色名", "type": "角色名", "description": "游戏中的主要角色"},
+    {"term": "技能名称", "type": "技能名", "description": "角色的特殊技能"}
+  ]
+}`;
+
+                    try {
+                        const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${apiKey}`
+                            },
+                            body: JSON.stringify({
+                                model: model,
+                                messages: [{ role: 'user', content: prompt }],
+                                temperature: 0.3
+                            })
+                        });
+
+                        if (!response.ok) {
+                            const errorData = await response.json();
+                            console.error('❌ API错误:', response.status, errorData);
+                            throw new Error(`API请求失败: ${response.status} - ${errorData.error?.message || '未知错误'}`);
+                        }
+
+                        const data = await response.json();
+                        const resultText = data.choices[0].message.content.trim();
+                        console.log('✅ API响应成功');
+                        
+                        let result;
+                        try {
+                            result = JSON.parse(resultText);
+                        } catch {
+                            const match = resultText.match(/\{[\s\S]*\}/);
+                            if (match) {
+                                result = JSON.parse(match[0]);
+                            } else {
+                                console.warn('⚠️ 无法解析JSON响应，跳过此块');
+                                continue;
+                            }
+                        }
+
+                        if (result.terms && Array.isArray(result.terms)) {
+                            for (const item of result.terms) {
+                                if (item.term && !termSet.has(item.term)) {
+                                    termSet.add(item.term);
+                                    allTerms.push({
+                                        term: item.term,
+                                        type: item.type || '其他',
+                                        count: text.split(item.term).length - 1,
+                                        translation: ''
+                                    });
+                                }
+                            }
+                        }
+                    } catch (apiError) {
+                        console.error('❌ API调用失败:', apiError.message);
+                        throw apiError;
+                    }
+                    
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+                
+                terms = allTerms;
+            } else {
+                console.log('⚡ 进入规则提取模式');
+                terms = extractTermsFromText(text);
+            }
 
             displayTerms();
             setStatus('success', '术语提取完成！', `共提取 ${terms.length} 个术语`);
 
         } catch (error) {
-            console.error('Extract error:', error);
+            console.error('❌ 提取错误:', error);
             setStatus('error', '提取失败', error.message);
             progressSection.style.display = 'none';
+        } finally {
+            extractTermsBtn.disabled = false;
+            extractTermsBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4"/><path d="M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 0 1-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg> 开始提取术语';
         }
+    }
+
+    async function extractTermsWithAI(text) {
+        const config = getApiConfig();
+        const apiKey = config.apiKey;
+        if (!apiKey) {
+            throw new Error('请先配置API Key');
+        }
+
+        const model = document.getElementById('glossaryModel').value;
+        const provider = document.getElementById('apiProvider').value;
+        
+        console.log('🔮 开始AI提取术语');
+        console.log('📦 文本长度:', text.length);
+        console.log('🧠 使用模型:', model);
+        console.log('🏭 API平台:', provider);
+        
+        const chunks = text.match(/.{1,3000}/g) || [text];
+        const allTerms = [];
+        const termSet = new Set();
+        const totalChunks = chunks.length;
+
+        for (let i = 0; i < totalChunks; i++) {
+            const chunk = chunks[i];
+            const progress = Math.round(((i + 1) / totalChunks) * 100);
+            
+            document.getElementById('glossaryProgressText').textContent = `${i + 1} / ${totalChunks}`;
+            document.getElementById('glossaryProgressPercent').textContent = `${progress}%`;
+            document.getElementById('glossaryProgressFill').style.width = `${progress}%`;
+            
+            setStatus('processing', `正在提取术语... (${i + 1}/${totalChunks})`, '');
+
+            const prompt = `请从以下文本中提取专业术语和关键词。文本可能包含游戏内容、技术文档等。
+
+文本内容：
+${chunk}
+
+请以JSON格式输出，包含以下字段：
+- "terms": 术语数组，每个术语包含：
+  - "term": 术语名称
+  - "type": 术语类型（如：专有名词、技术术语、角色名、技能名、物品名、地点名等）
+  - "description": 术语描述或含义（可选）
+
+示例输出格式：
+{
+  "terms": [
+    {"term": "角色名", "type": "角色名", "description": "游戏中的主要角色"},
+    {"term": "技能名称", "type": "技能名", "description": "角色的特殊技能"}
+  ]
+}`;
+
+            const response = await callAPI(prompt, model, provider);
+            let result;
+            try {
+                result = JSON.parse(response);
+            } catch {
+                const match = response.match(/\{[\s\S]*\}/);
+                if (match) {
+                    result = JSON.parse(match[0]);
+                } else {
+                    continue;
+                }
+            }
+
+            if (result.terms && Array.isArray(result.terms)) {
+                for (const item of result.terms) {
+                    if (item.term && !termSet.has(item.term)) {
+                        termSet.add(item.term);
+                        allTerms.push({
+                            term: item.term,
+                            type: item.type || '其他',
+                            count: text.split(item.term).length - 1,
+                            translation: ''
+                        });
+                    }
+                }
+            }
+        }
+
+        return allTerms;
     }
 
     function extractTermsFromText(text) {
@@ -2100,7 +2888,7 @@ function initGlossaryTool() {
 
     function displayTerms() {
         progressSection.style.display = 'none';
-        infoSection.style.display = 'block';
+        infoPanel.style.display = 'block';
         termsSection.style.display = 'block';
 
         document.getElementById('glossaryTermCount').textContent = terms.length;
@@ -2163,9 +2951,16 @@ function initGlossaryTool() {
     function resetTool() {
         terms = [];
         sourceFileName = '';
+        extractFile = null;
 
         extractInput.value = '';
         uploadInput.value = '';
+
+        extractUploadStatus.textContent = '';
+        extractUploadStatus.className = 'upload-status';
+        uploadGlossaryStatus.textContent = '';
+        uploadGlossaryStatus.className = 'upload-status';
+        extractTermsBtn.style.display = 'none';
 
         infoSection.style.display = 'none';
         termsSection.style.display = 'none';

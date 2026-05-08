@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="styles.css">
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/iconv-lite@0.6.3/lib/index.js"></script>
 </head>
 <body>
     <div class="main-container">
@@ -95,7 +96,16 @@
                     <div class="setting-row">
                         <label for="apiProvider">API 平台</label>
                         <select id="apiProvider">
-                            <option value="deepseek" selected>DeepSeek 官方</option>
+                            <option value="deepseek" selected>DeepSeek</option>
+                            <option value="openai">OpenAI</option>
+                            <option value="gemini">Google Gemini</option>
+                            <option value="azure">Azure OpenAI</option>
+                            <option value="aliyun">阿里云通义千问</option>
+                            <option value="tencent">腾讯云混元</option>
+                            <option value="baidu">百度智能云文心一言</option>
+                            <option value="doubao">字节跳动豆包</option>
+                            <option value="qwen">阿里通义千问 API</option>
+                            <option value="youdao">有道智云</option>
                             <option value="custom">自定义平台</option>
                         </select>
                     </div>
@@ -109,11 +119,19 @@
                         <button class="action-btn secondary" id="saveApiKeyBtn">保存</button>
                         <button class="action-btn secondary" id="clearApiKeyBtn">清除</button>
                     </div>
+                    <div class="setting-row model-select-row">
+                        <label for="globalAiModel">默认AI模型</label>
+                        <select id="globalAiModel">
+                            <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro (deepseek-v4-pro)</option>
+                            <option value="deepseek-v4-flash">DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                            <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
+                        </select>
+                    </div>
                     <div class="api-status" id="apiStatus"></div>
                     <div class="api-help">
                         <p><strong>说明：</strong>本工具不提供免费 AI 服务，必须使用您自己购买的 API Key</p>
-                        <p><strong>DeepSeek：</strong><a href="https://platform.deepseek.com" target="_blank">官网购买</a></p>
-                        <p><strong>提示：</strong>模型选择在翻译/检测功能的设置面板中</p>
+                        <p><strong>平台说明：</strong>选择平台后，模型列表会自动更新</p>
+                        <p><strong>注意：</strong>Azure OpenAI 需要替换 URL 中的 YOUR_RESOURCE_NAME</p>
                     </div>
                 </div>
             </div>
@@ -140,6 +158,16 @@
                         <div class="setting-row">
                             <label for="rowsPerFile">每个文件行数</label>
                             <input type="number" id="rowsPerFile" min="1" value="5000" placeholder="输入每个文件的行数">
+                        </div>
+                        <div class="setting-row">
+                            <label for="splitEncoding">输出编码</label>
+                            <select id="splitEncoding">
+                                <option value="utf-8" selected>UTF-8</option>
+                                <option value="gbk">GBK (简体中文)</option>
+                                <option value="gb2312">GB2312 (简体中文)</option>
+                                <option value="big5">Big5 (繁体中文)</option>
+                                <option value="utf-16">UTF-16</option>
+                            </select>
                         </div>
                         <button class="action-btn primary" id="splitBtn">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -195,7 +223,6 @@
 
                     <div class="download-panel" id="splitDownloadSection" style="display: none;">
                         <h3>拆分完成</h3>
-                        <div class="download-list" id="splitDownloadList"></div>
                         <div class="download-actions">
                             <button class="action-btn primary" id="splitDownloadAllBtn">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -205,6 +232,9 @@
                                 </svg>
                                 打包下载全部 (ZIP)
                             </button>
+                        </div>
+                        <div class="download-list" id="splitDownloadList"></div>
+                        <div class="download-actions">
                             <button class="action-btn secondary" id="splitResetBtn">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
@@ -301,11 +331,21 @@
                         <div class="setting-row model-select-row">
                             <label for="aiModel">AI模型</label>
                             <select id="aiModel">
-                                <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro - 推荐</option>
-                                <option value="deepseek-v4-flash">DeepSeek V4 Flash - 高速</option>
+                                <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro (deepseek-v4-pro)</option>
+                                <option value="deepseek-v4-flash">DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                                <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
                             </select>
                         </div>
-                        <p class="model-hint">💡 当前选择的模型将用于翻译</p>
+                        <div class="setting-row">
+                            <label for="translateConcurrency">并发数量</label>
+                            <select id="translateConcurrency">
+                                <option value="1">1 (最稳定)</option>
+                                <option value="3">3 (推荐)</option>
+                                <option value="5" selected>5 (较快)</option>
+                                <option value="10">10 (最快)</option>
+                            </select>
+                        </div>
+                        <p class="model-hint">💡 当前选择的模型将用于翻译 | 并发数量越高速度越快</p>
                         <button class="action-btn primary" id="translateBtn">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M5 8l6 6"/>
@@ -320,7 +360,32 @@
                     </div>
 
                     <div class="progress-panel" id="translateProgressSection" style="display: none;">
-                        <h3>翻译进度</h3>
+                        <div class="progress-header">
+                            <h3>翻译进度</h3>
+                            <div class="progress-actions">
+                                <button class="action-btn secondary" id="translatePauseBtn">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="6" y="4" width="4" height="16"/>
+                                        <rect x="14" y="4" width="4" height="16"/>
+                                    </svg>
+                                    暂停
+                                </button>
+                                <button class="action-btn primary" id="translateResumeBtn" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    继续
+                                </button>
+                                <button class="action-btn secondary" id="translateDownloadProgressBtn" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="7 10 12 15 17 10"/>
+                                        <line x1="12" y1="15" x2="12" y2="3"/>
+                                    </svg>
+                                    下载当前进度
+                                </button>
+                            </div>
+                        </div>
                         <div class="progress-bar">
                             <div class="progress-fill" id="translateProgressFill"></div>
                         </div>
@@ -547,11 +612,21 @@
                         <div class="setting-row model-select-row">
                             <label for="l10nAiModel">AI模型</label>
                             <select id="l10nAiModel">
-                                <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro - 推荐</option>
-                                <option value="deepseek-v4-flash">DeepSeek V4 Flash - 高速</option>
+                                <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro (deepseek-v4-pro)</option>
+                                <option value="deepseek-v4-flash">DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                                <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
                             </select>
                         </div>
-                        <p class="model-hint">💡 当前选择的模型将用于检测</p>
+                        <div class="setting-row">
+                            <label for="l10nConcurrency">并发数量</label>
+                            <select id="l10nConcurrency">
+                                <option value="1">1 (最稳定)</option>
+                                <option value="3">3 (推荐)</option>
+                                <option value="5" selected>5 (较快)</option>
+                                <option value="10">10 (最快)</option>
+                            </select>
+                        </div>
+                        <p class="model-hint">💡 当前选择的模型将用于检测 | 并发数量越高速度越快</p>
                         <button class="action-btn primary" id="l10nCheckBtn">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M9 12l2 2 4-4"/>
@@ -561,7 +636,32 @@
                     </div>
 
                     <div class="progress-panel" id="l10nProgressSection" style="display: none;">
-                        <h3>检测进度</h3>
+                        <div class="progress-header">
+                            <h3>检测进度</h3>
+                            <div class="progress-actions">
+                                <button class="action-btn secondary" id="l10nPauseBtn">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="6" y="4" width="4" height="16"/>
+                                        <rect x="14" y="4" width="4" height="16"/>
+                                    </svg>
+                                    暂停
+                                </button>
+                                <button class="action-btn primary" id="l10nResumeBtn" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    继续
+                                </button>
+                                <button class="action-btn secondary" id="l10nDownloadProgressBtn" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="7 10 12 15 17 10"/>
+                                        <line x1="12" y1="15" x2="12" y2="3"/>
+                                    </svg>
+                                    下载当前结果
+                                </button>
+                            </div>
+                        </div>
                         <div class="progress-bar">
                             <div class="progress-fill" id="l10nProgressFill"></div>
                         </div>
@@ -642,32 +742,130 @@
                 </div>
                 
                 <div class="tool-body">
+                    <div class="settings-panel">
+                        <h3>提取设置</h3>
+                        <div class="setting-row">
+                            <label for="glossaryMode">提取模式</label>
+                            <select id="glossaryMode">
+                                <option value="ai" selected>AI智能提取（推荐）</option>
+                                <option value="rule">规则提取（快速）</option>
+                            </select>
+                        </div>
+                        <div class="mode-description" id="modeDescription">
+                            <div class="mode-info">
+                                <h4>🤖 AI智能提取</h4>
+                                <ul>
+                                    <li>适合需要高质量术语识别的场景</li>
+                                    <li>智能识别术语类型（角色名、技能名、物品名等）</li>
+                                    <li>基于上下文理解提取专业术语</li>
+                                    <li>需要配置API Key并消耗API额度</li>
+                                </ul>
+                            </div>
+                            <div class="mode-info">
+                                <h4>⚡ 规则提取</h4>
+                                <ul>
+                                    <li>适合快速预览或简单文本</li>
+                                    <li>基于正则表达式匹配提取</li>
+                                    <li>无需API，完全本地处理</li>
+                                    <li>识别准确度相对较低</li>
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="collapsible-section">
+                            <button class="collapsible-header" id="rulesHeader">
+                                <span>📋 规则提取逻辑</span>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="collapse-icon">
+                                    <polyline points="6 9 12 15 18 9"/>
+                                </svg>
+                            </button>
+                            <div class="collapsible-content" id="rulesContent" style="display: none;">
+                                <div class="extraction-rules">
+                                    <ul>
+                                        <li><strong>长度过滤：</strong>2-50个字符之间</li>
+                                        <li><strong>纯数字排除：</strong>跳过纯数字内容</li>
+                                        <li><strong>常见词排除：</strong>跳过停用词（的、了、是等）</li>
+                                        <li><strong>类型识别：</strong>中文术语、英文术语、复合词</li>
+                                        <li><strong>去重处理：</strong>相同术语只保留一个</li>
+                                        <li><strong>出现统计：</strong>统计每个术语出现次数</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="collapsible-section">
+                            <button class="collapsible-header" id="formatHeader">
+                                <span>📊 CSV输出格式</span>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="collapse-icon">
+                                    <polyline points="6 9 12 15 18 9"/>
+                                </svg>
+                            </button>
+                            <div class="collapsible-content" id="formatContent" style="display: none;">
+                                <div class="csv-format">
+                                    <div class="format-preview">
+                                        <pre>术语,类型,出现次数,翻译
+角色名称,角色名,15,
+技能名称,技能名,8,
+物品名称,物品名,20,
+地点名称,地点名,12,</pre>
+                                    </div>
+                                    <p class="format-hint">输出字段说明：</p>
+                                    <ul class="format-fields">
+                                        <li><strong>术语：</strong>提取到的术语名称</li>
+                                        <li><strong>类型：</strong>术语分类（角色名、技能名、物品名等）</li>
+                                        <li><strong>出现次数：</strong>该术语在文本中出现的次数</li>
+                                        <li><strong>翻译：</strong>预留的翻译列，可手动填写</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="setting-row model-select-row" id="glossaryModelRow">
+                            <label for="glossaryModel">AI模型</label>
+                            <select id="glossaryModel">
+                                <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro (deepseek-v4-pro)</option>
+                                <option value="deepseek-v4-flash">DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                                <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
+                            </select>
+                        </div>
+                    </div>
+
                     <div class="upload-section-double">
                         <div class="upload-card">
                             <h3>提取术语表</h3>
                             <p class="upload-hint">从文件中自动提取术语</p>
-                            <div class="upload-area-small" id="glossaryExtractArea">
-                                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                                    <polyline points="17 8 12 3 7 8"/>
-                                    <line x1="12" y1="3" x2="12" y2="15"/>
-                                </svg>
-                                <p>拖拽或点击上传</p>
-                                <input type="file" id="glossaryExtractInput" accept=".csv,.xlsx,.xls" hidden>
+                            <div class="upload-area-wrapper">
+                                <label class="upload-area-small" id="glossaryExtractArea" for="glossaryExtractInput">
+                                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="17 8 12 3 7 8"/>
+                                        <line x1="12" y1="3" x2="12" y2="15"/>
+                                    </svg>
+                                    <p>拖拽或点击上传</p>
+                                    <input type="file" id="glossaryExtractInput" accept=".csv,.xlsx,.xls" hidden>
+                                </label>
+                                <div class="upload-status" id="extractUploadStatus"></div>
                             </div>
+                            <button class="action-btn primary" id="extractTermsBtn" style="display: none; margin-top: 16px;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M9 12l2 2 4-4"/>
+                                    <path d="M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 0 1-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                                </svg>
+                                开始提取术语
+                            </button>
                         </div>
                         
                         <div class="upload-card">
                             <h3>上传已有术语表</h3>
                             <p class="upload-hint">上传已有的术语表文件</p>
-                            <div class="upload-area-small" id="glossaryUploadArea">
-                                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                                    <polyline points="17 8 12 3 7 8"/>
-                                    <line x1="12" y1="3" x2="12" y2="15"/>
-                                </svg>
-                                <p>拖拽或点击上传</p>
-                                <input type="file" id="glossaryUploadInput" accept=".csv,.xlsx,.xls" hidden>
+                            <div class="upload-area-wrapper">
+                                <label class="upload-area-small" id="glossaryUploadArea" for="glossaryUploadInput">
+                                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="17 8 12 3 7 8"/>
+                                        <line x1="12" y1="3" x2="12" y2="15"/>
+                                    </svg>
+                                    <p>拖拽或点击上传</p>
+                                    <input type="file" id="glossaryUploadInput" accept=".csv,.xlsx,.xls" hidden>
+                                </label>
+                                <div class="upload-status" id="uploadGlossaryStatus"></div>
                             </div>
                         </div>
                     </div>
@@ -751,11 +949,13 @@
                 </div>
                 <div class="form-group">
                     <label for="projectRules">翻译标准</label>
-                    <textarea id="projectRules" placeholder="输入项目的翻译标准和规范..."></textarea>
+                    <textarea id="projectRules" placeholder="输入项目的翻译标准和规范..." rows="10"></textarea>
                 </div>
             </div>
             <div class="modal-footer">
                 <button class="action-btn secondary" id="cancelProjectBtn">取消</button>
+                <button class="action-btn secondary" id="viewProjectBtn" style="display: none;">查看模式</button>
+                <button class="action-btn secondary" id="editProjectBtn" style="display: none;">编辑模式</button>
                 <button class="action-btn primary" id="saveProjectBtn">保存</button>
             </div>
         </div>
