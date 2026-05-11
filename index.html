@@ -83,7 +83,7 @@
                 <button class="status-action" id="statusAction" style="display: none;">查看</button>
             </div>
 
-            <div class="api-config-panel" id="apiConfigPanel">
+            <div class="api-config-panel" id="apiConfigPanel" style="display: none;">
                 <div class="api-config-header">
                     <h3>⚙️ API 配置</h3>
                     <button class="icon-btn-small" id="toggleApiConfig" title="收起/展开">
@@ -93,45 +93,104 @@
                     </button>
                 </div>
                 <div class="api-config-content" id="apiConfigContent">
-                    <div class="setting-row">
+                    <div class="setting-row api-profile-name-row">
+                        <label for="apiProfileName">通道名称</label>
+                        <input type="text" id="apiProfileName" placeholder="例如：DeepSeek 主账号">
+                    </div>
+                    <div class="setting-row api-provider-row">
                         <label for="apiProvider">API 平台</label>
                         <select id="apiProvider">
-                            <option value="deepseek" selected>DeepSeek</option>
-                            <option value="openai">OpenAI</option>
-                            <option value="gemini">Google Gemini</option>
-                            <option value="azure">Azure OpenAI</option>
-                            <option value="aliyun">阿里云通义千问</option>
-                            <option value="tencent">腾讯云混元</option>
-                            <option value="baidu">百度智能云文心一言</option>
-                            <option value="doubao">字节跳动豆包</option>
-                            <option value="qwen">阿里通义千问 API</option>
-                            <option value="youdao">有道智云</option>
-                            <option value="custom">自定义平台</option>
+                            <optgroup label="官方 / 直连平台">
+                                <option value="deepseek" selected>DeepSeek</option>
+                                <option value="openai">OpenAI 官方</option>
+                                <option value="gemini">Google Gemini</option>
+                                <option value="xiaomi">小米 MiMo</option>
+                                <option value="aliyun">阿里云通义千问</option>
+                                <option value="tencent">腾讯云 TokenHub</option>
+                                <option value="doubao">字节跳动豆包</option>
+                                <option value="youdao">有道智云大模型网关</option>
+                                <option value="youdaoTranslate">有道智云大模型翻译（仅文本翻译）</option>
+                            </optgroup>
+                            <optgroup label="中转网关（第三方）">
+                                <option value="aigocodeOpenai">AIGoCode GPT / Codex 网关</option>
+                                <option value="aigocodeClaude">AIGoCode Claude 网关</option>
+                                <option value="aigocodeGemini">AIGoCode Gemini 网关</option>
+                                <option value="openaiProxy">OpenAI 中转站</option>
+                            </optgroup>
+                            <optgroup label="自定义">
+                                <option value="custom">自定义平台</option>
+                            </optgroup>
                         </select>
                     </div>
-                    <div class="setting-row" id="baseUrlRow">
+                    <div class="setting-row model-select-row api-model-row">
+                        <label for="globalAiModel">默认AI模型</label>
+                        <select id="globalAiModel">
+                            <option value="deepseek-v4-flash" selected>DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                            <option value="deepseek-v4-pro">DeepSeek V4 Pro (deepseek-v4-pro)</option>
+                            <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
+                            <option value="deepseek-reasoner">DeepSeek Reasoner (deepseek-reasoner)</option>
+                        </select>
+                    </div>
+                    <div class="setting-row api-custom-model-row" id="apiCustomModelRow" style="display: none;">
+                        <label for="apiCustomModel">自定义模型 ID</label>
+                        <input type="text" id="apiCustomModel" placeholder="例如：glm-5、kimi-k2.6">
+                    </div>
+                    <div class="setting-row api-profile-concurrency-row">
+                        <label for="apiProfileConcurrency">通道并发</label>
+                        <input type="number" id="apiProfileConcurrency" min="1" max="10" value="3">
+                    </div>
+                    <div class="setting-row api-base-url-row" id="baseUrlRow">
                         <label for="baseUrl">Base URL</label>
                         <input type="text" id="baseUrl" placeholder="https://api.deepseek.com">
                     </div>
-                    <div class="setting-row">
-                        <label for="apiKey">API Key</label>
-                        <input type="password" id="apiKey" placeholder="必须填写您自己的 API Key">
-                        <button class="action-btn secondary" id="saveApiKeyBtn">保存</button>
-                        <button class="action-btn secondary" id="clearApiKeyBtn">清除</button>
+                    <div class="setting-row api-key-row">
+                        <label for="apiKey" id="apiKeyLabel">API Key</label>
+                        <div class="secret-input-wrap">
+                            <input type="password" id="apiKey" placeholder="必须填写您自己的 API Key">
+                            <button class="secret-toggle" type="button" data-target="apiKey" aria-label="按住显示 API Key" title="按住显示">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                            </button>
+                        </div>
                     </div>
-                    <div class="setting-row model-select-row">
-                        <label for="globalAiModel">默认AI模型</label>
-                        <select id="globalAiModel">
-                            <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro (deepseek-v4-pro)</option>
-                            <option value="deepseek-v4-flash">DeepSeek V4 Flash (deepseek-v4-flash)</option>
-                            <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
-                        </select>
+                    <div class="setting-row api-secret-row" id="apiSecretRow" style="display: none;">
+                        <label for="apiSecret" id="apiSecretLabel">API Secret</label>
+                        <div class="secret-input-wrap">
+                            <input type="password" id="apiSecret" placeholder="有道应用密钥">
+                            <button class="secret-toggle" type="button" data-target="apiSecret" aria-label="按住显示 API Secret" title="按住显示">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="api-key-actions">
+                        <button class="action-btn secondary" id="testApiProfileBtn">测试通道</button>
+                        <button class="action-btn secondary" id="saveApiKeyBtn">保存通道</button>
+                        <button class="action-btn secondary" id="clearApiKeyBtn">清空表单</button>
                     </div>
                     <div class="api-status" id="apiStatus"></div>
+                    <div class="api-profile-manager">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>已保存 API 通道</h3>
+                                <p class="panel-subtitle">本地化检测和文本翻译都可以勾选多个通道；翻译专用通道只会在文本翻译中使用</p>
+                            </div>
+                            <span class="panel-count" id="apiProfileCount">0 个</span>
+                        </div>
+                        <div class="api-profile-list" id="apiProfileList"></div>
+                    </div>
                     <div class="api-help">
                         <p><strong>说明：</strong>本工具不提供免费 AI 服务，必须使用您自己购买的 API Key</p>
-                        <p><strong>平台说明：</strong>选择平台后，模型列表会自动更新</p>
-                        <p><strong>注意：</strong>Azure OpenAI 需要替换 URL 中的 YOUR_RESOURCE_NAME</p>
+                        <p><strong>分片加速：</strong>多个通道会分别处理不同文本行，互不共享 API Key</p>
+                        <p><strong>手动调整：</strong>Base URL 可以直接改，保存后会优先使用您填写的地址</p>
+                        <p><strong>AIGoCode：</strong>已独立放在“中转网关”分组；GPT、Claude、Gemini 请分别保存通道和 Key，避免模型族不匹配</p>
+                        <p><strong>小米 MiMo：</strong>已内置官方 OpenAI-compatible 地址和 MiMo V2 / V2.5 模型；若测试失败，请先确认小米平台已开通对应模型或插件服务</p>
+                        <p><strong>有道智云：</strong>大模型网关已内置您账号下 14 个生效模型；传统文本翻译的 APP ID/密钥不是 AI 检测通道</p>
+                        <p><strong>有道翻译：</strong>“有道智云大模型翻译”只参与文本翻译，需要填写应用 ID 和应用密钥，不参与本地化检测复核</p>
                     </div>
                 </div>
             </div>
@@ -151,7 +210,7 @@
                         </svg>
                         <p class="upload-text">拖拽文件到此处或点击上传</p>
                         <p class="upload-hint">支持 .csv 和 .xlsx 格式</p>
-                        <input type="file" id="splitFileInput" accept=".csv,.xlsx,.xls" hidden>
+                        <input type="file" id="splitFileInput" class="file-input-overlay" accept=".csv,.xlsx,.xls">
                     </div>
 
                     <div class="settings-panel">
@@ -273,7 +332,7 @@
                         </svg>
                         <p class="upload-text">拖拽文件到此处或点击上传</p>
                         <p class="upload-hint">支持 .csv 和 .xlsx 格式</p>
-                        <input type="file" id="translateFileInput" accept=".csv,.xlsx,.xls" hidden>
+                        <input type="file" id="translateFileInput" class="file-input-overlay" accept=".csv,.xlsx,.xls">
                     </div>
 
                     <div class="info-panel" id="translateFileInfo" style="display: none;">
@@ -331,10 +390,16 @@
                         <div class="setting-row model-select-row">
                             <label for="aiModel">AI模型</label>
                             <select id="aiModel">
-                                <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro (deepseek-v4-pro)</option>
-                                <option value="deepseek-v4-flash">DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                                <option value="deepseek-v4-flash" selected>DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                                <option value="deepseek-v4-pro">DeepSeek V4 Pro (deepseek-v4-pro)</option>
                                 <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
+                                <option value="deepseek-reasoner">DeepSeek Reasoner (deepseek-reasoner)</option>
                             </select>
+                        </div>
+                        <div class="setting-row">
+                            <label>翻译模型通道</label>
+                            <div class="resource-check-list" id="translateProfileList"></div>
+                            <p class="setting-hint">勾选多个 API 通道后，同一条原文会生成多个模型译文列，便于对照质量</p>
                         </div>
                         <div class="setting-row">
                             <label for="translateConcurrency">并发数量</label>
@@ -345,7 +410,7 @@
                                 <option value="10">10 (最快)</option>
                             </select>
                         </div>
-                        <p class="model-hint">💡 当前选择的模型将用于翻译 | 并发数量越高速度越快</p>
+                        <p class="model-hint">💡 默认勾选当前 API 通道；勾选多个通道会输出多列译文，用于横向比较不同 AI 的翻译效果</p>
                         <button class="action-btn primary" id="translateBtn">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M5 8l6 6"/>
@@ -383,6 +448,12 @@
                                         <line x1="12" y1="15" x2="12" y2="3"/>
                                     </svg>
                                     下载当前进度
+                                </button>
+                                <button class="action-btn danger" id="translateCancelBtn">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="6" y="6" width="12" height="12" rx="2"/>
+                                    </svg>
+                                    取消任务
                                 </button>
                             </div>
                         </div>
@@ -440,7 +511,7 @@
                         </svg>
                         <p class="upload-text">拖拽文件到此处或点击上传</p>
                         <p class="upload-hint">支持 .csv 和 .xlsx 格式</p>
-                        <input type="file" id="convertFileInput" accept=".csv,.xlsx,.xls" hidden>
+                        <input type="file" id="convertFileInput" class="file-input-overlay" accept=".csv,.xlsx,.xls">
                     </div>
 
                     <div class="info-panel" id="convertFileInfo" style="display: none;">
@@ -547,7 +618,7 @@
                         </svg>
                         <p class="upload-text">拖拽文件到此处或点击上传</p>
                         <p class="upload-hint">支持 .csv 和 .xlsx 格式</p>
-                        <input type="file" id="l10nFileInput" accept=".csv,.xlsx,.xls" hidden>
+                        <input type="file" id="l10nFileInput" class="file-input-overlay" accept=".csv,.xlsx,.xls">
                     </div>
 
                     <div class="info-panel" id="l10nFileInfo" style="display: none;">
@@ -585,48 +656,57 @@
 
                     <div class="settings-panel">
                         <div class="setting-row">
-                            <label for="l10nScene">场景类型</label>
-                            <select id="l10nScene">
-                                <option value="all">全部场景</option>
-                                <option value="ui">UI 按钮</option>
-                                <option value="popup">弹窗提示</option>
-                                <option value="story">剧情对白</option>
-                                <option value="quest">任务描述</option>
-                                <option value="item">道具说明</option>
-                                <option value="system">系统提示</option>
-                            </select>
+                            <label for="l10nProjectSelect">游戏项目</label>
+                            <select id="l10nProjectSelect"></select>
+                            <p class="setting-hint">检测会按照所选项目的翻译标准和规范执行</p>
                         </div>
                         <div class="setting-row">
-                            <label for="l10nStrictness">检测严格度</label>
-                            <select id="l10nStrictness">
-                                <option value="lenient">宽松 - 仅检测严重错误</option>
-                                <option value="normal" selected>标准 - 常规问题检测</option>
-                                <option value="strict">严格 - 全面问题检测</option>
+                            <label>术语表</label>
+                            <div class="resource-check-list" id="l10nGlossaryList"></div>
+                            <p class="setting-hint">可勾选术语表工具中上传或提取出的术语表；不勾选则不按术语表检测</p>
+                        </div>
+                        <div class="setting-row">
+                            <label>检测模型通道</label>
+                            <div class="resource-check-list" id="l10nProfileList"></div>
+                            <p class="setting-hint">勾选多个已保存 API 通道后，会按检测模式进行批量检测或复核；每个通道使用自己的 Key、模型和并发设置</p>
+                        </div>
+                        <div class="setting-row">
+                            <label for="l10nCheckMode">检测模式</label>
+                            <select id="l10nCheckMode">
+                                <option value="balanced" selected>均衡模式（推荐：批量检测 + 异常复核）</option>
+                                <option value="economy">省钱模式（批量检测 + 单模型）</option>
+                                <option value="strict">严格模式（批量多模型全量复核）</option>
                             </select>
-                            <div class="strictness-hint" id="strictnessHint">
-                                <p><strong>宽松：</strong>仅检测严重语法错误、拼写错误、漏译/误译等重大问题</p>
-                                <p><strong>标准：</strong>在宽松基础上，增加时态、介词、表达流畅度等常规检测</p>
-                                <p><strong>严格：</strong>在标准基础上，增加术语一致性、风格统一、标点规范等全面检测</p>
+                        </div>
+                        <div class="mode-explainer" id="l10nModeExplainer"></div>
+                        <div class="setting-row">
+                            <label class="checkbox-setting" for="l10nAutoSave">
+                                <input type="checkbox" id="l10nAutoSave" checked>
+                                <span>
+                                    <strong>自动保存检测结果</strong>
+                                    <small>桌面端会在完成、暂停、接口异常时自动保存 CSV 到系统下载目录</small>
+                                </span>
+                            </label>
+                        </div>
+                        <div class="setting-row">
+                            <label>历史检测结果</label>
+                            <div class="history-import-panel">
+                                <div class="history-import-actions">
+                                    <label class="history-import-button" id="l10nHistoryImportArea" for="l10nHistoryImportInput">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                            <polyline points="17 8 12 3 7 8"/>
+                                            <line x1="12" y1="3" x2="12" y2="15"/>
+                                        </svg>
+                                        导入历史检测结果
+                                        <input type="file" id="l10nHistoryImportInput" accept=".csv,.xlsx,.xls" hidden>
+                                    </label>
+                                    <button class="action-btn secondary" id="l10nClearHistoryBtn" type="button" style="display: none;">清除导入</button>
+                                </div>
+                                <div class="history-import-status" id="l10nHistoryImportStatus">未导入历史检测结果；导入后会优先复用已检测过的模型结果，减少重复 token 消耗。</div>
                             </div>
+                            <p class="setting-hint">新版报告使用指纹强匹配；旧版报告会按原文、译文和模型弱匹配，并在状态中提示风险</p>
                         </div>
-                        <div class="setting-row model-select-row">
-                            <label for="l10nAiModel">AI模型</label>
-                            <select id="l10nAiModel">
-                                <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro (deepseek-v4-pro)</option>
-                                <option value="deepseek-v4-flash">DeepSeek V4 Flash (deepseek-v4-flash)</option>
-                                <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
-                            </select>
-                        </div>
-                        <div class="setting-row">
-                            <label for="l10nConcurrency">并发数量</label>
-                            <select id="l10nConcurrency">
-                                <option value="1">1 (最稳定)</option>
-                                <option value="3">3 (推荐)</option>
-                                <option value="5" selected>5 (较快)</option>
-                                <option value="10">10 (最快)</option>
-                            </select>
-                        </div>
-                        <p class="model-hint">💡 当前选择的模型将用于检测 | 并发数量越高速度越快</p>
                         <button class="action-btn primary" id="l10nCheckBtn">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M9 12l2 2 4-4"/>
@@ -639,26 +719,33 @@
                         <div class="progress-header">
                             <h3>检测进度</h3>
                             <div class="progress-actions">
-                                <button class="action-btn secondary" id="l10nPauseBtn">
+                                <button class="action-btn secondary" id="l10nPauseBtn" type="button">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <rect x="6" y="4" width="4" height="16"/>
                                         <rect x="14" y="4" width="4" height="16"/>
                                     </svg>
                                     暂停
                                 </button>
-                                <button class="action-btn primary" id="l10nResumeBtn" style="display: none;">
+                                <button class="action-btn primary" id="l10nResumeBtn" type="button" style="display: none;">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <polygon points="5 3 19 12 5 21 5 3"/>
                                     </svg>
                                     继续
                                 </button>
-                                <button class="action-btn secondary" id="l10nDownloadProgressBtn" style="display: none;">
+                                <button class="action-btn secondary" id="l10nDownloadProgressBtn" type="button" style="display: none;">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
                                         <polyline points="7 10 12 15 17 10"/>
                                         <line x1="12" y1="15" x2="12" y2="3"/>
                                     </svg>
                                     下载当前结果
+                                </button>
+                                <button class="action-btn danger" id="l10nCancelBtn" type="button">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                    取消任务
                                 </button>
                             </div>
                         </div>
@@ -670,9 +757,16 @@
                             <span id="l10nProgressPercent">0%</span>
                         </div>
                         <div class="progress-info" id="l10nProgressInfo"></div>
+                        <div class="channel-status-panel" id="l10nChannelStatusPanel" style="display: none;">
+                            <div class="channel-status-header">
+                                <h4>通道进度</h4>
+                                <span>每个模型独立排队检测，异常会在这里标出</span>
+                            </div>
+                            <div class="channel-status-grid" id="l10nChannelStatusGrid"></div>
+                        </div>
                         
                         <div class="check-preview">
-                            <h4>实时检测内容</h4>
+                            <h4>实时检测结果</h4>
                             <div class="check-list" id="l10nCheckList"></div>
                         </div>
                     </div>
@@ -685,7 +779,7 @@
                                 <span class="summary-value" id="l10nTotalChecked">0</span>
                             </div>
                             <div class="summary-item">
-                                <span class="summary-label">发现问题数</span>
+                                <span class="summary-label">异常行数</span>
                                 <span class="summary-value error" id="l10nTotalIssues">0</span>
                             </div>
                             <div class="summary-item">
@@ -697,11 +791,14 @@
                             <table class="results-table" id="l10nResultsTable">
                                 <thead>
                                     <tr>
-                                        <th>原文</th>
-                                        <th>译文</th>
-                                        <th>错误问题说明</th>
-                                        <th>修正后标准文本</th>
-                                        <th>优化理由</th>
+                                        <th>检测原文</th>
+                                        <th>检测译文</th>
+                                        <th>检测模型</th>
+                                        <th>检测结果</th>
+                                        <th>问题类型</th>
+                                        <th>严重程度</th>
+                                        <th>修改为</th>
+                                        <th>问题原因</th>
                                     </tr>
                                 </thead>
                                 <tbody id="l10nResultsBody"></tbody>
@@ -747,27 +844,27 @@
                         <div class="setting-row">
                             <label for="glossaryMode">提取模式</label>
                             <select id="glossaryMode">
-                                <option value="ai" selected>AI智能提取（推荐）</option>
-                                <option value="rule">规则提取（快速）</option>
+                                <option value="ai" selected>AI 专业提取 V2（推荐）</option>
+                                <option value="rule">规则提取 V2（本地快速）</option>
                             </select>
                         </div>
                         <div class="mode-description" id="modeDescription">
                             <div class="mode-info">
-                                <h4>🤖 AI智能提取</h4>
+                                <h4>🤖 AI 专业提取 V2</h4>
                                 <ul>
-                                    <li>适合需要高质量术语识别的场景</li>
-                                    <li>智能识别术语类型（角色名、技能名、物品名等）</li>
-                                    <li>基于上下文理解提取专业术语</li>
-                                    <li>需要配置API Key并消耗API额度</li>
+                                    <li>先识别原文/译文/定位列，再由 AI 直接阅读全部文本分批提炼术语</li>
+                                    <li>不再依赖本地候选和出现次数，按游戏语境判断术语价值并细分类</li>
+                                    <li>保留定位 ID/行号、置信度、提取依据、推荐英文译法和术语质量检测</li>
+                                    <li>需要配置 API Key，长文件会分批调用并消耗更多 API 额度</li>
                                 </ul>
                             </div>
                             <div class="mode-info">
-                                <h4>⚡ 规则提取</h4>
+                                <h4>⚡ 规则提取 V2</h4>
                                 <ul>
-                                    <li>适合快速预览或简单文本</li>
-                                    <li>基于正则表达式匹配提取</li>
+                                    <li>适合先快速生成可编辑的术语候选</li>
+                                    <li>基于游戏领域词库、括号名词和原文/译文列匹配</li>
                                     <li>无需API，完全本地处理</li>
-                                    <li>识别准确度相对较低</li>
+                                    <li>不会提取完整句子、纯数字、ID 和常见提示语</li>
                                 </ul>
                             </div>
                         </div>
@@ -781,12 +878,12 @@
                             <div class="collapsible-content" id="rulesContent" style="display: none;">
                                 <div class="extraction-rules">
                                     <ul>
-                                        <li><strong>长度过滤：</strong>2-50个字符之间</li>
-                                        <li><strong>纯数字排除：</strong>跳过纯数字内容</li>
-                                        <li><strong>常见词排除：</strong>跳过停用词（的、了、是等）</li>
-                                        <li><strong>类型识别：</strong>中文术语、英文术语、复合词</li>
-                                        <li><strong>去重处理：</strong>相同术语只保留一个</li>
-                                        <li><strong>出现统计：</strong>统计每个术语出现次数</li>
+                                        <li><strong>列识别：</strong>自动判断中文原文列、英文译文列和 ID 列</li>
+                                        <li><strong>候选召回：</strong>优先提取短中文专名、括号内名称、游戏对象和系统 UI 名词</li>
+                                        <li><strong>低价值过滤：</strong>跳过完整句子、纯数字、ID、常见按钮提示和临时状态描述</li>
+                                        <li><strong>类型识别：</strong>角色/NPC、地点/建筑、道具/装备、资源/货币、技能/状态、任务/活动、系统/UI</li>
+                                        <li><strong>译法绑定：</strong>方向固定为中文原文术语 -> 英文指定译法，不反向命中英文</li>
+                                        <li><strong>置信度：</strong>结合出现次数、上下文和译文匹配给出可排序的质量分</li>
                                     </ul>
                                 </div>
                             </div>
@@ -801,18 +898,21 @@
                             <div class="collapsible-content" id="formatContent" style="display: none;">
                                 <div class="csv-format">
                                     <div class="format-preview">
-                                        <pre>术语,类型,出现次数,翻译
-角色名称,角色名,15,
-技能名称,技能名,8,
-物品名称,物品名,20,
-地点名称,地点名,12,</pre>
+                                        <pre>定位ID/Key,定位行号,原文术语（中文）,原译文/当前译法,指定译文（英文）,整理后译文（可直接使用）,类型,出现次数,置信度,术语质量状态,术语问题,修正建议,提取依据,提取来源
+quest_main_12,行 12,领主,Lord,Lord,Lord,角色/NPC,15,96,通过,,,核心称谓，需要固定译法,ai-full-v2
+shop_77,行 77,兑换码,Enter Code,Redemption Code,Redemption Code,系统/UI,6,88,需确认,Enter Code 偏按钮动作,建议作为功能名使用 Redemption Code,UI 功能术语,ai-full-v2</pre>
                                     </div>
                                     <p class="format-hint">输出字段说明：</p>
                                     <ul class="format-fields">
-                                        <li><strong>术语：</strong>提取到的术语名称</li>
+                                        <li><strong>原文术语：</strong>原文中的中文术语</li>
+                                        <li><strong>指定译文：</strong>该中文术语必须使用的英文译法</li>
                                         <li><strong>类型：</strong>术语分类（角色名、技能名、物品名等）</li>
-                                        <li><strong>出现次数：</strong>该术语在文本中出现的次数</li>
-                                        <li><strong>翻译：</strong>预留的翻译列，可手动填写</li>
+                                        <li><strong>定位ID/Key：</strong>原文件中可用于回查的 ID、key 或行号</li>
+                                        <li><strong>整理后译文：</strong>AI 综合原译文、指定译文和修正建议后给出的最终可用译法</li>
+                                        <li><strong>出现次数：</strong>该术语在文本中出现的次数，仅作参考，不再作为主要筛选依据</li>
+                                        <li><strong>术语质量：</strong>AI 对英文译法、行业规范、拼写、数字和一致性风险的检测结论</li>
+                                        <li><strong>提取依据：</strong>用于回查的示例行或 AI 判断理由</li>
+                                        <li><strong>提取来源：</strong>AI 全文提炼或本地规则提取</li>
                                     </ul>
                                 </div>
                             </div>
@@ -820,9 +920,10 @@
                         <div class="setting-row model-select-row" id="glossaryModelRow">
                             <label for="glossaryModel">AI模型</label>
                             <select id="glossaryModel">
-                                <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro (deepseek-v4-pro)</option>
-                                <option value="deepseek-v4-flash">DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                                <option value="deepseek-v4-flash" selected>DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                                <option value="deepseek-v4-pro">DeepSeek V4 Pro (deepseek-v4-pro)</option>
                                 <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
+                                <option value="deepseek-reasoner">DeepSeek Reasoner (deepseek-reasoner)</option>
                             </select>
                         </div>
                     </div>
@@ -870,6 +971,17 @@
                         </div>
                     </div>
 
+                    <div class="glossary-library-panel" id="glossaryLibraryPanel">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>已保存术语表</h3>
+                                <p class="panel-subtitle">这里会显示上传和提取后保存的术语表，本地化检测勾选的也是同一批数据</p>
+                            </div>
+                            <span class="panel-count" id="glossaryLibraryCount">0 个</span>
+                        </div>
+                        <div class="glossary-library-list" id="glossaryLibraryList"></div>
+                    </div>
+
                     <div class="info-panel" id="glossaryInfo" style="display: none;">
                         <h3>当前术语表</h3>
                         <div class="info-grid">
@@ -890,10 +1002,15 @@
                             <table class="terms-table" id="glossaryTermsTable">
                                 <thead>
                                     <tr>
-                                        <th>术语</th>
+                                        <th>定位ID/Key</th>
+                                        <th>原文术语（中文）</th>
                                         <th>类型</th>
                                         <th>出现次数</th>
-                                        <th>翻译</th>
+                                        <th>置信度</th>
+                                        <th>指定译文（英文）</th>
+                                        <th>整理后译文</th>
+                                        <th>术语质量</th>
+                                        <th>提取依据</th>
                                     </tr>
                                 </thead>
                                 <tbody id="glossaryTermsBody"></tbody>

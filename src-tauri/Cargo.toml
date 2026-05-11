@@ -1,0 +1,22 @@
+[package]
+name = "nexus-localization-toolkit"
+version = "1.0.0"
+description = "NEXUS local desktop toolkit for game localization workflows."
+authors = ["LIUSU2326"]
+edition = "2021"
+rust-version = "1.77.2"
+default-run = "nexus-localization-toolkit"
+build = "build.rs"
+
+[lib]
+name = "nexus_localization_toolkit_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.13", features = ["json"] }

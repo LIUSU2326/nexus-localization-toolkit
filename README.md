@@ -42,17 +42,61 @@
 
 ## 🚀 快速开始
 
-### 1. 安装依赖
+### 1. 直接使用网页版本
 
 本项目无需后端，直接打开 `index.html` 即可使用。
 
-### 2. 配置 API Key
+### 2. 使用 Tauri 桌面版本
+
+本项目已加入 Tauri 桌面应用骨架，可以在保留现有网页界面的基础上打包成桌面软件。
+
+#### 环境要求
+
+- Node.js
+- Rust / Cargo
+- Tauri 所需系统依赖
+
+#### 安装依赖
+
+```bash
+npm install
+```
+
+#### 开发模式启动桌面应用
+
+```bash
+npm run desktop
+```
+
+macOS 也可以直接双击项目根目录下的 `start-nexus.command` 一键启动桌面应用。
+
+#### 构建安装包
+
+```bash
+npm run desktop:build
+```
+
+构建输出位于 `src-tauri/target/release/bundle/`。
+
+> 注意：macOS 通常在 macOS 上构建 `.app/.dmg`，Windows 通常在 Windows 上构建 `.exe/.msi`。
+
+#### Windows 桌面端
+
+如果把项目放到 Windows 电脑上：
+
+- 双击 `start-nexus-windows.bat`：开发/调试模式启动桌面应用。
+- 双击 `build-windows-installer.bat`：生成 Windows `.exe` 安装包。
+- 安装包输出目录：`src-tauri\target\release\bundle\nsis\`。
+
+如果没有 Windows 电脑，也可以把代码推送到 GitHub 的 `master` 分支，然后在 GitHub Actions 里手动运行 `Build Windows Desktop App`，下载生成的 `nexus-windows-installer`，里面就是 Windows `.exe` 安装包。
+
+### 3. 配置 API Key
 
 1. 在顶部 API 配置面板选择平台
 2. 输入您的 DeepSeek API Key
 3. 点击保存
 
-### 3. 运行
+### 4. 运行
 
 直接在浏览器中打开 `index.html` 即可。
 
