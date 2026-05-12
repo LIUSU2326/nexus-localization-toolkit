@@ -28,7 +28,7 @@
 }
 
 body {
-    font-family: 'Open Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', Roboto, sans-serif;
     background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
     color: var(--text-primary);
     min-height: 100vh;
@@ -37,7 +37,7 @@ body {
 }
 
 h1, h2, h3, h4, h5, h6, .logo, .nav-item {
-    font-family: 'Poppins', sans-serif;
+    font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
 }
 
 body::before {
@@ -953,11 +953,54 @@ body.file-drag-active .file-input-overlay {
     font-weight: 700;
 }
 
+.resource-title-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.resource-default-tag {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(22, 163, 74, 0.12);
+    color: #15803d;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.5;
+}
+
 .resource-meta,
 .resource-empty {
     color: var(--text-muted);
     font-size: 12px;
     line-height: 1.45;
+}
+
+.organize-column-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.organize-column-grid label {
+    display: grid;
+    gap: 6px;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.organize-column-grid select {
+    width: 100%;
+    padding: 9px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
 }
 
 .panel-header-row {
@@ -1345,6 +1388,7 @@ body.file-drag-active .file-input-overlay {
 .column-select-panel,
 .results-panel,
 .terms-panel,
+.glossary-restore-panel,
 .glossary-library-panel {
     grid-column: 1 / -1;
     background: rgba(255, 255, 255, 0.95);
@@ -1362,11 +1406,18 @@ body.file-drag-active .file-input-overlay {
 .column-select-panel h3,
 .results-panel h3,
 .terms-panel h3,
+.glossary-restore-panel h3,
 .glossary-library-panel h3 {
     font-size: 16px;
     font-weight: 700;
     margin-bottom: 16px;
     color: var(--text-primary);
+}
+
+.sheet-select-panel {
+    margin-bottom: 18px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-color);
 }
 
 .info-grid {
@@ -1837,6 +1888,58 @@ body.file-drag-active .file-input-overlay {
     background: rgba(239, 68, 68, 0.15);
     color: #dc2626;
     border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.glossary-restore-panel {
+    display: grid;
+    gap: 16px;
+}
+
+.glossary-restore-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+}
+
+.glossary-restore-item {
+    display: grid;
+    gap: 6px;
+    padding: 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.glossary-restore-item:hover,
+.glossary-restore-item.dragover {
+    border-color: var(--accent-primary);
+    background: rgba(37, 99, 235, 0.06);
+}
+
+.glossary-restore-item strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+    font-size: 14px;
+}
+
+.glossary-restore-item small,
+.restore-label {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.restore-label {
+    font-weight: 700;
+}
+
+.glossary-restore-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
 }
 
 .upload-area-small {
