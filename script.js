@@ -7997,6 +7997,8 @@ function initGlossaryTool() {
     const termsSection = document.getElementById('glossaryTerms');
     const progressSection = document.getElementById('glossaryProgressSection');
     const downloadBtn = document.getElementById('glossaryDownloadBtn');
+    const downloadPatchedSourceBtn = document.getElementById('downloadPatchedSourceBtn');
+    const aiPolishMatchedRowsBtn = document.getElementById('aiPolishMatchedRowsBtn');
     const resetBtn = document.getElementById('glossaryResetBtn');
     const glossaryMode = document.getElementById('glossaryMode');
     const glossaryModelRow = document.getElementById('glossaryModelRow');
@@ -8012,6 +8014,8 @@ function initGlossaryTool() {
     let currentGlossaryId = '';
     let extractFile = null;
     let currentGlossaryOrigin = 'uploaded';
+    let sourceWorkbookContext = null;
+    let polishedRowPatches = new Map();
 
     glossaryMode.addEventListener('change', () => {
         if (glossaryMode.value === 'ai') {
@@ -8072,6 +8076,8 @@ function initGlossaryTool() {
     });
 
     downloadBtn.addEventListener('click', downloadGlossary);
+    downloadPatchedSourceBtn?.addEventListener('click', downloadPatchedSourceFile);
+    aiPolishMatchedRowsBtn?.addEventListener('click', polishMatchedRowsWithAI);
     resetBtn.addEventListener('click', resetTool);
     document.addEventListener('nexus:glossary-library-updated', renderGlossaryLibrary);
     renderGlossaryLibrary();
@@ -8324,6 +8330,27 @@ function initGlossaryTool() {
                 targetText
             };
         }).filter(record => record.sourceText && hasCjkText(record.sourceText));
+    }
+
+    function buildSourceWorkbookContext(rows, fileName) {
+        const columns = inferLocalizationColumns(rows);
+        const records = buildLocalizationRecords(rows);
+        const recordByRowNumber = new Map(records.map(record => [record.rowNumber, record]));
+        const recordByReferenceId = new Map();
+
+        records.forEach(record => {
+            splitReferenceList(record.referenceId).forEach(id => recordByReferenceId.set(id, record));
+            splitReferenceList(record.id).forEach(id => recordByReferenceId.set(id, record));
+        });
+
+        return {
+            fileName,
+            rows: rows.map(row => Array.isArray(row) ? [...row] : []),
+            columns,
+            records,
+            recordByRowNumber,
+            recordByReferenceId
+        };
     }
 
     function finalizeGlossaryCandidates(candidateMap, fullText, limit = 500) {
@@ -8870,6 +8897,370 @@ ${JSON.stringify(rows)}
         URL.revokeObjectURL(url);
     }
 
+    function downloadWorkbook(workbook, fileName) {
+        const arrayBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+        const blob = new Blob([arrayBuffer], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    function getEditableGlossaryTerms() {
+        const translationInputs = document.querySelectorAll('.translation-input:not(.final-translation-input)');
+        const finalTranslationInputs = document.querySelectorAll('.final-translation-input');
+        return terms.map((term, index) => ({
+            ...term,
+            translation: translationInputs[index]?.value || term.translation || '',
+            finalTranslation: finalTranslationInputs[index]?.value || term.finalTranslation || term.translation || term.originalTranslation || ''
+        }));
+    }
+
+    function getTermPatchValue(term) {
+        return cleanTermText(term.finalTranslation || term.translation || term.originalTranslation || '');
+    }
+
+    function shouldApplyTermPatch(term) {
+        const patchValue = getTermPatchValue(term);
+        if (!patchValue || !hasLatinText(patchValue)) return false;
+        if (term.qualityStatus === '通过' && !term.qualityIssues) return false;
+        return Boolean(term.qualityIssues || term.qualitySuggestion || term.qualityStatus === '有问题' || term.qualityStatus === '需确认');
+    }
+
+    function findRecordsForTerm(term, context = sourceWorkbookContext) {
+        if (!context) return [];
+        const matched = new Map();
+
+        splitReferenceList(term.referenceRows).forEach(value => {
+            const rowMatch = String(value).match(/\d+/);
+            if (!rowMatch) return;
+            const record = context.recordByRowNumber.get(Number(rowMatch[0]));
+            if (record) matched.set(record.rowNumber, record);
+        });
+
+        splitReferenceList(term.referenceId).forEach(value => {
+            const record = context.recordByReferenceId.get(value);
+            if (record) matched.set(record.rowNumber, record);
+        });
+
+        if (matched.size === 0 && term.term) {
+            context.records
+                .filter(record => record.sourceText.includes(term.term))
+                .forEach(record => matched.set(record.rowNumber, record));
+        }
+
+        return [...matched.values()];
+    }
+
+    function applyTermPatchesToText(originalText, patches) {
+        let result = String(originalText || '');
+        const applied = [];
+
+        patches
+            .filter(patch => patch.term && patch.value)
+            .sort((a, b) => String(b.term).length - String(a.term).length)
+            .forEach(patch => {
+                const before = result;
+                if (patch.originalTranslation && result.includes(patch.originalTranslation)) {
+                    result = result.split(patch.originalTranslation).join(patch.value);
+                } else if (patch.currentTranslation && result.includes(patch.currentTranslation)) {
+                    result = result.split(patch.currentTranslation).join(patch.value);
+                } else if (patch.term && result.includes(patch.term)) {
+                    result = result.split(patch.term).join(patch.value);
+                } else if (patch.value && result.trim() === '') {
+                    result = patch.value;
+                }
+
+                if (result !== before) applied.push(patch);
+            });
+
+        return { text: result, applied };
+    }
+
+    function collectTermPatchMap(editableTerms, context = sourceWorkbookContext) {
+        const patchMap = new Map();
+        if (!context) return patchMap;
+
+        editableTerms.filter(shouldApplyTermPatch).forEach(term => {
+            const records = findRecordsForTerm(term, context);
+            records.forEach(record => {
+                const patches = patchMap.get(record.rowNumber) || [];
+                patches.push({
+                    term: term.term,
+                    value: getTermPatchValue(term),
+                    currentTranslation: term.translation || '',
+                    originalTranslation: term.originalTranslation || '',
+                    issue: term.qualityIssues || '',
+                    suggestion: term.qualitySuggestion || '',
+                    referenceId: term.referenceId || record.referenceId || '',
+                    referenceRows: term.referenceRows || `行${record.rowNumber}`
+                });
+                patchMap.set(record.rowNumber, patches);
+            });
+        });
+
+        return patchMap;
+    }
+
+    function buildPatchedSourceWorkbook(usePolishedRows = false) {
+        if (!sourceWorkbookContext) {
+            throw new Error('请先从原文件提取术语，再下载修正版原文件。上传已有术语表无法还原原文件结构。');
+        }
+
+        const editableTerms = getEditableGlossaryTerms();
+        const context = sourceWorkbookContext;
+        const rows = context.rows.map(row => [...row]);
+        const columns = context.columns;
+        const headerRowIndex = columns.hasHeader ? 0 : -1;
+        const patchedHeader = columns.hasHeader ? [...rows[0]] : rows[0]?.map((_, index) => `列${index + 1}`) || [];
+        const patchedColumnName = usePolishedRows ? 'AI润色修正译文' : 'AI修正译文';
+        const patchNoteColumnName = 'AI修正说明';
+        const patchedColumnIndex = patchedHeader.length;
+        const patchNoteColumnIndex = patchedHeader.length + 1;
+
+        patchedHeader.push(patchedColumnName, patchNoteColumnName);
+        const patchedRows = columns.hasHeader
+            ? rows.map(row => [...row])
+            : [patchedHeader, ...rows.map(row => [...row])];
+        if (columns.hasHeader) {
+            patchedRows[0] = patchedHeader;
+        }
+        const detailRows = [[
+            '定位ID/Key',
+            '定位行号',
+            '原文',
+            '原译文',
+            '修正后译文',
+            '命中术语',
+            '问题说明',
+            '修正建议',
+            '修正方式'
+        ]];
+
+        const patchMap = collectTermPatchMap(editableTerms, context);
+
+        context.records.forEach(record => {
+            const sourceRow = rows[record.rowNumber - 1] || [];
+            const outputRow = [...sourceRow];
+            const originalTarget = String(sourceRow[columns.targetIndex] ?? record.targetText ?? '');
+            const polished = usePolishedRows ? polishedRowPatches.get(record.rowNumber) : null;
+            const patches = patchMap.get(record.rowNumber) || [];
+            const appliedResult = polished
+                ? { text: polished.finalText, applied: patches }
+                : applyTermPatchesToText(originalTarget, patches);
+            const finalText = appliedResult.text || originalTarget;
+            const appliedTerms = appliedResult.applied.map(patch => patch.term).filter(Boolean);
+            const note = polished
+                ? `AI行级润色：${polished.reason || '已根据命中术语重写'}`
+                : appliedTerms.length > 0
+                    ? `本地应用术语：${appliedTerms.join('; ')}`
+                    : '无修改';
+
+            outputRow[patchedColumnIndex] = finalText;
+            outputRow[patchNoteColumnIndex] = note;
+
+            if (columns.hasHeader) {
+                patchedRows[record.rowNumber - 1] = outputRow;
+            } else {
+                patchedRows[record.rowNumber] = outputRow;
+            }
+
+            if (finalText !== originalTarget || appliedTerms.length > 0) {
+                detailRows.push([
+                    polished?.referenceId || record.referenceId || '',
+                    `行${record.rowNumber}`,
+                    record.sourceText,
+                    originalTarget,
+                    finalText,
+                    appliedTerms.join('; '),
+                    patches.map(patch => patch.issue).filter(Boolean).join('; '),
+                    polished?.reason || patches.map(patch => patch.suggestion).filter(Boolean).join('; '),
+                    polished ? 'AI行级润色' : '本地术语替换'
+                ]);
+            }
+        });
+
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(context.rows), '原始数据');
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(patchedRows), '修正后数据');
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(detailRows), '修改明细');
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(buildGlossaryCsvRows(editableTerms)), '术语表');
+        return { workbook, detailCount: Math.max(0, detailRows.length - 1) };
+    }
+
+    function downloadPatchedSourceFile() {
+        try {
+            const { workbook, detailCount } = buildPatchedSourceWorkbook(polishedRowPatches.size > 0);
+            const fileBaseName = (currentGlossaryName || sourceFileName || '修正版原文件').replace(/\.(csv|xlsx|xls)$/i, '');
+            downloadWorkbook(workbook, `${fileBaseName}_修正版原文件.xlsx`);
+            setStatus('success', '修正版原文件已生成', `共生成 ${detailCount} 条修改明细，原术语表仍保留在工作簿中`);
+        } catch (error) {
+            setStatus('error', '生成修正版失败', error.message);
+        }
+    }
+
+    function buildPolishTasks() {
+        if (!sourceWorkbookContext) {
+            throw new Error('请先从原文件提取术语，再使用 AI 润色修正命中行。');
+        }
+
+        const editableTerms = getEditableGlossaryTerms();
+        const patchMap = collectTermPatchMap(editableTerms, sourceWorkbookContext);
+        return [...patchMap.entries()].map(([rowNumber, patches]) => {
+            const record = sourceWorkbookContext.recordByRowNumber.get(rowNumber);
+            if (!record) return null;
+            const row = sourceWorkbookContext.rows[rowNumber - 1] || [];
+            return {
+                rowNumber,
+                referenceId: record.referenceId || '',
+                sourceText: record.sourceText,
+                targetText: String(row[sourceWorkbookContext.columns.targetIndex] ?? record.targetText ?? ''),
+                terms: patches.map(patch => ({
+                    source: patch.term,
+                    target: patch.value,
+                    issue: patch.issue,
+                    suggestion: patch.suggestion
+                }))
+            };
+        }).filter(Boolean);
+    }
+
+    function buildPolishPromptParts(tasks, chunkIndex, totalChunks) {
+        const systemPrompt = `你是游戏本地化译文修正专家。请只处理输入中已经命中术语问题的行，把整行英文译文修正为可直接使用的最终译文。
+
+要求：
+1. 必须保留原译文中的变量、占位符、HTML/富文本标签、换行符、数字、百分号和大小写约定。
+2. 只修正术语、拼写、数字不一致、明显直译或不自然表达，不要改写不相关内容。
+3. 如果原译文已经正确，finalTarget 等于原译文。
+4. 输出必须逐行对应输入 rowNumber/referenceId。
+5. 只返回 JSON，不要 Markdown。`;
+        const compactTasks = tasks.map(task => ({
+            rowNumber: task.rowNumber,
+            referenceId: task.referenceId,
+            sourceText: task.sourceText,
+            targetText: task.targetText,
+            terms: task.terms.slice(0, 8)
+        }));
+        const userPrompt = `批次：${chunkIndex + 1}/${totalChunks}
+
+需要润色修正的行：
+${JSON.stringify(compactTasks)}
+
+返回合法 JSON：
+{
+  "rows": [
+    {
+      "rowNumber": 1,
+      "referenceId": "ID或key",
+      "finalTarget": "整行修正后的英文译文",
+      "reason": "简短说明修正了什么"
+    }
+  ]
+}`;
+        return {
+            systemPrompt,
+            userPrompt,
+            cacheKey: makePromptCacheKey('glossary_row_polish_v1', systemPrompt)
+        };
+    }
+
+    function parsePolishResult(text) {
+        const raw = String(text || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+        try {
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed?.rows) ? parsed.rows : [];
+        } catch {
+            const match = raw.match(/\{[\s\S]*\}/);
+            if (!match) return [];
+            try {
+                const parsed = JSON.parse(match[0]);
+                return Array.isArray(parsed?.rows) ? parsed.rows : [];
+            } catch {
+                return [];
+            }
+        }
+    }
+
+    async function polishMatchedRowsWithAI() {
+        if (!ensureApiKeyConfigured('AI润色修正命中行')) return;
+
+        let tasks = [];
+        try {
+            tasks = buildPolishTasks();
+        } catch (error) {
+            setStatus('error', '无法润色修正', error.message);
+            return;
+        }
+
+        if (tasks.length === 0) {
+            setStatus('success', '没有需要 AI 润色的命中行', '当前术语结果没有可应用到原文件的术语问题');
+            return;
+        }
+
+        const confirmed = confirm(`将对 ${tasks.length} 条命中问题的译文行进行 AI 润色修正，会额外消耗 API 额度。是否继续？`);
+        if (!confirmed) return;
+
+        aiPolishMatchedRowsBtn.disabled = true;
+        aiPolishMatchedRowsBtn.textContent = 'AI润色中...';
+        progressSection.style.display = 'block';
+        const apiConfig = getApiConfig();
+        const model = apiConfig.model || document.getElementById('glossaryModel').value;
+        const chunks = chunkGlossaryItems(tasks, 30);
+        const totalChunks = chunks.length;
+        let polishedCount = 0;
+
+        try {
+            for (let index = 0; index < totalChunks; index++) {
+                const chunk = chunks[index];
+                const progress = Math.round(((index + 1) / totalChunks) * 100);
+                document.getElementById('glossaryProgressText').textContent = `${index + 1} / ${totalChunks}`;
+                document.getElementById('glossaryProgressPercent').textContent = `${progress}%`;
+                document.getElementById('glossaryProgressFill').style.width = `${progress}%`;
+                setStatus('processing', `AI 正在润色命中行... (${index + 1}/${totalChunks})`, '只处理有术语问题的 ID 行，不重跑全文');
+
+                const promptParts = buildPolishPromptParts(chunk, index, totalChunks);
+                const resultText = await requestGlossaryAiBatch(apiConfig, {
+                    model,
+                    messages: [
+                        { role: 'system', content: promptParts.systemPrompt, cacheControl: true },
+                        { role: 'user', content: promptParts.userPrompt }
+                    ],
+                    prompt_cache_key: promptParts.cacheKey,
+                    temperature: 0.1,
+                    max_tokens: 8192
+                }, `${index + 1}/${totalChunks}`);
+
+                parsePolishResult(resultText).forEach(item => {
+                    const rowNumber = Number(item.rowNumber);
+                    const finalText = String(item.finalTarget || item.target || '').trim();
+                    if (!Number.isFinite(rowNumber) || !finalText) return;
+                    polishedRowPatches.set(rowNumber, {
+                        finalText,
+                        reason: String(item.reason || '').trim(),
+                        referenceId: String(item.referenceId || '').trim()
+                    });
+                    polishedCount++;
+                });
+
+                await new Promise(resolve => setTimeout(resolve, 150));
+            }
+
+            setStatus('success', 'AI润色完成', `已生成 ${polishedCount} 条行级修正，可点击“下载修正版原文件”导出`);
+        } catch (error) {
+            setStatus('error', 'AI润色失败', error.message);
+        } finally {
+            progressSection.style.display = 'none';
+            aiPolishMatchedRowsBtn.disabled = false;
+            aiPolishMatchedRowsBtn.textContent = 'AI润色修正命中行';
+        }
+    }
+
     function downloadSavedGlossary(entry) {
         const savedTerms = normalizeEntryToEditableTerms(entry);
         if (savedTerms.length === 0) {
@@ -8889,6 +9280,8 @@ ${JSON.stringify(rows)}
         currentGlossaryName = file.name.replace(/\.(csv|xlsx|xls)$/i, '');
         currentGlossaryId = '';
         currentGlossaryOrigin = 'extracted';
+        sourceWorkbookContext = null;
+        polishedRowPatches = new Map();
 
         extractUploadStatus.textContent = `✓ 文件已选择: ${file.name}`;
         extractUploadStatus.className = 'upload-status success';
@@ -8900,6 +9293,8 @@ ${JSON.stringify(rows)}
         sourceFileName = file.name;
         currentGlossaryName = file.name.replace(/\.(csv|xlsx|xls)$/i, '');
         currentGlossaryId = '';
+        sourceWorkbookContext = null;
+        polishedRowPatches = new Map();
         uploadGlossaryStatus.textContent = `✓ 文件已选择: ${file.name}`;
         uploadGlossaryStatus.className = 'upload-status success';
 
@@ -8933,6 +9328,8 @@ ${JSON.stringify(rows)}
 
         try {
             const { rows, text } = await readGlossarySourceFile(file);
+            sourceWorkbookContext = buildSourceWorkbookContext(rows, file.name);
+            polishedRowPatches = new Map();
             const records = buildLocalizationRecords(rows);
 
             console.log('📄 文件内容长度:', text.length);
@@ -9228,6 +9625,8 @@ ${chunk}
         currentGlossaryId = '';
         extractFile = null;
         currentGlossaryOrigin = 'uploaded';
+        sourceWorkbookContext = null;
+        polishedRowPatches = new Map();
 
         extractInput.value = '';
         uploadInput.value = '';
