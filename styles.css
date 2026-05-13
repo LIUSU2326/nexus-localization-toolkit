@@ -1400,6 +1400,11 @@ body.file-drag-active .file-input-overlay {
     box-shadow: var(--panel-shadow);
 }
 
+.glossary-review-panel {
+    display: grid;
+    gap: 16px;
+}
+
 .info-panel h3,
 .progress-panel h3,
 .download-panel h3,
@@ -1412,6 +1417,17 @@ body.file-drag-active .file-input-overlay {
     font-weight: 700;
     margin-bottom: 16px;
     color: var(--text-primary);
+}
+
+.review-mode-select {
+    width: 100%;
+    min-height: 38px;
+    padding: 9px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font: inherit;
 }
 
 .sheet-select-panel {

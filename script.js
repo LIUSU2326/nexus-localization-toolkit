@@ -301,6 +301,55 @@ function getGlossaryEffectiveTarget(term) {
     return String(term?.finalTranslation || term?.finalTarget || term?.revisedTarget || term?.fixedTarget || term?.target || term?.translation || '').trim();
 }
 
+function getGlossaryOriginDisplayLabel(origin) {
+    if (origin === 'extracted') return '提取生成';
+    if (origin === 'reviewed') return '人工审核';
+    return '上传记录';
+}
+
+function splitGlossaryReferenceList(value) {
+    return String(value || '')
+        .split(/[;,，；\s]+/)
+        .map(item => item.trim())
+        .filter(Boolean);
+}
+
+function extractGlossaryReferenceNumbers(value) {
+    const numbers = [];
+    splitGlossaryReferenceList(value).forEach(item => {
+        const matches = String(item || '').match(/\d+/g) || [];
+        matches.forEach(match => {
+            const number = Number(match);
+            if (Number.isFinite(number)) numbers.push(number);
+        });
+    });
+    return numbers;
+}
+
+function glossaryTermAppliesToTask(term, task = null) {
+    if (!term || !task) return true;
+    const rowNumbers = extractGlossaryReferenceNumbers(term.referenceRows);
+    const ids = new Set(splitGlossaryReferenceList(term.referenceId).map(item => normalizeHeaderText(item)).filter(Boolean));
+    if (rowNumbers.length === 0 && ids.size === 0) return true;
+
+    const taskRows = [
+        task.rowIndex,
+        Number.isInteger(task.rowIndex) ? task.rowIndex + 1 : null,
+        task.originalRowNumber,
+        task.originalReferences?.['原始行号']
+    ].map(Number).filter(Number.isFinite);
+    const rowMatch = rowNumbers.length > 0 && rowNumbers.some(row => taskRows.includes(row));
+
+    const taskIds = [
+        task.id,
+        task.referenceId,
+        task.originalReferences?.['原始行号'],
+        ...Object.values(task.originalReferences || {})
+    ].map(value => normalizeHeaderText(value)).filter(Boolean);
+    const idMatch = ids.size > 0 && taskIds.some(id => ids.has(id));
+    return rowMatch || idMatch;
+}
+
 function getGlossaryOrganizedType(term) {
     return String(term?.organizedType || term?.normalizedType || term?.standardType || term?.type || '').trim();
 }
@@ -361,6 +410,443 @@ async function readSpreadsheetSheets(file) {
             rows: XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 })
         }))
     };
+}
+
+function normalizeColorValue(value) {
+    const text = String(value || '').trim().toUpperCase();
+    if (!text) return '';
+    if (text.startsWith('#')) return text.slice(1);
+    return text.replace(/^0X/, '').replace(/[^0-9A-F]/g, '');
+}
+
+function getWorkbookSheetXmlIndex(workbook, sheetName) {
+    const sheets = workbook?.Workbook?.Sheets;
+    if (!Array.isArray(sheets)) return -1;
+    return sheets.findIndex(sheet => sheet?.name === sheetName);
+}
+
+function getStyleFillColorFromWorkbook(workbook, styleIndex) {
+    const styles = workbook?.Styles;
+    const cellXfs = styles?.CellXf || styles?.CellXfs || [];
+    const fills = styles?.Fills || styles?.fills || [];
+    const xf = cellXfs?.[Number(styleIndex)];
+    const fillId = Number(xf?.fillId ?? xf?.fillID ?? xf?.fillid);
+    if (!Number.isFinite(fillId) || fillId < 0) return '';
+    const fill = fills?.[fillId];
+    const fg = fill?.fgColor || fill?.fgcolor || fill?.foregroundColor || {};
+    const bg = fill?.bgColor || fill?.bgcolor || fill?.backgroundColor || {};
+    return normalizeColorValue(fg.rgb || fg.indexed || fg.theme || bg.rgb || bg.indexed || bg.theme || '');
+}
+
+function getCellFillColor(workbook, cell) {
+    if (!cell) return '';
+    const styleIndex = Number(cell?.s?.index ?? cell?.s?.style ?? cell?.s?.xfId ?? cell?.s ?? 0);
+    return getStyleFillColorFromWorkbook(workbook, styleIndex);
+}
+
+function extractWorksheetColorMap(workbook, sheetName) {
+    const sheet = workbook?.Sheets?.[sheetName];
+    const ref = sheet?.['!ref'];
+    const map = new Map();
+    if (!sheet || !ref) return map;
+    const range = XLSX.utils.decode_range(ref);
+    for (let row = range.s.r; row <= range.e.r; row++) {
+        for (let col = range.s.c; col <= range.e.c; col++) {
+            const addr = XLSX.utils.encode_cell({ r: row, c: col });
+            const color = getCellFillColor(workbook, sheet[addr]);
+            if (color) map.set(addr, color);
+        }
+    }
+    return map;
+}
+
+function readSheetRowsWithStyles(workbook, sheetName) {
+    const sheet = workbook?.Sheets?.[sheetName];
+    const ref = sheet?.['!ref'];
+    if (!sheet || !ref) {
+        return { rows: [], colorMap: new Map() };
+    }
+    const range = XLSX.utils.decode_range(ref);
+    const rows = [];
+    const colorMap = new Map();
+    for (let row = range.s.r; row <= range.e.r; row++) {
+        const values = [];
+        for (let col = range.s.c; col <= range.e.c; col++) {
+            const addr = XLSX.utils.encode_cell({ r: row, c: col });
+            const cell = sheet[addr];
+            values.push(cell?.v ?? '');
+            const color = getCellFillColor(workbook, cell);
+            if (color) colorMap.set(addr, color);
+        }
+        rows.push(values);
+    }
+    return { rows, colorMap };
+}
+
+async function readSpreadsheetWorkbook(file) {
+    const extension = file.name.split('.').pop().toLowerCase();
+    if (extension === 'csv') {
+        const { text, encoding } = await readCSVWithEncoding(file);
+        const workbook = XLSX.read(text, { type: 'string', cellDates: true, cellStyles: true, cellNF: true });
+        return { workbook, encoding, fileName: file.name };
+    }
+
+    const arrayBuffer = await file.arrayBuffer();
+    const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true, cellStyles: true, cellNF: true });
+    return { workbook, encoding: 'N/A (Excel)', fileName: file.name };
+}
+
+function parseXmlDocument(text) {
+    if (!text) return null;
+    const doc = new DOMParser().parseFromString(text, 'application/xml');
+    return doc.querySelector('parsererror') ? null : doc;
+}
+
+async function loadZipFileText(zip, path) {
+    const entry = zip?.file(path);
+    if (!entry) return '';
+    return entry.async('text');
+}
+
+function getXmlChildrenByName(node, name) {
+    if (!node) return [];
+    return Array.from(node.getElementsByTagNameNS('*', name));
+}
+
+function normalizeZipTargetPath(target) {
+    let path = String(target || '').replace(/^\//, '');
+    if (!path.startsWith('xl/')) {
+        path = `xl/${path}`;
+    }
+    return path;
+}
+
+function getSheetXmlPathMap(workbookXmlText, relsXmlText) {
+    const workbookDoc = parseXmlDocument(workbookXmlText);
+    const relsDoc = parseXmlDocument(relsXmlText);
+    const relMap = new Map();
+
+    getXmlChildrenByName(relsDoc, 'Relationship').forEach(rel => {
+        const id = rel.getAttribute('Id');
+        const target = rel.getAttribute('Target');
+        if (id && target) {
+            relMap.set(id, normalizeZipTargetPath(target));
+        }
+    });
+
+    const sheetMap = new Map();
+    getXmlChildrenByName(workbookDoc, 'sheet').forEach(sheet => {
+        const name = sheet.getAttribute('name') || '';
+        const relId = sheet.getAttribute('r:id') || sheet.getAttribute('id') || '';
+        const path = relMap.get(relId) || '';
+        if (name && path) {
+            sheetMap.set(name, path);
+        }
+    });
+
+    return sheetMap;
+}
+
+function parseStylesFillColorMap(stylesXmlText) {
+    const doc = parseXmlDocument(stylesXmlText);
+    const fills = [];
+    const xfs = [];
+
+    const fillsNode = getXmlChildrenByName(doc, 'fills')[0];
+    const fillNodes = fillsNode
+        ? Array.from(fillsNode.children).filter(node => node.localName === 'fill')
+        : getXmlChildrenByName(doc, 'fill');
+    fillNodes.forEach(fill => {
+        const patternFill = getXmlChildrenByName(fill, 'patternFill')[0];
+        if (!patternFill) {
+            fills.push('');
+            return;
+        }
+        const fgColor = getXmlChildrenByName(patternFill, 'fgColor')[0];
+        const bgColor = getXmlChildrenByName(patternFill, 'bgColor')[0];
+        fills.push(normalizeColorValue(
+            fgColor?.getAttribute('rgb') ||
+            fgColor?.getAttribute('indexed') ||
+            fgColor?.getAttribute('theme') ||
+            bgColor?.getAttribute('rgb') ||
+            bgColor?.getAttribute('indexed') ||
+            bgColor?.getAttribute('theme') ||
+            ''
+        ));
+    });
+
+    const cellXfsNode = getXmlChildrenByName(doc, 'cellXfs')[0];
+    const xfNodes = cellXfsNode
+        ? Array.from(cellXfsNode.children).filter(node => node.localName === 'xf')
+        : getXmlChildrenByName(doc, 'xf');
+    xfNodes.forEach(xf => {
+        xfs.push({
+            fillId: Number(xf.getAttribute('fillId') || xf.getAttribute('fillid') || 0)
+        });
+    });
+
+    return { fills, xfs };
+}
+
+function getFillColorFromStyles(styleIndex, styleMap) {
+    const xfs = styleMap?.xfs || [];
+    const fills = styleMap?.fills || [];
+    const xf = xfs[Number(styleIndex)] || null;
+    const fillId = Number(xf?.fillId);
+    if (!Number.isFinite(fillId) || fillId < 0) return '';
+    return fills[fillId] || '';
+}
+
+function parseSheetCellColorMap(sheetXmlText, styleMap) {
+    const doc = parseXmlDocument(sheetXmlText);
+    const map = new Map();
+    getXmlChildrenByName(doc, 'row').forEach(row => {
+        const ref = Number(row.getAttribute('r'));
+        const styleIndex = Number(row.getAttribute('s') || 0);
+        const color = getFillColorFromStyles(styleIndex, styleMap);
+        if (Number.isFinite(ref) && color) {
+            map.set(`__ROW_${ref - 1}`, color);
+        }
+    });
+    getXmlChildrenByName(doc, 'c').forEach(cell => {
+        const ref = cell.getAttribute('r');
+        if (!ref) return;
+        const styleIndex = Number(cell.getAttribute('s') || 0);
+        const color = getFillColorFromStyles(styleIndex, styleMap);
+        if (color) {
+            map.set(ref, color);
+        }
+    });
+    return map;
+}
+
+function parseReviewMarkerColor(color) {
+    const normalized = normalizeColorValue(color);
+    if (!normalized) return false;
+    return !['0', '00', '1', '01', '64', '65', '000000', 'FFFFFF', '00000000', 'FFFFFFFF'].includes(normalized);
+}
+
+async function extractWorksheetColorMapFromFile(file, workbook, sheetName) {
+    if (!file || !/\.xlsx$/i.test(file.name || '') || typeof JSZip === 'undefined') {
+        return extractWorksheetColorMap(workbook, sheetName);
+    }
+
+    try {
+        const arrayBuffer = await file.arrayBuffer();
+        const zip = await JSZip.loadAsync(arrayBuffer);
+        const workbookXml = await loadZipFileText(zip, 'xl/workbook.xml');
+        const relsXml = await loadZipFileText(zip, 'xl/_rels/workbook.xml.rels');
+        const stylesXml = await loadZipFileText(zip, 'xl/styles.xml');
+        const sheetMap = getSheetXmlPathMap(workbookXml, relsXml);
+        const workbookIndex = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames.indexOf(sheetName) : -1;
+        const sheetXmlPath = sheetMap.get(sheetName) || (workbookIndex >= 0 ? `xl/worksheets/sheet${workbookIndex + 1}.xml` : '');
+        if (!sheetXmlPath) return extractWorksheetColorMap(workbook, sheetName);
+
+        const sheetXml = await loadZipFileText(zip, sheetXmlPath);
+        const styleMap = parseStylesFillColorMap(stylesXml);
+        return parseSheetCellColorMap(sheetXml, styleMap);
+    } catch (error) {
+        console.warn('Failed to read worksheet colors from xlsx XML:', error);
+        return extractWorksheetColorMap(workbook, sheetName);
+    }
+}
+
+function findWorksheetByName(sheetNames, preferredNames) {
+    const normalized = preferredNames.map(name => normalizeHeaderText(name));
+    for (const preferred of normalized) {
+        const exact = sheetNames.find(name => normalizeHeaderText(name) === preferred);
+        if (exact) return exact;
+    }
+    for (const preferred of normalized) {
+        const partial = sheetNames.find(name => normalizeHeaderText(name).includes(preferred));
+        if (partial) return partial;
+    }
+    return sheetNames[0] || '';
+}
+
+function findOptionalWorksheetByName(sheetNames, preferredNames) {
+    const normalized = preferredNames.map(name => normalizeHeaderText(name));
+    for (const preferred of normalized) {
+        const exact = sheetNames.find(name => normalizeHeaderText(name) === preferred);
+        if (exact) return exact;
+    }
+    for (const preferred of normalized) {
+        const partial = sheetNames.find(name => normalizeHeaderText(name).includes(preferred));
+        if (partial) return partial;
+    }
+    return '';
+}
+
+function inferReviewColumns(rows) {
+    const headers = (rows[0] || []).map(cell => normalizeHeaderText(cell));
+    const findIndex = (keywords, negativeKeywords = [], excludeIndexes = new Set()) => headers.findIndex((header, index) => {
+        if (excludeIndexes.has(index)) return false;
+        if (negativeKeywords.some(keyword => header.includes(normalizeHeaderText(keyword)))) return false;
+        return keywords.some(keyword => header.includes(normalizeHeaderText(keyword)));
+    });
+    const finalTranslationIndex = findIndex(['AI润色修正译文', 'AI修正译文', '修正后译文', '最终译文', 'final', 'fixed', 'revised']);
+    const sourceIndex = findIndex(['原文', '源文', '中文', 'source'], ['译文', 'translation', 'target', '修正']);
+    return {
+        idIndex: findIndex(['定位ID/Key', 'ID/Key', '定位ID', '定位Key', 'ID', 'Key', 'reference id', 'referenceid']),
+        rowIndex: findIndex(['定位行号', '行号', 'row', 'line']),
+        sourceIndex,
+        termIndex: findIndex(['原文术语', '中文术语', '术语', 'term'], ['译文', 'translation', 'target']),
+        originalTranslationIndex: findIndex(
+            ['原译文', '当前译法', '原有译文', '英文', '英语', 'target', 'translation', 'english', 'en'],
+            ['修正后', 'ai', 'final', 'fixed', 'revised'],
+            new Set([sourceIndex, finalTranslationIndex].filter(index => index >= 0))
+        ),
+        finalTranslationIndex,
+        statusIndex: findIndex(['人工处理状态', '处理状态', '状态', 'status']),
+        noteIndex: findIndex(['备注', '说明', '原因', 'reason', 'note']),
+        colorIndex: findIndex(['标色', '颜色', 'color', 'fill'])
+    };
+}
+
+function normalizeReviewDecisionText(text) {
+    const value = String(text || '').trim().toLowerCase();
+    if (!value) return '';
+    if (/(忽略|排除|删除|去掉|不改|不用改|无需改|保持|维持原译|不要|skip|ignore|exclude|remove)/i.test(value)) return 'ignore';
+    if (/(保留|通过|采用|keep|pass|accept)/i.test(value)) return 'keep';
+    return '';
+}
+
+function normalizeReviewDisplayDecision(decision) {
+    if (decision === 'ignore') return '排除';
+    if (decision === 'keep') return '保留';
+    return '未标记';
+}
+
+function buildReviewRows(report) {
+    return [[
+        '定位ID/Key',
+        '定位行号',
+        '原文',
+        '原译文',
+        'AI/最终译文',
+        '人工处理状态',
+        '检测到标色',
+        '匹配术语',
+        '备注',
+        '建议处理',
+        '匹配提示'
+    ], ...report.entries.map(entry => [
+        entry.referenceId || '',
+        entry.rowNumber || '',
+        entry.sourceText || '',
+        entry.originalTranslation || '',
+        entry.finalTranslation || '',
+        normalizeReviewDisplayDecision(entry.decision),
+        entry.hasMarker ? '是' : '否',
+        (entry.matchedTerms || []).join('; '),
+        entry.note || '',
+        entry.decision === 'ignore'
+            ? '从最终术语表排除匹配术语'
+            : entry.decision === 'keep'
+                ? '保留匹配术语'
+                : '无人工标记，按原术语表保留',
+        entry.decision && (!entry.matchedTerms || entry.matchedTerms.length === 0)
+            ? '未匹配到术语表，已放入“需人工确认”'
+            : ''
+    ])];
+}
+
+    function buildReviewGlossaryRows(glossaryTerms) {
+        return [
+            ['定位ID/Key', '定位行号', '提取批次', '原文术语（中文）', '原译文/当前译法', '指定译文（英文）', '整理后译文（可直接使用）', '类型', '出现次数', '置信度', '术语质量状态', '术语问题', '修正建议', '提取依据', '提取来源'],
+            ...(glossaryTerms || []).map(term => [
+                term.referenceId || '',
+                term.referenceRows || '',
+                term.extractionBatch || '',
+                term.term || term.source || '',
+                term.originalTranslation || '',
+                term.translation || term.target || '',
+                term.finalTranslation || term.translation || term.target || term.originalTranslation || '',
+                term.type || '',
+                term.count || '',
+                term.confidence || '',
+                term.qualityStatus || '',
+                term.qualityIssues || '',
+                term.qualitySuggestion || '',
+                term.note || '',
+                term.extractionSource || ''
+            ])
+        ];
+    }
+
+function buildIgnoredReviewRows(report) {
+    return [[
+        '定位ID/Key',
+        '定位行号',
+        '原文术语（中文）',
+        '指定译文（英文）',
+        '匹配来源',
+        '人工标记来源',
+        '备注'
+    ], ...(report.ignoredTerms || report.removedTerms || []).map(item => {
+        const term = item.term || item;
+        return [
+            term.referenceId || item.referenceId || '',
+            term.referenceRows || item.rowNumber || '',
+            term.term || term.source || item.sourceText || '',
+            term.translation || term.target || item.finalTranslation || item.originalTranslation || '',
+            item.matchReason || item.reviewReason || '',
+            item.reviewSource || '',
+            item.note || term.note || ''
+        ];
+    })];
+}
+
+function buildNeedsConfirmationRows(report) {
+    return [[
+        '定位ID/Key',
+        '定位行号',
+        '原文',
+        '原译文',
+        'AI/最终译文',
+        '标色',
+        '人工处理状态',
+        '备注',
+        '需要确认原因'
+    ], ...(report.unmatchedEntries || []).map(entry => [
+        entry.referenceId || '',
+        entry.rowNumber || '',
+        entry.sourceText || '',
+        entry.originalTranslation || '',
+        entry.finalTranslation || '',
+        entry.hasMarker ? '是' : '否',
+        normalizeReviewDisplayDecision(entry.decision),
+        entry.note || '',
+        entry.unmatchedReason || '未能匹配到术语表条目'
+    ])];
+}
+
+function buildReviewSummaryRows(report) {
+    return [
+        ['字段', '值'],
+        ['源文件', report.sourceFileName || ''],
+        ['审核工作表', report.sheetName || ''],
+        ['术语来源', report.glossarySheetName || report.termSourceLabel || '当前术语表/返稿行'],
+        ['审核总行数', report.totalRows || 0],
+        ['标色行数', report.markerRows || 0],
+        ['人工状态行数', report.statusCount || 0],
+        ['原始术语数', report.sourceTermCount || 0],
+        ['最终术语数', report.finalTermCount || report.keepCount || 0],
+        ['排除术语数', report.removedTermCount || report.ignoreCount || 0],
+        ['缩小适用范围术语数', report.prunedTermCount || 0],
+        ['待人工确认行数', report.unmatchedIgnoreCount || 0],
+        ['生成时间', new Date().toISOString()]
+    ];
+}
+
+function buildReviewWorkbook(report) {
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(buildReviewGlossaryRows(report.finalTerms || report.keptTerms || [])), '最终术语表');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(buildIgnoredReviewRows(report)), '人工忽略清单');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(buildNeedsConfirmationRows(report)), '需人工确认');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(buildReviewSummaryRows(report)), '识别报告');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(buildReviewRows(report)), '审核清单');
+    return workbook;
 }
 
 function saveGlossaryEntry({ name, sourceFileName, terms, origin, runMeta = null }) {
@@ -3370,7 +3856,7 @@ function initTranslateTool() {
                 <input type="checkbox" value="${entry.id}" ${selectedTranslateGlossaryIds.has(entry.id) ? 'checked' : ''}>
                 <span class="resource-main">
                     <span class="resource-title">${escapeHtml(entry.name)}</span>
-                    <span class="resource-meta">${entryTerms.length} 条术语 · ${entry.origin === 'extracted' ? '提取生成' : '上传记录'}${entry.sourceFileName ? ` · ${escapeHtml(entry.sourceFileName)}` : ''}</span>
+                    <span class="resource-meta">${entryTerms.length} 条术语 · ${getGlossaryOriginDisplayLabel(entry.origin)}${entry.sourceFileName ? ` · ${escapeHtml(entry.sourceFileName)}` : ''}</span>
                 </span>
             `;
 
@@ -6825,8 +7311,8 @@ function initL10nCheckTool() {
         }));
     }
 
-    function getRelevantGlossarySignature(source, target, glossaryTerms) {
-        const relevantTerms = getRelevantGlossaryTerms(source, target, glossaryTerms)
+    function getRelevantGlossarySignature(source, target, glossaryTerms, task = null) {
+        const relevantTerms = getRelevantGlossaryTerms(source, target, glossaryTerms, task)
             .map(term => ({
                 source: normalizeFingerprintText(term.source).toLowerCase(),
                 target: normalizeFingerprintText(getGlossaryEffectiveTarget(term)).toLowerCase(),
@@ -6844,7 +7330,7 @@ function initL10nCheckTool() {
             source: normalizeFingerprintText(task.sourceText),
             target: normalizeFingerprintText(task.targetText),
             project: getProjectFingerprint(project),
-            glossary: getRelevantGlossarySignature(task.sourceText, task.targetText, glossaryTerms)
+            glossary: getRelevantGlossarySignature(task.sourceText, task.targetText, glossaryTerms, task)
         }));
     }
 
@@ -6873,7 +7359,7 @@ function initL10nCheckTool() {
             modelFingerprint,
             resultFingerprint,
             projectFingerprint: getProjectFingerprint(project),
-            glossaryFingerprint: getRelevantGlossarySignature(task.sourceText, task.targetText, glossaryTerms)
+            glossaryFingerprint: getRelevantGlossarySignature(task.sourceText, task.targetText, glossaryTerms, task)
         };
     }
 
@@ -7655,7 +8141,7 @@ function initL10nCheckTool() {
             ));
         }
 
-        const relevantTerms = getRelevantGlossaryTerms(source, target, glossaryTerms);
+        const relevantTerms = getRelevantGlossaryTerms(source, target, glossaryTerms, task);
         relevantTerms.forEach(term => {
             const expectedTarget = getGlossaryEffectiveTarget(term);
             if (!expectedTarget) return;
@@ -7877,7 +8363,7 @@ function initL10nCheckTool() {
                 <input type="checkbox" value="${entry.id}" ${selectedGlossaryIds.has(entry.id) ? 'checked' : ''}>
                 <span class="resource-main">
                     <span class="resource-title">${escapeHtml(entry.name)}</span>
-                    <span class="resource-meta">${entryTerms.length} 条术语 · ${entry.origin === 'extracted' ? '提取生成' : '上传记录'}${entry.sourceFileName ? ` · ${escapeHtml(entry.sourceFileName)}` : ''}</span>
+                    <span class="resource-meta">${entryTerms.length} 条术语 · ${getGlossaryOriginDisplayLabel(entry.origin)}${entry.sourceFileName ? ` · ${escapeHtml(entry.sourceFileName)}` : ''}</span>
                 </span>
             `;
 
@@ -9009,7 +9495,7 @@ function initL10nCheckTool() {
     function getRelevantGlossaryTermsForBatch(tasks, glossaryTerms) {
         const termMap = new Map();
         tasks.forEach(task => {
-            getRelevantGlossaryTerms(task.sourceText, task.targetText, glossaryTerms).forEach(term => {
+            getRelevantGlossaryTerms(task.sourceText, task.targetText, glossaryTerms, task).forEach(term => {
                 const key = `${term.source}|${getGlossaryEffectiveTarget(term)}|${term.type}`;
                 if (!termMap.has(key)) {
                     termMap.set(key, term);
@@ -9502,7 +9988,7 @@ ${JSON.stringify(compactTasks)}
         const taskMeta = new Map();
 
         tasks.forEach(task => {
-            const relevantTerms = getRelevantGlossaryTerms(task.sourceText, task.targetText, glossaryTerms);
+            const relevantTerms = getRelevantGlossaryTerms(task.sourceText, task.targetText, glossaryTerms, task);
             const localIssues = Array.isArray(task.localRuleIssues)
                 ? task.localRuleIssues
                 : buildLocalRuleIssues(task, glossaryTerms);
@@ -9598,7 +10084,7 @@ ${JSON.stringify(compactTasks)}
         }
     }
 
-    function getRelevantGlossaryTerms(source, target, glossaryTerms) {
+    function getRelevantGlossaryTerms(source, target, glossaryTerms, task = null) {
         if (!glossaryTerms || glossaryTerms.length === 0) return [];
 
         const sourceText = String(source || '').toLowerCase();
@@ -9606,6 +10092,7 @@ ${JSON.stringify(compactTasks)}
             const sourceTerm = String(term.source || '').toLowerCase();
             if (!sourceTerm) return false;
             if (!hasCjkText(sourceTerm) || isIdLikeGlossaryValue(sourceTerm)) return false;
+            if (!glossaryTermAppliesToTask(term, task)) return false;
 
             return sourceText.includes(sourceTerm);
         });
@@ -9613,8 +10100,8 @@ ${JSON.stringify(compactTasks)}
         return relevantTerms.slice(0, 80);
     }
 
-    function buildGlossaryPromptSection(source, target, glossaryTerms) {
-        const terms = getRelevantGlossaryTerms(source, target, glossaryTerms);
+    function buildGlossaryPromptSection(source, target, glossaryTerms, task = null) {
+        const terms = getRelevantGlossaryTerms(source, target, glossaryTerms, task);
         if (terms.length === 0) return '';
 
         const rows = terms.map(term => {
@@ -10207,6 +10694,15 @@ function initGlossaryTool() {
     const restoreGlossaryRunBtn = document.getElementById('restoreGlossaryRunBtn');
     const restorePolishRunBtn = document.getElementById('restorePolishRunBtn');
     const clearGlossaryRestoreBtn = document.getElementById('clearGlossaryRestoreBtn');
+    const reviewInput = document.getElementById('glossaryReviewInput');
+    const reviewName = document.getElementById('glossaryReviewName');
+    const reviewCount = document.getElementById('glossaryReviewCount');
+    const reviewStatus = document.getElementById('glossaryReviewStatus');
+    const reviewSummary = document.getElementById('glossaryReviewSummary');
+    const reviewMode = document.getElementById('glossaryReviewMode');
+    const reviewReportBtn = document.getElementById('glossaryReviewReportBtn');
+    const reviewDownloadBtn = document.getElementById('glossaryReviewDownloadBtn');
+    const clearReviewBtn = document.getElementById('clearGlossaryReviewBtn');
     const libraryList = document.getElementById('glossaryLibraryList');
     const libraryCount = document.getElementById('glossaryLibraryCount');
 
@@ -10228,6 +10724,8 @@ function initGlossaryTool() {
     let glossaryTaskController = null;
     let glossaryTaskState = null;
     let glossaryResumeResolvers = [];
+    let glossaryReviewFile = null;
+    let glossaryReviewResult = null;
     const GLOSSARY_AI_CHUNK_MAX_CHARS = 9000;
     const GLOSSARY_AI_CHUNK_MAX_ROWS = 90;
     const GLOSSARY_AI_MAX_TOKENS = 4096;
@@ -10523,6 +11021,14 @@ function initGlossaryTool() {
         }
     });
 
+    reviewInput?.addEventListener('change', (e) => {
+        if (e.target.files.length > 0) {
+            importGlossaryReview(e.target.files[0]).catch(error => {
+                console.error('Review import failed:', error);
+            });
+        }
+    });
+
     extractTermsBtn.addEventListener('click', () => {
         if (extractFile) {
             if (glossaryMode.value === 'ai' && !ensureApiKeyConfigured('AI 智能提取术语表')) {
@@ -10544,6 +11050,9 @@ function initGlossaryTool() {
     restoreGlossaryRunBtn?.addEventListener('click', restoreGlossaryRunFromFiles);
     restorePolishRunBtn?.addEventListener('click', restorePolishRunFromFiles);
     clearGlossaryRestoreBtn?.addEventListener('click', clearGlossaryRestoreFiles);
+    reviewReportBtn?.addEventListener('click', downloadGlossaryReviewReport);
+    reviewDownloadBtn?.addEventListener('click', downloadFinalGlossaryFromReview);
+    clearReviewBtn?.addEventListener('click', clearGlossaryReviewState);
     glossaryPauseBtn?.addEventListener('click', pauseGlossaryTask);
     glossaryResumeBtn?.addEventListener('click', resumeGlossaryTask);
     glossaryCancelBtn?.addEventListener('click', cancelGlossaryTask);
@@ -10552,7 +11061,7 @@ function initGlossaryTool() {
     renderGlossaryLibrary();
 
     function getGlossaryOriginLabel(origin) {
-        return origin === 'extracted' ? '提取生成' : '上传记录';
+        return getGlossaryOriginDisplayLabel(origin);
     }
 
     function formatGlossaryTime(timestamp) {
@@ -10581,6 +11090,481 @@ function initGlossaryTool() {
         if (restoreSourceName) restoreSourceName.textContent = glossaryRestoreFiles.source?.name || '未选择';
         if (restoreGlossaryRunBtn) restoreGlossaryRunBtn.disabled = selected < 3 || Boolean(glossaryTaskState?.running);
         if (restorePolishRunBtn) restorePolishRunBtn.disabled = selected < 3 || Boolean(glossaryTaskState?.running);
+    }
+
+    function updateGlossaryReviewState() {
+        const hasReview = Boolean(glossaryReviewFile && glossaryReviewResult);
+        if (reviewCount) {
+            reviewCount.textContent = hasReview
+                ? `${glossaryReviewResult.markerRows || 0} / ${glossaryReviewResult.totalRows || 0}`
+                : '0 / 0';
+        }
+        if (reviewName) reviewName.textContent = glossaryReviewFile?.name || '未选择';
+        if (reviewSummary) {
+            reviewSummary.textContent = hasReview
+                ? `最终 ${glossaryReviewResult.finalTermCount || glossaryReviewResult.keepCount || 0} 条，排除 ${glossaryReviewResult.removedTermCount || glossaryReviewResult.ignoreCount || 0} 条`
+                : '等待上传返稿';
+        }
+        if (reviewReportBtn) reviewReportBtn.disabled = !hasReview;
+        if (reviewDownloadBtn) reviewDownloadBtn.disabled = !hasReview;
+    }
+
+    function clearGlossaryReviewState() {
+        glossaryReviewFile = null;
+        glossaryReviewResult = null;
+        if (reviewInput) reviewInput.value = '';
+        if (reviewStatus) {
+            reviewStatus.textContent = '上传策划返稿后，工具会识别被标色或标记为“不改”的条目，并生成审核后的最终术语表。';
+            reviewStatus.className = 'upload-status info';
+        }
+        updateGlossaryReviewState();
+    }
+
+    function normalizeReviewEditableTerm(term, origin = '') {
+        const source = String(term.term || term.source || '').trim();
+        const target = String(term.translation || term.target || '').trim();
+        if (!source) return null;
+        return {
+            ...term,
+            term: source,
+            translation: target,
+            type: String(term.type || guessTermType(source) || '游戏术语').trim(),
+            count: Number(term.count || 1),
+            confidence: Number(term.confidence || 0),
+            note: String(term.note || term.reason || '').trim(),
+            extractionSource: String(term.extractionSource || origin || '').trim(),
+            extractionBatch: String(term.extractionBatch || '').trim(),
+            referenceId: String(term.referenceId || '').trim(),
+            referenceRows: String(term.referenceRows || '').trim(),
+            originalTranslation: String(term.originalTranslation || '').trim(),
+            finalTranslation: String(term.finalTranslation || target || term.originalTranslation || '').trim(),
+            qualityStatus: String(term.qualityStatus || '').trim(),
+            qualityIssues: String(term.qualityIssues || '').trim(),
+            qualitySuggestion: String(term.qualitySuggestion || '').trim()
+        };
+    }
+
+    function getCurrentReviewSourceTerms() {
+        return (terms || [])
+            .map(term => normalizeReviewEditableTerm(term, currentGlossaryOrigin || 'current'))
+            .filter(Boolean);
+    }
+
+    function readReviewGlossarySheetTerms(workbook) {
+        const sheetName = findOptionalWorksheetByName(workbook.SheetNames || [], ['术语表', '最终术语表', '整理后术语表', 'glossary']);
+        if (!sheetName || !workbook.Sheets?.[sheetName]) {
+            return { sheetName: '', terms: [] };
+        }
+
+        const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: '' });
+        const parsedTerms = mapParsedGlossaryTermsToEditable(parseGlossaryTableRows(rows), 'review-glossary');
+        return {
+            sheetName,
+            terms: parsedTerms.map(term => normalizeReviewEditableTerm(term, 'review-glossary')).filter(Boolean)
+        };
+    }
+
+    function getReviewTermUniqueKey(term, index = 0) {
+        return normalizeTermKey([
+            term.term || term.source,
+            term.translation || term.target,
+            term.referenceId,
+            term.referenceRows
+        ].filter(Boolean).join('|')) || `term-${index}`;
+    }
+
+    function extractReviewNumbers(value) {
+        const numbers = [];
+        splitReferenceList(value).forEach(item => {
+            const matches = String(item || '').match(/\d+/g) || [];
+            matches.forEach(match => {
+                const number = Number(match);
+                if (Number.isFinite(number)) numbers.push(number);
+            });
+        });
+        return numbers;
+    }
+
+    function getReviewIdSet(value) {
+        return new Set(splitReferenceList(value).map(item => normalizeTermKey(item)).filter(Boolean));
+    }
+
+    function normalizeReviewReferenceToken(value) {
+        return normalizeTermKey(value);
+    }
+
+    function getReviewEntryRowNumbers(entry) {
+        return new Set(extractReviewNumbers(`${entry?.rowNumber || ''};${entry?.excelRowNumber || ''}`));
+    }
+
+    function getReviewEntryIds(entry) {
+        return getReviewIdSet(entry?.referenceId || '');
+    }
+
+    function pruneReviewReferenceList(value, removeSet) {
+        if (!removeSet || removeSet.size === 0) return String(value || '').trim();
+        const kept = splitReferenceList(value)
+            .filter(item => !removeSet.has(normalizeReviewReferenceToken(item)) && !removeSet.has(normalizeReviewReferenceToken(item.replace(/^行/, ''))));
+        return kept.join('; ');
+    }
+
+    function pruneReviewTermScope(term, entry) {
+        const rowRemoveSet = new Set();
+        getReviewEntryRowNumbers(entry).forEach(row => {
+            rowRemoveSet.add(normalizeReviewReferenceToken(row));
+            rowRemoveSet.add(normalizeReviewReferenceToken(`行${row}`));
+        });
+        const idRemoveSet = getReviewEntryIds(entry);
+
+        const originalRows = splitReferenceList(term.referenceRows);
+        const originalIds = splitReferenceList(term.referenceId);
+        const nextRows = pruneReviewReferenceList(term.referenceRows, rowRemoveSet, '行');
+        const nextIds = pruneReviewReferenceList(term.referenceId, idRemoveSet);
+        const hadScopedRows = originalRows.length > 0;
+        const hadScopedIds = originalIds.length > 0;
+        const removedRows = hadScopedRows && nextRows !== String(term.referenceRows || '').trim();
+        const removedIds = hadScopedIds && nextIds !== String(term.referenceId || '').trim();
+        const hasRemainingRows = splitReferenceList(nextRows).length > 0;
+        const hasRemainingIds = splitReferenceList(nextIds).length > 0;
+
+        if ((hadScopedRows || hadScopedIds) && (removedRows || removedIds) && (hasRemainingRows || hasRemainingIds)) {
+            return {
+                action: 'pruned',
+                term: {
+                    ...term,
+                    referenceRows: nextRows,
+                    referenceId: nextIds,
+                    note: [term.note, `人工审核排除：${entry.rowNumber || entry.referenceId || '标记行'}`].filter(Boolean).join('；')
+                }
+            };
+        }
+
+        return {
+            action: 'remove',
+            term
+        };
+    }
+
+    function getReviewCell(row, index) {
+        return index >= 0 && row[index] !== undefined ? String(row[index]).trim() : '';
+    }
+
+    function inferReviewDecision(row, columnIndexes, hasMarker) {
+        const statusDecision = normalizeReviewDecisionText(getReviewCell(row, columnIndexes.statusIndex));
+        if (statusDecision) {
+            return { decision: statusDecision, reviewSource: '状态列' };
+        }
+
+        const noteDecision = normalizeReviewDecisionText(getReviewCell(row, columnIndexes.noteIndex));
+        if (noteDecision) {
+            return { decision: noteDecision, reviewSource: '备注列' };
+        }
+
+        if (hasMarker) {
+            const mode = reviewMode?.value || 'ignore';
+            return {
+                decision: mode === 'keep' ? 'keep' : 'ignore',
+                reviewSource: '标色'
+            };
+        }
+
+        return { decision: '', reviewSource: '' };
+    }
+
+    function findMatchingReviewTerms(entry, sourceTerms) {
+        const entryRows = new Set(extractReviewNumbers(`${entry.rowNumber || ''};${entry.excelRowNumber || ''}`));
+        const entryIds = getReviewIdSet(entry.referenceId);
+        const sourceTextKey = normalizeTermKey(entry.sourceText);
+        const termHintKey = normalizeTermKey(entry.termText);
+        const entryTranslationKey = normalizeTermKey(`${entry.originalTranslation || ''} ${entry.finalTranslation || ''}`);
+
+        return (sourceTerms || []).map((term, index) => {
+            const termText = term.term || term.source || '';
+            const termKey = normalizeTermKey(termText);
+            if (!termKey) return null;
+
+            const termRows = extractReviewNumbers(term.referenceRows);
+            const termIds = getReviewIdSet(term.referenceId);
+            const rowMatch = termRows.some(row => entryRows.has(row));
+            const idMatch = [...termIds].some(id => entryIds.has(id));
+            const termMatch = Boolean(
+                (sourceTextKey && sourceTextKey.includes(termKey)) ||
+                (termHintKey && (termHintKey === termKey || termHintKey.includes(termKey) || termKey.includes(termHintKey)))
+            );
+            const translationKey = normalizeTermKey(term.finalTranslation || term.translation || term.originalTranslation || '');
+            const translationMatch = Boolean(translationKey && entryTranslationKey.includes(translationKey));
+
+            let matchReason = '';
+            if (idMatch && (termMatch || rowMatch || !sourceTextKey)) {
+                matchReason = 'ID匹配';
+            } else if (rowMatch && (termMatch || translationMatch || !sourceTextKey)) {
+                matchReason = '行号匹配';
+            } else if (termMatch) {
+                matchReason = '原文命中';
+            }
+
+            if (!matchReason) return null;
+            return {
+                term,
+                index,
+                key: getReviewTermUniqueKey(term, index),
+                matchReason
+            };
+        }).filter(Boolean);
+    }
+
+    function buildFallbackReviewTerms(entries) {
+        return (entries || []).map(entry => {
+            const source = String(entry.termText || entry.sourceText || '').trim();
+            if (!source) return null;
+            return normalizeReviewEditableTerm({
+                term: source,
+                translation: entry.finalTranslation || entry.originalTranslation || '',
+                finalTranslation: entry.finalTranslation || entry.originalTranslation || '',
+                originalTranslation: entry.originalTranslation || '',
+                type: '人工审核导入',
+                count: 1,
+                confidence: 0,
+                note: entry.note || '',
+                extractionSource: 'review-import',
+                referenceId: entry.referenceId || '',
+                referenceRows: entry.rowNumber || (entry.excelRowNumber ? `行${entry.excelRowNumber}` : '')
+            }, 'review-import');
+        }).filter(Boolean);
+    }
+
+    async function analyzeGlossaryReviewFile(file) {
+        const { workbook, fileName } = await readSpreadsheetWorkbook(file);
+        const sheetName = findWorksheetByName(workbook.SheetNames, ['修正后数据', '审核结果', 'review']);
+        const sheet = workbook.Sheets[sheetName];
+        if (!sheet) {
+            throw new Error('未找到“修正后数据”或可用审核工作表');
+        }
+
+        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+        if (!rows.length) {
+            throw new Error('审核工作表为空');
+        }
+
+        const columnIndexes = inferReviewColumns(rows);
+        const colorMap = await extractWorksheetColorMapFromFile(file, workbook, sheetName);
+        const entries = [];
+        let markerRows = 0;
+
+        const headerRow = rows[0] || [];
+        const dataRows = rows.slice(1);
+
+        dataRows.forEach((row, offset) => {
+            const excelRowNumber = offset + 2;
+            const referenceId = getReviewCell(row, columnIndexes.idIndex);
+            const rowNumber = getReviewCell(row, columnIndexes.rowIndex) || `行${excelRowNumber}`;
+            const sourceText = getReviewCell(row, columnIndexes.sourceIndex) || getReviewCell(row, columnIndexes.termIndex);
+            const termText = getReviewCell(row, columnIndexes.termIndex);
+            const originalTranslation = getReviewCell(row, columnIndexes.originalTranslationIndex);
+            const finalTranslation = getReviewCell(row, columnIndexes.finalTranslationIndex);
+            const note = getReviewCell(row, columnIndexes.noteIndex);
+
+            const rowColor = colorMap.get(`__ROW_${offset + 1}`) || Array.from({ length: Math.max(headerRow.length, row.length) }, (_, col) => {
+                const addr = XLSX.utils.encode_cell({ r: offset + 1, c: col });
+                return colorMap.get(addr) || '';
+            }).find(color => parseReviewMarkerColor(color)) || '';
+            const hasMarker = Boolean(rowColor);
+            if (hasMarker) markerRows++;
+
+            const { decision, reviewSource } = inferReviewDecision(row, columnIndexes, hasMarker);
+            const sourceKey = normalizeTermKey(sourceText || referenceId || rowNumber);
+            entries.push({
+                excelRowNumber,
+                referenceId,
+                rowNumber,
+                sourceText,
+                termText,
+                originalTranslation,
+                finalTranslation,
+                note,
+                hasMarker,
+                rowColor,
+                decision,
+                reviewSource,
+                sourceKey
+            });
+        });
+
+        const glossarySheet = readReviewGlossarySheetTerms(workbook);
+        const currentSourceTerms = getCurrentReviewSourceTerms();
+        let sourceTerms = glossarySheet.terms.length > 0 ? glossarySheet.terms : currentSourceTerms;
+        let termSourceLabel = glossarySheet.terms.length > 0
+            ? `返稿工作簿：${glossarySheet.sheetName}`
+            : (currentSourceTerms.length > 0 ? '当前已打开术语表' : '返稿行兜底生成');
+
+        if (sourceTerms.length === 0) {
+            sourceTerms = buildFallbackReviewTerms(entries);
+            termSourceLabel = '返稿行兜底生成';
+        }
+
+        const removedTermMap = new Map();
+        const prunedTermMap = new Map();
+        const prunedReviewItems = [];
+        const unmatchedEntries = [];
+        entries.forEach(entry => {
+            const matches = findMatchingReviewTerms(entry, sourceTerms);
+            entry.matchedTerms = matches.map(match => match.term.term || match.term.source || '').filter(Boolean);
+            if (entry.decision && matches.length === 0) {
+                unmatchedEntries.push({
+                    ...entry,
+                    unmatchedReason: sourceTerms.length > 0 ? '审核标记未匹配到术语表条目' : '返稿中没有可用术语来源'
+                });
+            }
+
+            if (entry.decision !== 'ignore') return;
+            matches.forEach(match => {
+                const currentTerm = prunedTermMap.get(match.key) || match.term;
+                const scoped = pruneReviewTermScope(currentTerm, entry);
+                if (scoped.action === 'pruned') {
+                    prunedTermMap.set(match.key, scoped.term);
+                    prunedReviewItems.push({
+                        term: match.term,
+                        matchReason: `${match.matchReason}（仅排除该行/ID，其他行继续保留）`,
+                        reviewSource: entry.reviewSource || '人工标记',
+                        note: entry.note || '',
+                        referenceId: entry.referenceId || '',
+                        rowNumber: entry.rowNumber || ''
+                    });
+                    return;
+                }
+
+                prunedTermMap.delete(match.key);
+                if (removedTermMap.has(match.key)) return;
+                removedTermMap.set(match.key, {
+                    term: scoped.term,
+                    matchReason: match.matchReason,
+                    reviewSource: entry.reviewSource || '人工标记',
+                    note: entry.note || '',
+                    referenceId: entry.referenceId || match.term.referenceId || '',
+                    rowNumber: entry.rowNumber || match.term.referenceRows || ''
+                });
+            });
+        });
+
+        const finalTerms = sourceTerms
+            .filter((term, index) => !removedTermMap.has(getReviewTermUniqueKey(term, index)))
+            .map((term, index) => prunedTermMap.get(getReviewTermUniqueKey(term, index)) || term);
+        const removedTerms = [...removedTermMap.values()];
+        const prunedTerms = [...prunedTermMap.values()];
+        const ignoredTerms = [...removedTerms, ...prunedReviewItems];
+        const keepCount = finalTerms.length;
+        const ignoreCount = ignoredTerms.length;
+        const reviewResult = {
+            sourceFileName: fileName,
+            sheetName,
+            glossarySheetName: glossarySheet.sheetName,
+            termSourceLabel,
+            totalRows: dataRows.length,
+            markerRows,
+            sourceTermCount: sourceTerms.length,
+            finalTermCount: finalTerms.length,
+            removedTermCount: removedTerms.length,
+            prunedTermCount: prunedTerms.length,
+            unmatchedIgnoreCount: unmatchedEntries.length,
+            keepCount,
+            ignoreCount,
+            statusCount: entries.filter(entry => entry.decision).length,
+            entries,
+            ignoredTerms,
+            removedTerms,
+            prunedTerms,
+            unmatchedEntries,
+            keptTerms: finalTerms.map(term => ({
+                ...term,
+                reviewDecision: 'keep'
+            })),
+            finalTerms: finalTerms.map(term => ({
+                ...term,
+                reviewDecision: 'keep'
+            }))
+        };
+
+        return reviewResult;
+    }
+
+    async function importGlossaryReview(file) {
+        glossaryReviewFile = file;
+        if (reviewStatus) {
+            reviewStatus.textContent = `正在分析 ${file.name} ...`;
+            reviewStatus.className = 'upload-status info';
+        }
+        updateGlossaryReviewState();
+
+            try {
+                const result = await analyzeGlossaryReviewFile(file);
+                glossaryReviewResult = result;
+                if (reviewStatus) {
+                reviewStatus.textContent = `已识别 ${result.markerRows} 条标色行，来源 ${result.termSourceLabel || '术语表'}，最终 ${result.finalTermCount} 条，排除 ${result.removedTermCount} 条${result.unmatchedIgnoreCount ? `，${result.unmatchedIgnoreCount} 条需人工确认` : ''}。`;
+                reviewStatus.className = 'upload-status success';
+            }
+            updateGlossaryReviewState();
+        } catch (error) {
+            glossaryReviewResult = null;
+            if (reviewStatus) {
+                reviewStatus.textContent = error.message || '识别返稿失败';
+                reviewStatus.className = 'upload-status error';
+            }
+            updateGlossaryReviewState();
+            throw error;
+        }
+    }
+
+    function downloadGlossaryReviewReport() {
+        if (!glossaryReviewResult) {
+            alert('请先导入策划返稿');
+            return;
+        }
+        downloadWorkbookFile(buildReviewWorkbook(glossaryReviewResult), `${(glossaryReviewFile?.name || 'glossary_review').replace(/\.(xlsx|xls)$/i, '')}_review_report.xlsx`);
+    }
+
+    function downloadFinalGlossaryFromReview() {
+        if (!glossaryReviewResult) {
+            alert('请先导入策划返稿');
+            return;
+        }
+        const finalTerms = buildFilteredGlossaryTermsFromReview(glossaryReviewResult);
+        if (finalTerms.length === 0) {
+            alert('没有可生成的最终术语表，请检查返稿里是否包含“术语表”分页，或先打开原术语表后再导入返稿。');
+            return;
+        }
+
+        terms = finalTerms;
+        sourceFileName = glossaryReviewResult.sourceFileName || glossaryReviewFile?.name || '人工审核术语表';
+        currentGlossaryName = `${(glossaryReviewFile?.name || '人工审核术语表').replace(/\.(xlsx|xls)$/i, '')}_最终术语表`;
+        currentGlossaryOrigin = 'reviewed';
+        currentGlossaryRunMeta = null;
+        currentPolishRunMeta = null;
+        const savedEntry = saveGlossaryEntry({
+            name: currentGlossaryName,
+            sourceFileName,
+            terms,
+            origin: currentGlossaryOrigin,
+            runMeta: {
+                mode: 'review',
+                sourceFileName,
+                reviewSheetName: glossaryReviewResult.sheetName || '',
+                glossarySheetName: glossaryReviewResult.glossarySheetName || '',
+                sourceTermCount: glossaryReviewResult.sourceTermCount || 0,
+                finalTermCount: glossaryReviewResult.finalTermCount || 0,
+                removedTermCount: glossaryReviewResult.removedTermCount || 0,
+                prunedTermCount: glossaryReviewResult.prunedTermCount || 0,
+                unmatchedIgnoreCount: glossaryReviewResult.unmatchedIgnoreCount || 0,
+                createdAt: new Date().toISOString()
+            }
+        });
+        if (savedEntry) {
+            currentGlossaryId = savedEntry.id;
+            currentGlossaryName = savedEntry.name;
+        }
+
+        displayTerms();
+        downloadWorkbookFile(buildReviewWorkbook(glossaryReviewResult), `${(glossaryReviewFile?.name || 'glossary_review').replace(/\.(xlsx|xls)$/i, '')}_final_glossary.xlsx`);
+        setStatus('success', '最终术语表已生成', `已保存 ${finalTerms.length} 条到本地术语库，可在本地化检测中直接勾选使用`);
     }
 
     function handleGlossaryRestoreFileSelect(kind, file) {
@@ -11708,6 +12692,15 @@ function isTemporaryGlossaryApiError(error) {
                 term.extractionSource || ''
             ])
         ];
+    }
+
+    function buildFilteredGlossaryTermsFromReview(reviewResult) {
+        if (!reviewResult) return [];
+        return (reviewResult.finalTerms || reviewResult.keptTerms || []).map(term => ({
+            ...term,
+            extractionSource: term.extractionSource || 'review-import',
+            reviewDecision: 'keep'
+        }));
     }
 
     function buildGlossaryRunReportRows(runMeta = currentGlossaryRunMeta) {
@@ -13514,6 +14507,7 @@ ${chunk}
         uploadGlossaryStatus.textContent = '';
         uploadGlossaryStatus.className = 'upload-status';
         clearGlossaryRestoreFiles();
+        clearGlossaryReviewState();
         extractTermsBtn.style.display = 'none';
 
         infoPanel.style.display = 'none';
