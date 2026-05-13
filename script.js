@@ -586,13 +586,28 @@ function isOnline() {
     return navigator.onLine;
 }
 
-function waitForNetwork() {
-    return new Promise(resolve => {
-        if (navigator.onLine) {
+function waitForNetwork(signal = null) {
+    if (navigator.onLine) return Promise.resolve();
+    if (signal?.aborted) {
+        return Promise.reject(createAbortError());
+    }
+
+    return new Promise((resolve, reject) => {
+        const cleanup = () => {
+            window.removeEventListener('online', handleOnline);
+            signal?.removeEventListener('abort', handleAbort);
+        };
+        const handleOnline = () => {
+            cleanup();
             resolve();
-        } else {
-            window.addEventListener('online', () => resolve(), { once: true });
-        }
+        };
+        const handleAbort = () => {
+            cleanup();
+            reject(createAbortError());
+        };
+
+        window.addEventListener('online', handleOnline, { once: true });
+        signal?.addEventListener('abort', handleAbort, { once: true });
     });
 }
 
@@ -3068,7 +3083,7 @@ function initTranslateTool() {
     let isTranslationCancelled = false;
     let currentTranslateAbortController = null;
     let activeTranslateRunId = null;
-    let resumeResolve = null;
+    let resumeResolvers = [];
     let selectedTranslateProfileIds = new Set();
     let translateSources = [];
     let selectedTranslateSourceIds = new Set();
@@ -3263,16 +3278,20 @@ function initTranslateTool() {
         downloadProgressBtn.style.display = 'none';
         updateTranslationRunActions();
         hideStatus();
-        if (resumeResolve) {
-            resumeResolve();
-            resumeResolve = null;
-        }
+        resolveResumeWaiters();
     }
 
     function waitForResume() {
+        if (!isPaused) return Promise.resolve();
         return new Promise(resolve => {
-            resumeResolve = resolve;
+            resumeResolvers.push(resolve);
         });
+    }
+
+    function resolveResumeWaiters() {
+        const waiters = resumeResolvers;
+        resumeResolvers = [];
+        waiters.forEach(resolve => resolve());
     }
 
     function throwIfTranslationCancelled(runId) {
@@ -3290,10 +3309,7 @@ function initTranslateTool() {
             currentTranslateAbortController.abort();
             currentTranslateAbortController = null;
         }
-        if (resumeResolve) {
-            resumeResolve();
-            resumeResolve = null;
-        }
+        resolveResumeWaiters();
 
         isPaused = false;
         pauseBtn.style.display = 'inline-flex';
@@ -4327,7 +4343,7 @@ function initTranslateTool() {
                 }
                 throwIfTranslationCancelled(runId);
 
-                await waitForNetwork();
+                await waitForNetwork(runSignal);
 
                 const translated = await translateTextWithRetry(task.text, sourceLang, targetLang, currentProject.rules, task.profile, 3, runSignal, task.glossaryTerms);
                 throwIfTranslationCancelled(runId);
@@ -4780,7 +4796,7 @@ ${JSON.stringify(payload)}`;
 
         for (let attempt = 0; attempt < retries; attempt++) {
             try {
-                await waitForNetwork();
+                await waitForNetwork(signal);
                 if (signal?.aborted) {
                     throw new Error('TRANSLATION_CANCELLED');
                 }
@@ -4834,7 +4850,7 @@ ${JSON.stringify(payload)}`;
 
         for (let attempt = 0; attempt < retries; attempt++) {
             try {
-                await waitForNetwork();
+                await waitForNetwork(signal);
                 if (signal?.aborted) {
                     throw new Error('TRANSLATION_CANCELLED');
                 }
@@ -5723,6 +5739,7 @@ function initL10nCheckTool() {
     const checkBtn = document.getElementById('l10nCheckBtn');
     const downloadBtn = document.getElementById('l10nDownloadBtn');
     const downloadGlossaryBtn = document.getElementById('l10nDownloadGlossaryBtn');
+    const generateFixesBtn = document.getElementById('l10nGenerateFixesBtn');
     const resetBtn = document.getElementById('l10nResetBtn');
     const confirmColumnBtn = document.getElementById('l10nConfirmColumnBtn');
     const progressSection = document.getElementById('l10nProgressSection');
@@ -5760,10 +5777,11 @@ function initL10nCheckTool() {
     let selectedProfileIds = new Set();
     let l10nProjects = [];
     let isPaused = false;
-    let resumeResolve = null;
+    let resumeResolvers = [];
     let isCheckCancelled = false;
     let activeCheckRunId = null;
     let currentCheckAbortController = null;
+    let isGeneratingL10nFixes = false;
     let importedHistoryState = createEmptyHistoryImportState();
     let channelProgressState = new Map();
 
@@ -5774,10 +5792,14 @@ function initL10nCheckTool() {
     const L10N_STATUS_ISSUE = '异常问题';
     const L10N_STATUS_DISAGREE = '复核分歧';
     const L10N_STATUS_SKIPPED = '未检测';
-    const L10N_RULE_ENGINE_VERSION = 'hidden-rules-v2';
+    const L10N_RULE_ENGINE_VERSION = 'hidden-rules-v3';
     const L10N_CHECK_CACHE_KEY = 'nexus_l10n_check_cache_v2';
     const L10N_CHECK_CACHE_VERSION = 2;
     const L10N_CHECK_CACHE_LIMIT = 3000;
+    const L10N_FIX_BATCH_SIZE = 12;
+    const L10N_FIX_RETRY_DELAYS = [4000, 12000];
+    const L10N_ADAPTIVE_SUCCESS_TO_INCREASE = 10;
+    const L10N_ADAPTIVE_COOLDOWN_MS = 180000;
     const L10N_SEVERITY_RANK = {
         '阻断': 4,
         '严重': 3,
@@ -6022,16 +6044,20 @@ function initL10nCheckTool() {
         });
         renderChannelProgress();
         hideStatus();
-        if (resumeResolve) {
-            resumeResolve();
-            resumeResolve = null;
-        }
+        resolveResumeWaiters();
     }
 
     function waitForResume() {
+        if (!isPaused) return Promise.resolve();
         return new Promise(resolve => {
-            resumeResolve = resolve;
+            resumeResolvers.push(resolve);
         });
+    }
+
+    function resolveResumeWaiters() {
+        const waiters = resumeResolvers;
+        resumeResolvers = [];
+        waiters.forEach(resolve => resolve());
     }
 
     function throwIfCheckCancelled(runId) {
@@ -6120,10 +6146,7 @@ function initL10nCheckTool() {
             currentCheckAbortController.abort();
             currentCheckAbortController = null;
         }
-        if (resumeResolve) {
-            resumeResolve();
-            resumeResolve = null;
-        }
+        resolveResumeWaiters();
 
         resetL10nProgressControls();
         progressSection.style.display = 'none';
@@ -6327,6 +6350,11 @@ function initL10nCheckTool() {
             detectionSource: entry?.detectionSource || summarizeIssueSources(issues),
             evidence: entry?.evidence || summarizeIssueEvidence(issues),
             ruleIds: entry?.ruleIds || summarizeIssueRuleIds(issues),
+            fullFixedTranslation: String(entry?.fullFixedTranslation || entry?.finalFixedTranslation || entry?.finalTranslation || ''),
+            fullFixedReason: String(entry?.fullFixedReason || entry?.fixReason || ''),
+            fullFixedConfidence: String(entry?.fullFixedConfidence || entry?.confidence || ''),
+            fullFixedStatus: String(entry?.fullFixedStatus || entry?.fixStatus || ''),
+            fullFixedError: String(entry?.fullFixedError || ''),
             issues,
             reviews: Array.isArray(entry?.reviews) ? entry.reviews : [],
             issueVotes: Number(entry?.issueVotes || 0),
@@ -6371,6 +6399,11 @@ function initL10nCheckTool() {
             detectionSource: hasIssues ? summarizeIssueSources(issues) : '',
             evidence: hasIssues ? summarizeIssueEvidence(issues) : '',
             ruleIds: hasIssues ? summarizeIssueRuleIds(issues) : '',
+            fullFixedTranslation: '',
+            fullFixedReason: '',
+            fullFixedConfidence: '',
+            fullFixedStatus: '',
+            fullFixedError: '',
             issues
         };
     }
@@ -6402,6 +6435,11 @@ function initL10nCheckTool() {
             detectionSource: hasIssues ? summarizeIssueSources(issues) : '',
             evidence: hasIssues ? summarizeIssueEvidence(issues) : '',
             ruleIds: hasIssues ? summarizeIssueRuleIds(issues) : '',
+            fullFixedTranslation: '',
+            fullFixedReason: '',
+            fullFixedConfidence: '',
+            fullFixedStatus: '',
+            fullFixedError: '',
             issues
         };
     }
@@ -6452,6 +6490,11 @@ function initL10nCheckTool() {
             detectionSource: status === L10N_STATUS_PASS ? '' : summarizeIssueSources(issues),
             evidence: status === L10N_STATUS_PASS ? '' : summarizeIssueEvidence(issues),
             ruleIds: status === L10N_STATUS_PASS ? '' : summarizeIssueRuleIds(issues),
+            fullFixedTranslation: '',
+            fullFixedReason: '',
+            fullFixedConfidence: '',
+            fullFixedStatus: '',
+            fullFixedError: '',
             issues,
             reviews,
             issueVotes,
@@ -6953,6 +6996,11 @@ function initL10nCheckTool() {
             detectionSource: normalizeFingerprintText(entry?.detectionSource || summarizeIssueSources(issues)),
             evidence: normalizeFingerprintText(entry?.evidence || summarizeIssueEvidence(issues)),
             ruleIds: normalizeFingerprintText(entry?.ruleIds || summarizeIssueRuleIds(issues)),
+            fullFixedTranslation: normalizeFingerprintText(entry?.fullFixedTranslation),
+            fullFixedReason: normalizeFingerprintText(entry?.fullFixedReason),
+            fullFixedConfidence: normalizeFingerprintText(entry?.fullFixedConfidence),
+            fullFixedStatus: normalizeFingerprintText(entry?.fullFixedStatus),
+            fullFixedError: normalizeFingerprintText(entry?.fullFixedError),
             issues,
             contentFingerprint: normalizeFingerprintText(entry?.contentFingerprint),
             modelFingerprint,
@@ -6976,6 +7024,10 @@ function initL10nCheckTool() {
             severity: findHistoryColumn(headers, ['严重程度', 'severity', 'level']),
             corrected: findHistoryColumn(headers, ['修改为', '建议修改', 'corrected', 'suggestion']),
             reason: findHistoryColumn(headers, ['问题原因', '问题描述', 'reason', 'description']),
+            fullFixedTranslation: findHistoryColumn(headers, ['完整修正译文', '完整修正版译文', 'final translation', 'finaltranslation', 'fullfixedtranslation']),
+            fullFixedReason: findHistoryColumn(headers, ['完整修正说明', '修正说明', 'fix reason', 'fixreason', 'fullfixedreason']),
+            fullFixedConfidence: findHistoryColumn(headers, ['修正置信度', '置信度', 'fix confidence', 'confidence', 'fullfixedconfidence']),
+            fullFixedStatus: findHistoryColumn(headers, ['修正状态', 'fix status', 'fixstatus', 'fullfixedstatus']),
             detectionSource: findHistoryColumn(headers, ['检测来源', '来源', 'detection source', 'detectionsource']),
             evidence: findHistoryColumn(headers, ['问题证据', '证据', 'evidence']),
             ruleIds: findHistoryColumn(headers, ['命中规则', '规则ID', 'rule ids', 'ruleids']),
@@ -7005,6 +7057,10 @@ function initL10nCheckTool() {
                 severity: getHistoryCell(row, indexes.severity),
                 corrected: getHistoryCell(row, indexes.corrected),
                 reason: getHistoryCell(row, indexes.reason),
+                fullFixedTranslation: getHistoryCell(row, indexes.fullFixedTranslation),
+                fullFixedReason: getHistoryCell(row, indexes.fullFixedReason),
+                fullFixedConfidence: getHistoryCell(row, indexes.fullFixedConfidence),
+                fullFixedStatus: getHistoryCell(row, indexes.fullFixedStatus),
                 detectionSource: getHistoryCell(row, indexes.detectionSource),
                 evidence: getHistoryCell(row, indexes.evidence),
                 ruleIds: getHistoryCell(row, indexes.ruleIds),
@@ -7155,6 +7211,11 @@ function initL10nCheckTool() {
             detectionSource: historyEntry.detectionSource || (issues.length > 0 ? summarizeIssueSources(issues) : '历史结果'),
             evidence: historyEntry.evidence || summarizeIssueEvidence(issues),
             ruleIds: historyEntry.ruleIds || summarizeIssueRuleIds(issues),
+            fullFixedTranslation: historyEntry.fullFixedTranslation || '',
+            fullFixedReason: historyEntry.fullFixedReason || '',
+            fullFixedConfidence: historyEntry.fullFixedConfidence || '',
+            fullFixedStatus: historyEntry.fullFixedStatus || '',
+            fullFixedError: historyEntry.fullFixedError || '',
             issues,
             historyReused: true,
             historyMatchType: matchType,
@@ -7371,6 +7432,140 @@ function initL10nCheckTool() {
         return matches ? [...new Set(matches.map(value => value.replace(/,/g, '')))] : [];
     }
 
+    function normalizeNumericToken(value) {
+        const text = String(value || '').replace(/,/g, '').trim();
+        if (!text) return '';
+        const numeric = Number(text.replace(/%$/, ''));
+        if (!Number.isFinite(numeric)) return text;
+        const normalized = Number.isInteger(numeric) ? String(numeric) : String(numeric).replace(/\.0+$/, '');
+        return text.endsWith('%') ? `${normalized}%` : normalized;
+    }
+
+    function getRomanNumeralValue(value) {
+        const text = String(value || '').trim().toUpperCase();
+        if (!/^(?=[MDCLXVI])M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/.test(text)) return null;
+        const map = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
+        let total = 0;
+        for (let index = 0; index < text.length; index++) {
+            const current = map[text[index]];
+            const next = map[text[index + 1]] || 0;
+            total += current < next ? -current : current;
+        }
+        return total > 0 ? total : null;
+    }
+
+    function extractRomanNumeralNumbers(text) {
+        const matches = String(text || '').match(/\b[IVXLCDM]{1,8}\b/gi) || [];
+        return matches
+            .map(getRomanNumeralValue)
+            .filter(value => Number.isFinite(value))
+            .map(value => String(value));
+    }
+
+    function getEnglishMonthAliases(month) {
+        const aliases = {
+            1: ['jan', 'january'],
+            2: ['feb', 'february'],
+            3: ['mar', 'march'],
+            4: ['apr', 'april'],
+            5: ['may'],
+            6: ['jun', 'june'],
+            7: ['jul', 'july'],
+            8: ['aug', 'august'],
+            9: ['sep', 'sept', 'september'],
+            10: ['oct', 'october'],
+            11: ['nov', 'november'],
+            12: ['dec', 'december']
+        };
+        return aliases[month] || [];
+    }
+
+    function hasEquivalentLocalizedDate(source, target, number) {
+        const sourceText = String(source || '');
+        const targetText = String(target || '').toLowerCase();
+        const value = Number(number);
+        if (!Number.isFinite(value)) return false;
+
+        const monthDayMatches = [...sourceText.matchAll(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/g)];
+        for (const match of monthDayMatches) {
+            const month = Number(match[1]);
+            const day = Number(match[2]);
+            if (![month, day].includes(value)) continue;
+            const monthPattern = getEnglishMonthAliases(month).join('|');
+            if (!monthPattern) continue;
+            const dayPattern = String(day).padStart(2, '0').replace(/^0/, '0?');
+            const datePatterns = [
+                new RegExp(`\\b${dayPattern}\\s*[-/ ]\\s*(?:${monthPattern})\\b`, 'i'),
+                new RegExp(`\\b(?:${monthPattern})\\s*[-/ ]\\s*${dayPattern}\\b`, 'i')
+            ];
+            if (datePatterns.some(pattern => pattern.test(targetText))) return true;
+        }
+
+        return false;
+    }
+
+    function hasEquivalentLocalizedTime(source, target, number) {
+        const sourceText = String(source || '');
+        const targetText = String(target || '').toLowerCase();
+        const value = Number(number);
+        if (!Number.isFinite(value)) return false;
+
+        const timeMatches = [
+            ...sourceText.matchAll(/(\d{1,2})\s*[:：]\s*(\d{2})/g),
+            ...sourceText.matchAll(/(\d{1,2})\s*点(?:\s*(\d{1,2})\s*分?)?/g)
+        ];
+
+        for (const match of timeMatches) {
+            const hour24 = Number(match[1]);
+            const minute = Number(match[2] || 0);
+            if (![hour24, minute].includes(value)) continue;
+            const hour12 = hour24 % 12 || 12;
+            const meridiem = hour24 >= 12 ? 'pm' : 'am';
+            const minutePattern = String(minute).padStart(2, '0');
+            const timePatterns = [
+                new RegExp(`\\b${hour12}\\s*[:：]\\s*${minutePattern}\\s*${meridiem}\\b`, 'i'),
+                new RegExp(`\\b${hour12}\\s*${meridiem}\\b`, 'i'),
+                new RegExp(`\\b${String(hour24).padStart(2, '0').replace(/^0/, '0?')}\\s*[:：]\\s*${minutePattern}\\b`, 'i')
+            ];
+            if (timePatterns.some(pattern => pattern.test(targetText))) return true;
+        }
+
+        return false;
+    }
+
+    function hasEquivalentLocalizedDiscount(source, target, number) {
+        const sourceText = String(source || '');
+        const targetText = String(target || '').toLowerCase();
+        const value = Number(String(number).replace(/%$/, ''));
+        if (!Number.isFinite(value)) return false;
+
+        const discountMatches = [...sourceText.matchAll(/(\d+(?:\.\d+)?)\s*折/g)];
+        for (const match of discountMatches) {
+            const fold = Number(match[1]);
+            if (!Number.isFinite(fold) || fold <= 0 || fold >= 10) continue;
+            if (value !== fold) continue;
+            const offPercent = Math.round((10 - fold) * 10 * 100) / 100;
+            const keepPercent = Math.round(fold * 10 * 100) / 100;
+            const offPattern = new RegExp(`\\b${String(offPercent).replace(/\.0+$/, '')}\\s*%?\\s*off\\b`, 'i');
+            const keepPattern = new RegExp(`\\b${String(keepPercent).replace(/\.0+$/, '')}\\s*%\\b`, 'i');
+            if (offPattern.test(targetText) || keepPattern.test(targetText)) return true;
+        }
+
+        return false;
+    }
+
+    function hasEquivalentLocalizedNumber(source, target, number) {
+        const normalizedNumber = normalizeNumericToken(number);
+        if (!normalizedNumber) return false;
+        const targetNumbers = new Set(extractNumbers(target).map(normalizeNumericToken));
+        if (targetNumbers.has(normalizedNumber)) return true;
+        const targetRomanNumbers = new Set(extractRomanNumeralNumbers(target));
+        if (targetRomanNumbers.has(normalizedNumber.replace(/%$/, ''))) return true;
+        return hasEquivalentLocalizedDiscount(source, target, normalizedNumber) ||
+            hasEquivalentLocalizedDate(source, target, normalizedNumber) ||
+            hasEquivalentLocalizedTime(source, target, normalizedNumber);
+    }
+
     function buildHiddenRuleIssue(ruleId, category, issue, reason, options = {}) {
         return normalizeIssue({
             ruleId,
@@ -7449,8 +7644,7 @@ function initL10nCheckTool() {
         }
 
         const sourceNumbers = extractNumbers(source);
-        const targetNumbers = new Set(extractNumbers(target));
-        const missingNumbers = sourceNumbers.filter(number => !targetNumbers.has(number));
+        const missingNumbers = sourceNumbers.filter(number => !hasEquivalentLocalizedNumber(source, target, number));
         if (missingNumbers.length > 0) {
             issues.push(buildHiddenRuleIssue(
                 'number_mismatch',
@@ -7563,6 +7757,7 @@ function initL10nCheckTool() {
     checkBtn.addEventListener('click', startCheck);
     downloadBtn.addEventListener('click', downloadReport);
     downloadGlossaryBtn.addEventListener('click', downloadGlossary);
+    generateFixesBtn?.addEventListener('click', generateFullFixTranslations);
     resetBtn.addEventListener('click', resetTool);
 
     async function readL10nSourcesFromFile(file, startIndex = 0) {
@@ -8265,7 +8460,7 @@ function initL10nCheckTool() {
                 }
                 throwIfCheckCancelled(runId);
 
-                await waitForNetwork();
+                await waitForNetwork(runSignal);
                 throwIfCheckCancelled(runId);
 
                 const startedAt = Date.now();
@@ -8303,22 +8498,140 @@ function initL10nCheckTool() {
 
             async function runProfileBatchQueues(jobsByProfile, onBatchDone, options = {}) {
                 const { continueOnProfileError = false } = options;
-                const workers = [];
                 const toleratedFailures = [];
                 const failedProfileKeys = new Set();
-                activeProfiles.forEach(profile => {
+                const profileRunners = activeProfiles.map(profile => {
                     const queue = jobsByProfile.get(profile.id) || [];
                     const batches = chunkArray(queue, modeConfig.batchSize);
                     let nextIndex = 0;
-                    const workerCount = Math.min(getProfileConcurrency(profile), batches.length);
+                    let activeCount = 0;
+                    let settled = false;
+                    let resolveRunner = null;
+                    let rejectRunner = null;
+                    const maxConcurrency = Math.max(1, Math.min(getProfileConcurrency(profile), batches.length || 1));
+                    const adaptive = {
+                        current: 1,
+                        max: maxConcurrency,
+                        stableSuccesses: 0,
+                        cooldownUntil: 0,
+                        lastReason: maxConcurrency > 1 ? '低并发起步' : ''
+                    };
                     const existingState = channelProgressState.get(getChannelProfileKey(profile));
                     const profileKey = getChannelProfileKey(profile);
+
+                    function formatAdaptiveMessage(baseMessage = '') {
+                        const adaptiveText = adaptive.max > 1
+                            ? `自动并发 ${adaptive.current}/${adaptive.max}${adaptive.lastReason ? `，${adaptive.lastReason}` : ''}`
+                            : '自动并发 1/1';
+                        return baseMessage ? `${baseMessage}；${adaptiveText}` : adaptiveText;
+                    }
+
+                    function maybeIncreaseAdaptiveConcurrency() {
+                        if (adaptive.current >= adaptive.max) return;
+                        if (Date.now() < adaptive.cooldownUntil) return;
+                        if (adaptive.stableSuccesses < L10N_ADAPTIVE_SUCCESS_TO_INCREASE) return;
+                        adaptive.current++;
+                        adaptive.stableSuccesses = 0;
+                        adaptive.lastReason = '连续稳定，谨慎提速';
+                        updateChannelProgress(profile, {
+                            status: 'running',
+                            message: formatAdaptiveMessage('通道稳定，已小幅恢复并发')
+                        });
+                    }
+
+                    function reduceAdaptiveConcurrency(error) {
+                        if (!isTemporaryL10nApiError(error) && !error?.isTimeout && !/超时|timeout/i.test(error?.message || '')) {
+                            return;
+                        }
+                        adaptive.current = 1;
+                        adaptive.stableSuccesses = 0;
+                        adaptive.cooldownUntil = Date.now() + L10N_ADAPTIVE_COOLDOWN_MS;
+                        adaptive.lastReason = '通道繁忙，已自动降速保护';
+                    }
+
+                    function finishIfDone() {
+                        if (settled) return true;
+                        if (activeCount === 0 && (nextIndex >= batches.length || (continueOnProfileError && failedProfileKeys.has(profileKey)))) {
+                            settled = true;
+                            resolveRunner?.();
+                            return true;
+                        }
+                        return false;
+                    }
+
+                    function scheduleMore() {
+                        if (settled) return;
+                        if (continueOnProfileError && failedProfileKeys.has(profileKey)) {
+                            finishIfDone();
+                            return;
+                        }
+                        while (activeCount < adaptive.current && nextIndex < batches.length) {
+                            const batch = batches[nextIndex++];
+                            activeCount++;
+                            void processBatch(batch);
+                        }
+                        finishIfDone();
+                    }
+
+                    async function processBatch(batch) {
+                        try {
+                            throwIfCheckCancelled(runId);
+                            updateChannelProgress(profile, {
+                                status: 'running',
+                                message: formatAdaptiveMessage(`正在检测第 ${batch[0]?.rowIndex + 1 || '-'} 行附近，批量 ${batch.length} 条`)
+                            });
+                            const entries = await processProfileBatch(batch, profile);
+                            throwIfCheckCancelled(runId);
+                            await onBatchDone(entries, batch, profile);
+                            adaptive.stableSuccesses++;
+                            maybeIncreaseAdaptiveConcurrency();
+                            const state = channelProgressState.get(getChannelProfileKey(profile));
+                            const completed = Number(state?.completed || 0) + entries.length;
+                            const total = Number(state?.total || queue.length);
+                            const profileAlreadyFailed = continueOnProfileError && failedProfileKeys.has(profileKey);
+                            updateChannelProgress(profile, {
+                                completed,
+                                total,
+                                status: profileAlreadyFailed ? 'failed' : (completed >= total ? 'done' : 'running'),
+                                message: profileAlreadyFailed
+                                    ? (state?.message || '该通道部分批次失败，剩余复核已跳过')
+                                    : (completed >= total ? '已完成该通道检测' : formatAdaptiveMessage(`已完成 ${completed}/${total}`))
+                            });
+                        } catch (error) {
+                            const isAbortOrCancel = error.name === 'AbortError' || error.message === 'L10N_CHECK_CANCELLED' || isCheckCancelled;
+                            if (isAbortOrCancel) {
+                                updateChannelProgress(profile, {
+                                    status: 'paused',
+                                    message: '任务已暂停或取消'
+                                });
+                            } else {
+                                reduceAdaptiveConcurrency(error);
+                                updateChannelProgress(profile, {
+                                    status: 'failed',
+                                    message: formatAdaptiveMessage(getFriendlyApiErrorMessage(error, profile))
+                                });
+                            }
+                            if (continueOnProfileError && !isAbortOrCancel) {
+                                if (!failedProfileKeys.has(profileKey)) {
+                                    failedProfileKeys.add(profileKey);
+                                    toleratedFailures.push({ profile, error });
+                                }
+                                return;
+                            }
+                            settled = true;
+                            rejectRunner?.(error);
+                            return;
+                        } finally {
+                            activeCount = Math.max(0, activeCount - 1);
+                            scheduleMore();
+                        }
+                    }
 
                     if (queue.length > 0) {
                         updateChannelProgress(profile, {
                             total: Math.max(Number(existingState?.total || 0), Number(existingState?.completed || 0) + queue.length),
                             status: 'waiting',
-                            message: `已排队 ${queue.length} 条，批次 ${batches.length} 个，并发 ${workerCount}`
+                            message: formatAdaptiveMessage(`已排队 ${queue.length} 条，批次 ${batches.length} 个`)
                         });
                     } else if (existingState && existingState.total === 0) {
                         updateChannelProgress(profile, {
@@ -8327,60 +8640,19 @@ function initL10nCheckTool() {
                         });
                     }
 
-                    for (let workerIndex = 0; workerIndex < workerCount; workerIndex++) {
-                        workers.push((async () => {
-                            while (nextIndex < batches.length) {
-                                if (continueOnProfileError && failedProfileKeys.has(profileKey)) return;
-                                throwIfCheckCancelled(runId);
-                                const batch = batches[nextIndex++];
-                                try {
-                                    updateChannelProgress(profile, {
-                                        status: 'running',
-                                        message: `正在检测第 ${batch[0]?.rowIndex + 1 || '-'} 行附近，批量 ${batch.length} 条`
-                                    });
-                                    const entries = await processProfileBatch(batch, profile);
-                                    throwIfCheckCancelled(runId);
-                                    await onBatchDone(entries, batch, profile);
-                                    const state = channelProgressState.get(getChannelProfileKey(profile));
-                                    const completed = Number(state?.completed || 0) + entries.length;
-                                    const total = Number(state?.total || queue.length);
-                                    const profileAlreadyFailed = continueOnProfileError && failedProfileKeys.has(profileKey);
-                                    updateChannelProgress(profile, {
-                                        completed,
-                                        total,
-                                        status: profileAlreadyFailed ? 'failed' : (completed >= total ? 'done' : 'running'),
-                                        message: profileAlreadyFailed
-                                            ? (state?.message || '该通道部分批次失败，剩余复核已跳过')
-                                            : (completed >= total ? '已完成该通道检测' : `已完成 ${completed}/${total}`)
-                                    });
-                                } catch (error) {
-                                    const isAbortOrCancel = error.name === 'AbortError' || error.message === 'L10N_CHECK_CANCELLED' || isCheckCancelled;
-                                    if (isAbortOrCancel) {
-                                        updateChannelProgress(profile, {
-                                            status: 'paused',
-                                            message: '任务已暂停或取消'
-                                        });
-                                    } else {
-                                        updateChannelProgress(profile, {
-                                            status: 'failed',
-                                            message: getFriendlyApiErrorMessage(error, profile)
-                                        });
-                                    }
-                                    if (continueOnProfileError && !isAbortOrCancel) {
-                                        if (!failedProfileKeys.has(profileKey)) {
-                                            failedProfileKeys.add(profileKey);
-                                            toleratedFailures.push({ profile, error });
-                                        }
-                                        return;
-                                    }
-                                    throw error;
-                                }
-                            }
-                        })());
-                    }
+                    return new Promise((resolve, reject) => {
+                        resolveRunner = resolve;
+                        rejectRunner = reject;
+                        if (batches.length === 0) {
+                            settled = true;
+                            resolve();
+                            return;
+                        }
+                        scheduleMore();
+                    });
                 });
 
-                await Promise.all(workers);
+                await Promise.all(profileRunners);
                 return toleratedFailures;
             }
 
@@ -8849,6 +9121,177 @@ ${JSON.stringify(rows)}
         return resultMap;
     }
 
+    function isTemporaryL10nApiError(error) {
+        const text = `${error?.message || ''} ${error?.rawText || ''} ${JSON.stringify(error?.payload || '')}`;
+        return error?.status === 429 ||
+            error?.status === 500 ||
+            error?.status === 502 ||
+            error?.status === 503 ||
+            error?.isRateLimited ||
+            error?.isEmptyEndTurn ||
+            /接口返回为空|empty response|finish_reason:\s*end_turn|stop_reason:\s*end_turn/i.test(text) ||
+            /UNAVAILABLE|high demand|temporar|try again|overloaded|rate.?limit|quota/i.test(text);
+    }
+
+    function getL10nResultStableId(result) {
+        return Number.isInteger(result?.rowIndex) ? result.rowIndex : makeStableId(`${result?.source || ''}\n${result?.target || ''}`);
+    }
+
+    function getIssueSummaryForFix(result) {
+        const issues = Array.isArray(result?.issues) && result.issues.length > 0
+            ? result.issues
+            : [result];
+        return issues.map(issue => ({
+            type: issue.issueType || issue.category || result.issueType || '',
+            severity: issue.severity || result.severity || '',
+            issue: issue.issue || result.issue || '',
+            suggestedPatch: issue.corrected || result.corrected || '',
+            reason: issue.reason || result.reason || '',
+            evidence: issue.evidence || result.evidence || '',
+            ruleId: issue.ruleId || issue.ruleIds || result.ruleIds || ''
+        })).filter(issue => issue.issue || issue.reason || issue.suggestedPatch);
+    }
+
+    function buildFullFixTasks(results = checkResults) {
+        return getSortedCheckResults(results)
+            .filter(result => result.status === L10N_STATUS_ISSUE)
+            .filter(result => String(result.target || '').trim())
+            .filter(result => !String(result.fullFixedTranslation || '').trim())
+            .map(result => ({
+                id: getL10nResultStableId(result),
+                rowIndex: result.rowIndex,
+                sourceText: result.source,
+                targetText: result.target,
+                issueType: result.issueType || '',
+                severity: result.severity || '',
+                suggestedPatch: result.corrected || '',
+                reason: result.reason || '',
+                issues: getIssueSummaryForFix(result)
+            }));
+    }
+
+    function buildFullFixPromptParts(tasks, project, glossaryTerms) {
+        const projectRules = String(project?.rules || '按通用游戏本地化质量标准修正。')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 1800);
+        const relevantTerms = getRelevantGlossaryTermsForBatch(
+            tasks.map(task => ({
+                rowIndex: task.rowIndex,
+                sourceText: task.sourceText,
+                targetText: task.targetText
+            })),
+            glossaryTerms
+        ).slice(0, 80);
+        const compactTasks = tasks.map(task => ({
+            id: task.id,
+            rowIndex: task.rowIndex,
+            sourceText: task.sourceText,
+            currentTranslation: task.targetText,
+            issueType: task.issueType,
+            severity: task.severity,
+            suggestedPatch: task.suggestedPatch,
+            reason: task.reason,
+            issues: task.issues.slice(0, 8)
+        }));
+        const systemPrompt = `你是游戏本地化译文修正专家。请根据检测问题生成“完整修正译文”，不是局部替换词。
+
+规则：
+1. 输出完整英文译文，可直接替换当前译文。
+2. 不要机械套用 suggestedPatch 或术语表；必须结合原文、当前译文、问题原因、语法、词性、大小写和游戏上下文判断。
+3. 术语表是重要约束，但普通动词或普通名词进入长句时，可以按英文语法调整大小写、词形和表达方式；专有名词、UI名、系统名、建筑名、道具名通常保留指定大小写。
+4. 如果术语与上下文明显冲突，优先给出自然且忠实的译文，并在 reason 中说明。
+5. 必须保留变量、占位符、HTML/富文本标签、换行符、数字、百分号和原译文中的关键格式。
+6. 不确定时保守处理：finalTranslation 可等于当前译文，confidence 设为 low，并说明需要人工复核。
+7. 只返回合法 JSON，不要 Markdown。`;
+        const userPrompt = `项目规则：
+${projectRules}
+
+相关术语表（方向固定：中文原文术语 -> 英文指定译法）：
+${buildBatchGlossaryPromptSection(relevantTerms)}
+
+需要生成完整修正译文的行：
+${JSON.stringify(compactTasks)}
+
+返回 JSON：
+{
+  "rows": [
+    {
+      "id": "输入id",
+      "rowIndex": 1,
+      "finalTranslation": "完整修正后的英文译文",
+      "confidence": "high|medium|low",
+      "appliedTerminology": "yes|no|partial",
+      "reason": "简短说明修正了什么；如果没有采用 suggestedPatch 或术语，请说明原因"
+    }
+  ]
+}`;
+        return {
+            systemPrompt,
+            userPrompt,
+            cacheKey: makePromptCacheKey('l10n_full_fix_v1', `${project?.id || project?.name || 'none'}:${projectRules}`)
+        };
+    }
+
+    function parseFullFixResult(content) {
+        const parsed = extractJsonFromText(content);
+        const rows = Array.isArray(parsed)
+            ? parsed
+            : (Array.isArray(parsed?.rows)
+                ? parsed.rows
+                : (Array.isArray(parsed?.results) ? parsed.results : []));
+
+        return rows.map(row => ({
+            id: row?.id ?? row?.rowIndex ?? row?.row,
+            rowIndex: Number(row?.rowIndex ?? row?.row),
+            finalTranslation: String(row?.finalTranslation ?? row?.finalTarget ?? row?.fixedTranslation ?? row?.corrected ?? row?.translation ?? '').trim(),
+            confidence: String(row?.confidence ?? row?.certainty ?? '').trim(),
+            appliedTerminology: String(row?.appliedTerminology ?? row?.termApplied ?? row?.terminology ?? '').trim(),
+            reason: String(row?.reason ?? row?.note ?? row?.explanation ?? '').trim()
+        })).filter(row => row.finalTranslation);
+    }
+
+    async function runFullFixBatch(tasks, apiConfig, model, project, glossaryTerms, batchLabel) {
+        let lastError = null;
+        for (let attempt = 0; attempt <= L10N_FIX_RETRY_DELAYS.length; attempt++) {
+            try {
+                const promptParts = buildFullFixPromptParts(tasks, project, glossaryTerms);
+                const content = await requestModelContent(
+                    apiConfig,
+                    {
+                        model,
+                        messages: [
+                            { role: 'system', content: promptParts.systemPrompt, cacheControl: true },
+                            { role: 'user', content: promptParts.userPrompt }
+                        ],
+                        prompt_cache_key: promptParts.cacheKey,
+                        temperature: 0.1,
+                        max_tokens: getChatOutputMaxTokens(apiConfig, model, tasks.length)
+                    },
+                    null,
+                    API_REQUEST_TIMEOUT_MS,
+                    { reasoningEffort: 'low' }
+                );
+                return parseFullFixResult(content);
+            } catch (error) {
+                lastError = error;
+                if (attempt >= L10N_FIX_RETRY_DELAYS.length || !isTemporaryL10nApiError(error)) {
+                    throw error;
+                }
+
+                const retryAfter = Number(error.retryAfterMs || 0);
+                const waitMs = Math.max(L10N_FIX_RETRY_DELAYS[attempt], retryAfter);
+                setStatus(
+                    'processing',
+                    `AI 修正通道繁忙，等待重试... (${batchLabel})`,
+                    `第 ${attempt + 1} 次重试将在 ${Math.ceil(waitMs / 1000)} 秒后进行，已生成的完整修正译文会保留`
+                );
+                await new Promise(resolve => setTimeout(resolve, waitMs));
+            }
+        }
+        throw lastError;
+    }
+
     async function checkTextBatch(tasks, project, glossaryTerms = [], profile = null, signal = null) {
         if (tasks.length === 0) return new Map();
 
@@ -8905,11 +9348,152 @@ ${JSON.stringify(rows)}
                 const retryDelay = error.retryAfterMs > 0
                     ? Math.min(error.retryAfterMs, 60000)
                     : 1000 * (attempt + 1);
-                await new Promise(resolve => setTimeout(resolve, retryDelay));
+                await delayWithSignal(retryDelay, signal);
             }
         }
 
         return new Map(tasks.map(task => [task.rowIndex, null]));
+    }
+
+    function findCheckResultForFix(task) {
+        return checkResults.find(result => {
+            if (Number.isInteger(task.rowIndex) && result.rowIndex === task.rowIndex) return true;
+            return getL10nResultStableId(result) === task.id;
+        });
+    }
+
+    function applyFullFixRows(tasks, rows) {
+        const rowById = new Map();
+        rows.forEach(row => {
+            rowById.set(String(row.id), row);
+            if (Number.isFinite(row.rowIndex)) rowById.set(String(row.rowIndex), row);
+        });
+
+        let appliedCount = 0;
+        tasks.forEach(task => {
+            const result = findCheckResultForFix(task);
+            if (!result) return;
+            const row = rowById.get(String(task.id)) || rowById.get(String(task.rowIndex));
+            if (!row?.finalTranslation) return;
+
+            result.fullFixedTranslation = row.finalTranslation;
+            result.fullFixedConfidence = row.confidence || 'medium';
+            result.fullFixedReason = row.reason || '';
+            result.fullFixedStatus = row.appliedTerminology ? `术语处理：${row.appliedTerminology}` : '已生成';
+            result.fullFixedError = '';
+            appliedCount++;
+        });
+        return appliedCount;
+    }
+
+    function markFullFixBatchFailed(tasks, error) {
+        const message = error?.message || 'AI 修正失败';
+        tasks.forEach(task => {
+            const result = findCheckResultForFix(task);
+            if (!result) return;
+            result.fullFixedStatus = '生成失败';
+            result.fullFixedError = message;
+        });
+    }
+
+    async function generateFullFixTranslations() {
+        if (isGeneratingL10nFixes) {
+            setStatus('warning', '完整修正译文正在生成', '请等待当前批次完成后再操作');
+            return;
+        }
+        if (!ensureL10nProfilesConfigured('生成完整修正译文')) return;
+
+        const issueCount = getIssueResultCount();
+        if (issueCount === 0) {
+            setStatus('success', '没有需要修正的异常行', '当前检测结果没有异常问题');
+            return;
+        }
+
+        const tasks = buildFullFixTasks();
+        if (tasks.length === 0) {
+            setStatus('success', '完整修正译文已生成', '异常行里没有剩余待生成的完整修正译文');
+            displayResults(checkResults.length, getSelectedGlossaryTerms(), getSelectedL10nProfiles());
+            return;
+        }
+
+        const confirmed = confirm(`将为 ${tasks.length} 条异常行生成完整修正译文，会额外消耗 API 额度。已生成过的行会跳过。是否继续？`);
+        if (!confirmed) return;
+
+        const activeProfiles = getSelectedL10nProfiles();
+        const apiConfig = activeProfiles[0] || getApiConfig();
+        const model = apiConfig.model || getDefaultModelForProvider(apiConfig.provider);
+        const activeProject = getSelectedL10nProject();
+        const activeGlossaryTerms = getSelectedGlossaryTerms();
+        const chunks = chunkArray(tasks, L10N_FIX_BATCH_SIZE);
+        let generatedCount = 0;
+        const failedBatches = [];
+
+        isGeneratingL10nFixes = true;
+        if (generateFixesBtn) {
+            generateFixesBtn.disabled = true;
+            generateFixesBtn.textContent = '生成中...';
+        }
+
+        try {
+            for (let index = 0; index < chunks.length; index++) {
+                const chunk = chunks[index];
+                setStatus(
+                    'processing',
+                    `正在生成完整修正译文... (${index + 1}/${chunks.length})`,
+                    `本批 ${chunk.length} 行；模型会结合上下文判断术语，不做机械替换`
+                );
+
+                try {
+                    const rows = await runFullFixBatch(
+                        chunk,
+                        apiConfig,
+                        model,
+                        activeProject,
+                        activeGlossaryTerms,
+                        `${index + 1}/${chunks.length}`
+                    );
+                    const applied = applyFullFixRows(chunk, rows);
+                    generatedCount += applied;
+                } catch (error) {
+                    markFullFixBatchFailed(chunk, error);
+                    failedBatches.push({
+                        index,
+                        rowStart: chunk[0]?.rowIndex,
+                        rowEnd: chunk[chunk.length - 1]?.rowIndex,
+                        message: error.message || 'AI 修正失败'
+                    });
+                    console.warn('Full fix batch failed:', index + 1, error);
+                }
+            }
+
+            displayResults(checkResults.length, activeGlossaryTerms, activeProfiles);
+            saveL10nProgress({
+                fileName: originalFileName,
+                currentRow: Math.max(1, ...checkResults.map(result => Number.isInteger(result.rowIndex) ? result.rowIndex : 1)),
+                checkResults,
+                realtimeCheckResults,
+                glossaryData,
+                checkedCount: checkResults.length,
+                selectedProfileIds: [...selectedProfileIds]
+            });
+            if (failedBatches.length > 0) {
+                setStatus(
+                    generatedCount > 0 ? 'warning' : 'error',
+                    '完整修正译文部分生成失败',
+                    `本次生成 ${generatedCount} 条，失败批次 ${failedBatches.length} 个。再次点击“生成完整修正译文”会只跑未成功的异常行。`
+                );
+            } else {
+                setStatus('success', '完整修正译文生成完成', `本次生成 ${generatedCount} 条；下载检测报告会包含“完整修正译文”列`);
+            }
+        } catch (error) {
+            setStatus('error', '完整修正译文生成失败', error.message || '请检查 API 通道');
+        } finally {
+            isGeneratingL10nFixes = false;
+            if (generateFixesBtn) {
+                generateFixesBtn.disabled = false;
+                generateFixesBtn.textContent = '生成完整修正译文';
+            }
+        }
     }
 
     async function processCheckBatchWithCache(tasks, profile, project, glossaryTerms, cacheEntries, signal = null) {
@@ -9149,6 +9733,7 @@ ${target}
                     <td>${escapeHtml(result.issueType || (hasIssues ? classifyIssueCategory(`${result.issue} ${result.reason}`) : '-'))}</td>
                     <td><span class="severity-tag ${getSeverityClass(result.severity || (hasIssues ? '一般' : '-'))}">${escapeHtml(result.severity || (hasIssues ? '一般' : '-'))}</span></td>
                     <td>${escapeHtml(result.corrected || '无需修改')}</td>
+                    <td>${escapeHtml(result.fullFixedTranslation || (result.fullFixedError ? `生成失败：${result.fullFixedError}` : ''))}</td>
                     <td>${escapeHtml(result.reason || (result.status === L10N_STATUS_PASS ? '通过' : ''))}</td>
                 `;
                 fragment.appendChild(tr);
@@ -9384,7 +9969,7 @@ ${target}
         const rowGroups = buildResultGroupMap(results);
         const referenceHeaders = getReportReferenceHeaders(results);
         return [
-            [...referenceHeaders, '检测原文', '检测译文', '检测模型', '检测结果', '问题类型', '严重程度', '修改为', '问题原因', '检测来源', ...L10N_REPORT_COMPLETENESS_HEADERS, ...L10N_REPORT_META_HEADERS],
+            [...referenceHeaders, '检测原文', '检测译文', '检测模型', '检测结果', '问题类型', '严重程度', '修改为', '完整修正译文', '完整修正说明', '修正置信度', '修正状态', '问题原因', '检测来源', ...L10N_REPORT_COMPLETENESS_HEADERS, ...L10N_REPORT_META_HEADERS],
             ...getSortedCheckResults(results).map(result => [
                 ...getReportReferenceCells(result, referenceHeaders),
                 result.source,
@@ -9394,6 +9979,10 @@ ${target}
                 result.issueType || '',
                 result.severity || '',
                 result.corrected || (result.status === L10N_STATUS_PASS ? '无需修改' : ''),
+                result.fullFixedTranslation || '',
+                result.fullFixedReason || result.fullFixedError || '',
+                result.fullFixedConfidence || '',
+                result.fullFixedStatus || (result.fullFixedError ? '生成失败' : ''),
                 result.reason || (result.status === L10N_STATUS_PASS ? '通过' : ''),
                 result.detectionSource || (result.status === L10N_STATUS_PASS ? '' : 'AI'),
                 ...buildReportCompletenessCells(result, rowGroups.get(result.rowIndex) || []),
@@ -9429,6 +10018,10 @@ ${target}
                     '问题类型',
                     '严重程度',
                     '修改为',
+                    '完整修正译文',
+                    '完整修正说明',
+                    '修正置信度',
+                    '修正状态',
                     '问题原因',
                     '检测来源',
                     ...L10N_REPORT_COMPLETENESS_HEADERS,
@@ -9446,6 +10039,10 @@ ${target}
                 result.issueType || '',
                 result.severity || '',
                 result.corrected || (result.status === L10N_STATUS_PASS ? '无需修改' : ''),
+                result.fullFixedTranslation || '',
+                result.fullFixedReason || result.fullFixedError || '',
+                result.fullFixedConfidence || '',
+                result.fullFixedStatus || (result.fullFixedError ? '生成失败' : ''),
                 result.reason || (result.status === L10N_STATUS_PASS ? '通过' : ''),
                 result.detectionSource || (result.status === L10N_STATUS_PASS ? '' : 'AI'),
                 ...buildReportCompletenessCells(result, [result]),
