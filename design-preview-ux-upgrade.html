@@ -598,6 +598,50 @@
             line-height: 1.5;
         }
 
+        .api-manager-preview {
+            display: none;
+            gap: 8px;
+            padding-top: 10px;
+            border-top: 1px solid var(--line);
+        }
+
+        .api-manager-preview.open {
+            display: grid;
+        }
+
+        .api-manager-preview .field {
+            gap: 4px;
+        }
+
+        .api-manager-preview select,
+        .api-manager-preview input {
+            min-height: 34px;
+            font-size: 12px;
+        }
+
+        .preview-toast {
+            position: fixed;
+            left: 50%;
+            bottom: 24px;
+            z-index: 10;
+            transform: translateX(-50%);
+            padding: 10px 14px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: var(--surface);
+            color: var(--muted);
+            font-size: 13px;
+            box-shadow: var(--shadow);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.18s ease, transform 0.18s ease;
+        }
+
+        .preview-toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(-4px);
+        }
+
         @media (max-width: 1240px) {
             .app {
                 grid-template-columns: 218px minmax(0, 1fr);
@@ -829,5 +873,271 @@
             </div>
         </aside>
     </div>
+
+    <div class="preview-toast" id="previewToast"></div>
+
+    <script>
+        const toolData = {
+            split: {
+                icon: "↗",
+                nav: "文件拆分",
+                title: "文件拆分",
+                subtitle: "把大型 CSV/XLSX 按行数拆成多个小文件，适合交给翻译、校对或版本管理。",
+                summary: ["本地处理", "CSV / XLSX", "每文件 5000 行", "ZIP 打包"],
+                steps: [
+                    { title: "放入文件", body: "拖入大表格，上传后会显示文件名、行数和预计拆分数量。", drop: "拖入待拆分文件，或点击选择", hint: "支持 CSV / XLSX" },
+                    { title: "确认拆分规则", body: "新手只需要设置每个文件行数；编码等细节保留在高级设置。", fields: [["每个文件行数", "5000"], ["输出编码", "UTF-8"]], decisions: [["按行拆分", "适合文本表格", "本地处理", "输出 ZIP"], ["保留表头", "适合多文件交付", "自动复制首行", "方便回填"]] },
+                    { title: "生成并下载", body: "开始后在本地生成多个文件，并自动打包下载。", primary: "开始拆分", secondary: "保存拆分预设" }
+                ],
+                side: { input: "等待文件", output: "ZIP 本地生成", next: ["上传大表格。", "确认每个文件行数。", "点击开始拆分。"] }
+            },
+            translate: {
+                icon: "文",
+                nav: "文本翻译",
+                title: "文本翻译",
+                subtitle: "默认只显示完成任务需要的设置。模型、术语表、历史复用和并发策略仍然保留，但会在需要时展开。",
+                summary: ["佣兵小镇", "中文 -> 英语", "Google Gemini", "术语表 1 个", "并发 5"],
+                steps: [
+                    { title: "放入文件", body: "上传后这里会从大上传框收起为文件摘要，避免占住工作区。", drop: "拖入 CSV / XLSX，或点击选择", hint: "上传后自动识别工作表、行数和可翻译列" },
+                    { title: "确认处理方式", body: "把长说明改成短决策。用户只需要知道适合什么、消耗什么、结果如何。", fields: [["游戏项目", "佣兵小镇"], ["语言方向", "中文（简体） -> 英语"]], decisions: [["质量优先", "正式交付、长文本、剧情对白", "需要 API，速度中等", "译文更稳定"], ["快速预览", "临时试译、先看整体风格", "更快，成本更低", "适合人工二次筛选"]] },
+                    { title: "开始并查看结果", body: "按钮文案跟随状态变化。运行中显示阶段，而不是只显示百分比。", primary: "开始翻译", secondary: "保存为预设" }
+                ],
+                side: { input: "等待文件", output: "译文表格", next: ["先上传文本表格。", "正式交付建议开启术语表和后检测。", "常用设置可保存为预设。"] }
+            },
+            convert: {
+                icon: "↔",
+                nav: "格式转换",
+                title: "格式转换",
+                subtitle: "清洗编码、分隔符和换行符，不需要 API。适合交付前把表格统一成稳定格式。",
+                summary: ["本地处理", "UTF-8", "逗号分隔", "Unix LF"],
+                steps: [
+                    { title: "放入文件", body: "拖入要转换的 CSV/XLSX，系统会先显示当前编码和列结构。", drop: "拖入待转换文件", hint: "不调用 API，不上传服务器" },
+                    { title: "选择输出格式", body: "默认给出最常用的交付格式，专业模式再展开分隔符、换行符等细节。", fields: [["输出编码", "UTF-8（无 BOM）"], ["分隔符", "逗号（,）"]], decisions: [["交付兼容", "适合翻译平台", "本地处理", "减少乱码"], ["开发兼容", "适合版本库", "统一换行", "便于 diff"]] },
+                    { title: "生成文件", body: "转换完成后直接下载，原文件不会被覆盖。", primary: "开始转换", secondary: "预览输出设置" }
+                ],
+                side: { input: "等待文件", output: "转换后文件", next: ["上传需要清洗的表格。", "选择目标编码。", "下载转换结果。"] }
+            },
+            l10n: {
+                icon: "✓",
+                nav: "本地化检测",
+                title: "本地化检测",
+                subtitle: "对照原文、译文、术语表和项目规则，检查翻译质量。新手只选模式，专业用户再展开复核策略。",
+                summary: ["佣兵小镇", "均衡模式", "术语表 1 个", "API 通道 2 个"],
+                steps: [
+                    { title: "放入返稿文件", body: "上传原文和译文表，系统自动识别可检测列。", drop: "拖入待检测表格", hint: "支持多工作表合并检测" },
+                    { title: "选择检测策略", body: "模式卡只保留决策信息，详细阈值放在高级设置。", fields: [["游戏项目", "佣兵小镇"], ["检测模式", "均衡模式"]], decisions: [["均衡模式", "批量检测 + 异常复核", "消耗适中", "日常推荐"], ["严格模式", "多模型复核", "成本更高", "适合交付前"]] },
+                    { title: "生成检测报告", body: "结果按严重程度分组，问题行可以继续生成修正建议。", primary: "开始检测", secondary: "导入历史结果" }
+                ],
+                side: { input: "等待返稿", output: "检测报告", next: ["上传返稿表。", "选择检测模式。", "运行后优先看阻塞问题。"] }
+            },
+            glossary: {
+                icon: "术",
+                nav: "术语表",
+                title: "术语表",
+                subtitle: "提取、上传、恢复和管理项目术语。让新手先做选择，让专业能力藏在高级选项里。",
+                summary: ["AI 专业提取", "佣兵小镇", "可恢复旧表", "可人工审核"],
+                steps: [
+                    { title: "选择来源", body: "可以从文本中提取，也可以上传已有术语表或恢复之前的结果。", drop: "拖入文本表格或术语表", hint: "支持 CSV / XLSX" },
+                    { title: "选择提取方式", body: "说明卡回答适合、消耗、结果三件事，不再堆长段落。", fields: [["提取模式", "AI 专业提取 V2"], ["AI 模型", "Gemini 2.5 Flash-Lite"]], decisions: [["AI 专业提取", "正式项目、长文本", "需要 API", "更少人工筛选"], ["规则提取", "快速预筛、无 API", "本地处理", "候选更多"]] },
+                    { title: "保存术语表", body: "提取结果可保存到术语库，后续翻译和检测自动复用。", primary: "开始提取", secondary: "上传已有术语表" }
+                ],
+                side: { input: "等待来源", output: "术语库", next: ["选择提取方式。", "上传文本或术语表。", "保存后用于翻译和检测。"] }
+            },
+            organize: {
+                icon: "整",
+                nav: "术语整理",
+                title: "术语整理",
+                subtitle: "合并多个旧术语表，统一分类、译法和质量标记。适合项目交付前清理术语资产。",
+                summary: ["多文件合并", "分类体系", "AI 整理", "质量标记"],
+                steps: [
+                    { title: "放入旧术语表", body: "可一次上传多个 CSV/XLSX，系统会先识别列并合并候选。", drop: "拖入待整理术语表", hint: "支持多文件、多工作表" },
+                    { title: "确认整理规则", body: "默认使用项目分类体系，专业模式可编辑同义类别和输出列。", fields: [["AI 模型", "Gemini 2.5 Flash-Lite"], ["分类体系", "角色 / 道具 / UI / 地点"]], decisions: [["自动整理", "适合旧表合并", "需要 API", "分类更统一"], ["本地预整理", "适合先清洗", "不调用 API", "速度更快"]] },
+                    { title: "导出整理结果", body: "结果包含最终分类、质量状态、问题和建议。", primary: "开始整理", secondary: "导入参考术语" }
+                ],
+                side: { input: "等待术语表", output: "整理后术语表", next: ["上传多个旧表。", "确认分类体系。", "导出最终术语表。"] }
+            }
+        };
+
+        const navButtons = [...document.querySelectorAll(".nav button")];
+        const currentLabel = document.querySelector(".crumbs strong");
+        const summary = document.querySelector(".task-summary");
+        const titleBlock = document.querySelector(".tool-title");
+        const workflow = document.querySelector(".workflow");
+        const sideStack = document.querySelector(".side-stack");
+        const toast = document.getElementById("previewToast");
+        let currentTool = "translate";
+        let currentMode = "novice";
+        let apiOpen = false;
+
+        function showToast(message) {
+            toast.textContent = message;
+            toast.classList.add("show");
+            clearTimeout(showToast.timer);
+            showToast.timer = setTimeout(() => toast.classList.remove("show"), 1600);
+        }
+
+        function renderNav() {
+            Object.entries(toolData).forEach(([key, tool], index) => {
+                const button = navButtons[index];
+                if (!button) return;
+                button.dataset.tool = key;
+                button.classList.toggle("active", key === currentTool);
+                button.innerHTML = `<i>${tool.icon}</i><span>${tool.nav}</span>`;
+                button.onclick = () => {
+                    currentTool = key;
+                    render();
+                };
+            });
+        }
+
+        function renderSummary(tool) {
+            summary.innerHTML = `<span class="summary-label">当前任务</span>${tool.summary.map((item, index) => `<span class="chip ${index === 0 ? "blue" : ""}">${item}</span>`).join("")}`;
+        }
+
+        function renderTitle(tool) {
+            titleBlock.innerHTML = `
+                <div>
+                    <h1>${tool.title}</h1>
+                    <p>${tool.subtitle}</p>
+                </div>
+                <div class="mode-switch" aria-label="视图模式">
+                    <button class="${currentMode === "novice" ? "active" : ""}" data-mode="novice">新手</button>
+                    <button class="${currentMode === "pro" ? "active" : ""}" data-mode="pro">专业</button>
+                </div>
+            `;
+            titleBlock.querySelectorAll("[data-mode]").forEach(button => {
+                button.onclick = () => {
+                    currentMode = button.dataset.mode;
+                    render();
+                    showToast(currentMode === "pro" ? "已切换到专业模式" : "已切换到新手模式");
+                };
+            });
+        }
+
+        function renderStep(step, index) {
+            const fieldHtml = step.fields ? `
+                <div class="field-grid">
+                    ${step.fields.map(([label, value]) => `<div class="field"><label>${label}</label><select><option>${value}</option></select></div>`).join("")}
+                </div>
+            ` : "";
+            const decisionHtml = step.decisions ? `
+                <div style="height: 10px"></div>
+                <div class="decision-grid">
+                    ${step.decisions.map((item, i) => `
+                        <div class="decision ${i === 0 ? "active" : ""}" role="button" tabindex="0">
+                            <strong>${item[0]}</strong>
+                            <dl>
+                                <dt>适合</dt><dd>${item[1]}</dd>
+                                <dt>消耗</dt><dd>${item[2]}</dd>
+                                <dt>结果</dt><dd>${item[3]}</dd>
+                            </dl>
+                        </div>
+                    `).join("")}
+                </div>
+            ` : "";
+            const dropHtml = step.drop ? `<div class="file-drop"><div><strong>${step.drop}</strong><span>${step.hint}</span></div></div>` : "";
+            const advancedHtml = index === 1 ? `
+                <details class="advanced" ${currentMode === "pro" ? "open" : ""}>
+                    <summary><span>高级设置</span><span>${currentMode === "pro" ? "当前展开更多参数" : "模型、术语表、并发、输出细节"}</span></summary>
+                    <div class="advanced-content">
+                        <div class="field"><label>AI 模型</label><select><option>Gemini 2.5 Flash-Lite</option></select></div>
+                        <div class="field"><label>预设</label><select><option>项目默认设置</option></select></div>
+                        <div class="field"><label>并发</label><select><option>${currentMode === "pro" ? "5，较快" : "自动"}</option></select></div>
+                    </div>
+                </details>
+            ` : "";
+            const actionHtml = step.primary ? `
+                <div class="run-row">
+                    <button class="primary" data-demo-action>${step.primary}</button>
+                    <button class="secondary" data-demo-action>${step.secondary}</button>
+                    <span class="hint">这是交互预览，不会处理真实文件或调用 API。</span>
+                </div>
+            ` : "";
+
+            return `
+                <article class="step ${index === 0 ? "complete" : ""}">
+                    <div class="step-number">${index + 1}</div>
+                    <div>
+                        <h2>${step.title}</h2>
+                        <p>${step.body}</p>
+                        ${dropHtml}
+                        ${fieldHtml}
+                        ${decisionHtml}
+                        ${advancedHtml}
+                        ${actionHtml}
+                    </div>
+                </article>
+            `;
+        }
+
+        function renderWorkflow(tool) {
+            workflow.innerHTML = tool.steps.map(renderStep).join("");
+            workflow.querySelectorAll(".decision").forEach(card => {
+                card.onclick = () => {
+                    const grid = card.closest(".decision-grid");
+                    grid.querySelectorAll(".decision").forEach(item => item.classList.remove("active"));
+                    card.classList.add("active");
+                };
+            });
+            workflow.querySelectorAll("[data-demo-action], .file-drop").forEach(element => {
+                element.addEventListener("click", () => showToast("这是预览交互，真实处理会在实装版接入"));
+            });
+        }
+
+        function renderSide(tool) {
+            sideStack.innerHTML = `
+                <section class="side-card">
+                    <h3>运行状态</h3>
+                    <div class="status-line"><span>输入</span><strong>${tool.side.input}</strong></div>
+                    <div class="status-line"><span>输出</span><strong>${tool.side.output}</strong></div>
+                    <div class="status-line"><span>数据</span><strong>仅在浏览器内处理</strong></div>
+                    <div class="mini-progress"><span></span></div>
+                    <p>右侧默认只保留当前任务需要看的状态。完整配置放在管理面板里。</p>
+                </section>
+                <section class="side-card">
+                    <h3>API 通道</h3>
+                    <div class="status-line"><span>当前</span><strong>${["split", "convert"].includes(currentTool) ? "不需要 API" : "Google Gemini"}</strong></div>
+                    <div class="status-line"><span>Key</span><strong>${["split", "convert"].includes(currentTool) ? "无" : "已保存"}</strong></div>
+                    <div class="status-line"><span>并发</span><strong>${["split", "convert"].includes(currentTool) ? "本地" : "5"}</strong></div>
+                    <div class="side-actions">
+                        <button data-demo-action>测试</button>
+                        <button id="apiManageButton">管理</button>
+                    </div>
+                    <div class="api-manager-preview ${apiOpen ? "open" : ""}">
+                        <div class="field"><label>API 平台</label><select><option>Google Gemini</option><option>OpenAI</option><option>DeepSeek</option></select></div>
+                        <div class="field"><label>默认模型</label><select><option>Gemini 2.5 Flash-Lite</option><option>GPT-5.4 Mini</option></select></div>
+                        <div class="field"><label>API Key</label><input value="••••••••••••••••" readonly></div>
+                    </div>
+                    <p>点击“管理”可以预览完整 API 设置如何渐进展开。</p>
+                </section>
+                <section class="side-card">
+                    <h3>下一步建议</h3>
+                    <ul class="quiet-list">
+                        ${tool.side.next.map((item, index) => `<li><span class="dot ${index === 0 ? "green" : index === 1 ? "amber" : ""}"></span><span>${item}</span></li>`).join("")}
+                    </ul>
+                </section>
+                <section class="micro">这个可交互预览只验证 UX 动线，不会调用真实 API 或读写文件。</section>
+            `;
+            sideStack.querySelector("#apiManageButton").onclick = () => {
+                apiOpen = !apiOpen;
+                renderSide(tool);
+            };
+            sideStack.querySelectorAll("[data-demo-action]").forEach(button => {
+                button.onclick = () => showToast("预览版不会执行真实 API 测试");
+            });
+        }
+
+        function render() {
+            const tool = toolData[currentTool];
+            renderNav();
+            currentLabel.textContent = tool.title;
+            renderSummary(tool);
+            renderTitle(tool);
+            renderWorkflow(tool);
+            renderSide(tool);
+        }
+
+        render();
+    </script>
 </body>
 </html>
