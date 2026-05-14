@@ -512,12 +512,46 @@ body::after {
 
 .api-help {
     grid-column: 1 / -1;
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 10px;
     margin-top: 0;
     padding-top: 14px;
     border-top: 1px solid var(--border-color);
+}
+
+.api-help details {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+
+.api-help summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 12px 14px;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.api-help summary::-webkit-details-marker {
+    display: none;
+}
+
+.api-help summary::after {
+    content: '+';
+    float: right;
+    color: var(--accent-primary);
+    font-weight: 800;
+}
+
+.api-help details[open] summary::after {
+    content: '-';
+}
+
+.api-help-body {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    padding: 0 12px 12px;
 }
 
 .api-help p {
@@ -541,6 +575,18 @@ body::after {
 
 .api-help a:hover {
     text-decoration: underline;
+}
+
+.action-btn.mini.ghost {
+    background: #ffffff;
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+
+.action-btn.mini.ghost:hover:not(.disabled) {
+    background: rgba(37, 99, 235, 0.07);
+    border-color: rgba(37, 99, 235, 0.35);
+    color: var(--accent-primary);
 }
 
 .model-select-row {
@@ -1911,6 +1957,11 @@ body.file-drag-active .file-input-overlay {
     gap: 16px;
 }
 
+.compact-review-panel {
+    padding: 16px;
+    box-shadow: none;
+}
+
 .glossary-restore-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -2031,7 +2082,7 @@ body.file-drag-active .file-input-overlay {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    min-width: 200px;
+    min-width: 220px;
 }
 
 .project-item:hover {
@@ -2041,8 +2092,9 @@ body.file-drag-active .file-input-overlay {
 
 .project-item.active {
     border-color: var(--accent-primary);
-    background: rgba(0, 212, 255, 0.1);
-    color: var(--accent-primary);
+    background: rgba(37, 99, 235, 0.08);
+    color: var(--text-primary);
+    box-shadow: 0 10px 24px rgba(37, 99, 235, 0.12);
 }
 
 .project-info {
@@ -2052,8 +2104,24 @@ body.file-drag-active .file-input-overlay {
 }
 
 .project-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
     font-weight: 600;
     font-size: 15px;
+}
+
+.project-default-badge {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 7px;
+    border-radius: 999px;
+    background: rgba(37, 99, 235, 0.12);
+    color: var(--accent-primary);
+    font-size: 11px;
+    font-weight: 800;
 }
 
 .project-hint {
@@ -2065,7 +2133,8 @@ body.file-drag-active .file-input-overlay {
 .project-actions {
     display: flex;
     gap: 8px;
-    justify-content: flex-end;
+    justify-content: flex-start;
+    flex-wrap: wrap;
 }
 
 .icon-btn {
@@ -2205,6 +2274,22 @@ body.file-drag-active .file-input-overlay {
     justify-content: flex-end;
 }
 
+.progress-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.progress-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
 .translation-preview {
     margin-top: 20px;
     background: var(--bg-secondary);
@@ -2329,6 +2414,10 @@ body.file-drag-active .file-input-overlay {
 }
 
 .mode-card {
+    appearance: none;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
     min-width: 0;
     padding: 12px;
     border: 1px solid var(--border-color);
@@ -2337,10 +2426,15 @@ body.file-drag-active .file-input-overlay {
     transition: var(--transition);
 }
 
+.mode-card:hover {
+    border-color: rgba(37, 99, 235, 0.4);
+    background: rgba(37, 99, 235, 0.05);
+}
+
 .mode-card.active {
-    border-color: rgba(37, 99, 235, 0.35);
-    background: rgba(37, 99, 235, 0.06);
-    box-shadow: 0 12px 26px rgba(37, 99, 235, 0.12);
+    border-color: var(--accent-primary);
+    background: linear-gradient(180deg, rgba(37, 99, 235, 0.12), rgba(37, 99, 235, 0.05));
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12), 0 12px 26px rgba(37, 99, 235, 0.12);
 }
 
 .mode-card strong,
@@ -2352,6 +2446,10 @@ body.file-drag-active .file-input-overlay {
     margin-bottom: 6px;
     color: var(--text-primary);
     font-size: 13px;
+}
+
+.mode-card.active strong {
+    color: var(--accent-primary);
 }
 
 .mode-card span {
@@ -2788,7 +2886,7 @@ body.file-drag-active .file-input-overlay {
         grid-row: auto;
     }
 
-    .api-help {
+    .api-help-body {
         grid-template-columns: 1fr;
     }
 

@@ -192,13 +192,15 @@
                         <div class="api-profile-list" id="apiProfileList"></div>
                     </div>
                     <div class="api-help">
-                        <p><strong>说明：</strong>本工具不提供免费 AI 服务，必须使用您自己购买的 API Key</p>
-                        <p><strong>分片加速：</strong>多个通道会分别处理不同文本行，互不共享 API Key</p>
-                        <p><strong>手动调整：</strong>Base URL 可以直接改，保存后会优先使用您填写的地址</p>
-                        <p><strong>AIGoCode：</strong>已独立放在“中转网关”分组；GPT、Claude、Gemini 请分别保存通道和 Key，避免模型族不匹配</p>
-                        <p><strong>小米 MiMo：</strong>已内置官方 OpenAI-compatible 地址和 MiMo V2 / V2.5 模型；若测试失败，请先确认小米平台已开通对应模型或插件服务</p>
-                        <p><strong>有道智云：</strong>大模型网关已内置您账号下 14 个生效模型；传统文本翻译的 APP ID/密钥不是 AI 检测通道</p>
-                        <p><strong>有道翻译：</strong>“有道智云大模型翻译”只参与文本翻译，需要填写应用 ID 和应用密钥，不参与本地化检测复核</p>
+                        <details>
+                            <summary>API 配置说明</summary>
+                            <div class="api-help-body">
+                                <p><strong>Key 来源：</strong>本工具只调用你填写的 API，不提供免费 AI 服务。</p>
+                                <p><strong>多通道：</strong>本地化检测可勾选多个已保存通道，每个通道使用自己的 Key、模型和并发设置。</p>
+                                <p><strong>Base URL：</strong>可以直接修改；保存后优先使用你填写的地址。</p>
+                                <p><strong>中转网关：</strong>AIGoCode 的 GPT、Claude、Gemini 已分开保存，避免模型族不匹配。</p>
+                            </div>
+                        </details>
                     </div>
                 </div>
             </div>
@@ -1084,44 +1086,6 @@ shop_77,行 77,兑换码,Enter Code,Redemption Code,Redemption Code,系统/UI,6,
                         <div class="upload-status info" id="glossaryRestoreStatus">术语补跑请上传旧术语表、运行报告和原文件；AI润色续跑请上传旧术语表、AI润色报告和原文件。</div>
                     </div>
 
-                    <div class="glossary-restore-panel" id="glossaryReviewPanel">
-                        <div class="panel-header-row">
-                            <div>
-                                <h3>导入人工审核返稿</h3>
-                                <p class="panel-subtitle">上传策划审核后的 Excel，工具会识别标色、备注或状态列，生成可直接使用的最终术语表。</p>
-                            </div>
-                            <span class="panel-count" id="glossaryReviewCount">0 / 0</span>
-                        </div>
-                        <div class="glossary-restore-grid">
-                            <label class="glossary-restore-item" for="glossaryReviewInput">
-                                <span class="restore-label">审核返稿</span>
-                                <strong id="glossaryReviewName">未选择</strong>
-                                <small>建议上传带有“修正后数据 / 术语表”的 xlsx 文件</small>
-                                <input type="file" id="glossaryReviewInput" accept=".xlsx,.xls" hidden>
-                            </label>
-                            <label class="glossary-restore-item" for="glossaryReviewMode">
-                                <span class="restore-label">标色含义</span>
-                                <select id="glossaryReviewMode" class="review-mode-select">
-                                    <option value="ignore" selected>标色表示不改/排除该行术语</option>
-                                    <option value="keep">标色表示审核通过/保留术语</option>
-                                    <option value="auto">自动识别优先</option>
-                                </select>
-                                <small>如果策划用颜色表示“不改/保持原译”，保持默认；如果颜色表示该术语通过审核，切换为保留。</small>
-                            </label>
-                            <label class="glossary-restore-item">
-                                <span class="restore-label">识别结果</span>
-                                <strong id="glossaryReviewSummary">等待上传返稿</strong>
-                                <small>会输出最终术语表、忽略清单和识别报告</small>
-                            </label>
-                        </div>
-                        <div class="glossary-restore-actions">
-                            <button class="action-btn secondary" id="glossaryReviewReportBtn" type="button" disabled>下载识别报告</button>
-                            <button class="action-btn primary" id="glossaryReviewDownloadBtn" type="button" disabled>生成最终术语表</button>
-                            <button class="action-btn secondary" id="clearGlossaryReviewBtn" type="button">清空审核文件</button>
-                        </div>
-                        <div class="upload-status info" id="glossaryReviewStatus">上传策划返稿后，工具会识别被标色或标记为“不改”的条目，并生成审核后的最终术语表。</div>
-                    </div>
-
                     <div class="glossary-library-panel" id="glossaryLibraryPanel">
                         <div class="panel-header-row">
                             <div>
@@ -1300,6 +1264,44 @@ shop_77,行 77,兑换码,Enter Code,Redemption Code,Redemption Code,系统/UI,6,
                         </div>
                     </div>
 
+                    <div class="glossary-restore-panel glossary-review-panel compact-review-panel" id="glossaryReviewPanel">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>导入人工审核返稿</h3>
+                                <p class="panel-subtitle">上传策划审核后的 Excel，工具会识别标色、备注或状态列，生成可直接使用的最终术语表。</p>
+                            </div>
+                            <span class="panel-count" id="glossaryReviewCount">0 / 0</span>
+                        </div>
+                        <div class="glossary-restore-grid">
+                            <label class="glossary-restore-item" for="glossaryReviewInput">
+                                <span class="restore-label">审核返稿</span>
+                                <strong id="glossaryReviewName">未选择</strong>
+                                <small>建议上传带有“修正后数据 / 术语表”的 xlsx 文件</small>
+                                <input type="file" id="glossaryReviewInput" accept=".xlsx,.xls" hidden>
+                            </label>
+                            <label class="glossary-restore-item" for="glossaryReviewMode">
+                                <span class="restore-label">标色含义</span>
+                                <select id="glossaryReviewMode" class="review-mode-select">
+                                    <option value="ignore" selected>标色表示不改/排除该行术语</option>
+                                    <option value="keep">标色表示审核通过/保留术语</option>
+                                    <option value="auto">自动识别优先</option>
+                                </select>
+                                <small>如果策划用颜色表示“不改/保持原译”，保持默认；如果颜色表示该术语通过审核，切换为保留。</small>
+                            </label>
+                            <label class="glossary-restore-item">
+                                <span class="restore-label">识别结果</span>
+                                <strong id="glossaryReviewSummary">等待上传返稿</strong>
+                                <small>会输出最终术语表、忽略清单和识别报告</small>
+                            </label>
+                        </div>
+                        <div class="glossary-restore-actions">
+                            <button class="action-btn secondary" id="glossaryReviewReportBtn" type="button" disabled>下载识别报告</button>
+                            <button class="action-btn primary" id="glossaryReviewDownloadBtn" type="button" disabled>生成最终术语表</button>
+                            <button class="action-btn secondary" id="clearGlossaryReviewBtn" type="button">清空审核文件</button>
+                        </div>
+                        <div class="upload-status info" id="glossaryReviewStatus">上传策划返稿后，工具会识别被标色或标记为“不改”的条目，并生成审核后的最终术语表。</div>
+                    </div>
+
                     <div class="column-select-panel" id="organizeGlossaryColumnPanel" style="display: none;">
                         <div class="sheet-select-panel" id="organizeGlossarySheetPanel" style="display: none;">
                             <div class="panel-header-row">
@@ -1331,6 +1333,28 @@ shop_77,行 77,兑换码,Enter Code,Redemption Code,Redemption Code,系统/UI,6,
                     <div class="progress-panel" id="organizeGlossaryProgress" style="display: none;">
                         <div class="progress-header">
                             <h3>整理进度</h3>
+                            <div class="progress-actions">
+                                <button class="action-btn secondary" id="organizeGlossaryPauseBtn" type="button">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="6" y="4" width="4" height="16"/>
+                                        <rect x="14" y="4" width="4" height="16"/>
+                                    </svg>
+                                    暂停
+                                </button>
+                                <button class="action-btn primary" id="organizeGlossaryResumeBtn" type="button" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    继续
+                                </button>
+                                <button class="action-btn danger" id="organizeGlossaryCancelBtn" type="button">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                    取消任务
+                                </button>
+                            </div>
                         </div>
                         <div class="progress-bar">
                             <div class="progress-fill" id="organizeGlossaryProgressFill"></div>

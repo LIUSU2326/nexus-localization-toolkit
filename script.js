@@ -100,6 +100,7 @@ function downloadWorkbookFile(workbook, fileName) {
 }
 
 const TRANSLATION_PROJECTS_KEY = 'translationProjects';
+const DEFAULT_TRANSLATION_PROJECT_KEY = 'nexus_default_translation_project';
 const GLOSSARY_LIBRARY_KEY = 'nexus_glossary_library';
 const API_PROFILES_KEY = 'nexus_api_profiles';
 const ACTIVE_API_PROFILE_KEY = 'nexus_active_api_profile';
@@ -1068,6 +1069,28 @@ function loadTranslationProjectsFromStorage() {
     }
 }
 
+function getDefaultTranslationProjectId() {
+    return localStorage.getItem(DEFAULT_TRANSLATION_PROJECT_KEY) || 'yongbingxiaozhen';
+}
+
+function setDefaultTranslationProjectId(projectId) {
+    if (!projectId) {
+        localStorage.removeItem(DEFAULT_TRANSLATION_PROJECT_KEY);
+    } else {
+        localStorage.setItem(DEFAULT_TRANSLATION_PROJECT_KEY, projectId);
+    }
+    document.dispatchEvent(new CustomEvent('nexus:projects-updated'));
+}
+
+function getPreferredTranslationProject(projects = []) {
+    if (!Array.isArray(projects) || projects.length === 0) return null;
+    const defaultId = getDefaultTranslationProjectId();
+    return projects.find(project => project.id === defaultId) ||
+        projects.find(project => project.id === 'yongbingxiaozhen') ||
+        projects[0] ||
+        null;
+}
+
 function isOnline() {
     return navigator.onLine;
 }
@@ -1167,7 +1190,7 @@ const PLATFORM_CONFIG = {
     aigocodeClaude: { name: 'AIGoCode Claude 网关', baseUrl: 'https://api.aigocode.com/v1', gateway: true, protocol: 'anthropic-messages', allowCustomModel: true, models: [
         { id: 'claude-opus-4-6', name: 'Claude Opus 4.6（推荐）' },
         { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
-        { id: 'claude-opus-4-7', name: 'Claude Opus 4.7（需账号支持）' },
+        { id: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
         { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5' },
         { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5' },
         { id: 'claude-sonnet-4', name: 'Claude Sonnet 4' },
@@ -3931,7 +3954,7 @@ function initTranslateTool() {
         }
         restoreDefaultProjects();
         if (projects.length > 0 && !currentProject) {
-            currentProject = projects[0];
+            currentProject = getPreferredTranslationProject(projects);
         }
     }
 
@@ -3947,7 +3970,7 @@ function initTranslateTool() {
         });
 
         if (!currentProject || !projects.some(project => project.id === currentProject.id)) {
-            currentProject = projects.find(project => project.id === 'yongbingxiaozhen') || projects[0] || null;
+            currentProject = getPreferredTranslationProject(projects);
         }
 
         if (changed || !localStorage.getItem(TRANSLATION_PROJECTS_KEY)) {
@@ -3962,21 +3985,26 @@ function initTranslateTool() {
 
     function renderProjects() {
         projectList.innerHTML = '';
+        const defaultProjectId = getDefaultTranslationProjectId();
         projects.forEach(project => {
             const div = document.createElement('div');
             div.className = `project-item ${currentProject && currentProject.id === project.id ? 'active' : ''}`;
+            const isDefaultProject = project.id === defaultProjectId;
             div.innerHTML = `
                 <div class="project-info">
-                    <span class="project-name">${project.name}</span>
-                    <span class="project-hint">点击选择 | 双击编辑</span>
+                    <span class="project-name">${escapeHtml(project.name)}${isDefaultProject ? '<span class="project-default-badge">默认</span>' : ''}</span>
+                    <span class="project-hint">点击选择 · 双击编辑</span>
                 </div>
                 <div class="project-actions">
-                    <button class="action-btn mini" data-id="${project.id}" data-action="view">
+                    <button class="action-btn mini ghost" data-id="${project.id}" data-action="view" title="查看项目规则">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
                             <circle cx="12" cy="12" r="3"/>
                         </svg>
                         <span>查看</span>
+                    </button>
+                    <button class="action-btn mini secondary ${isDefaultProject ? 'disabled' : ''}" data-id="${project.id}" data-action="default" title="设为默认项目">
+                        <span>${isDefaultProject ? '默认中' : '设默认'}</span>
                     </button>
                     <button class="action-btn mini primary" data-id="${project.id}" data-action="edit">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -4000,6 +4028,8 @@ function initTranslateTool() {
                     const action = actionBtn.dataset.action;
                     if (action === 'view') {
                         viewProject(project.id);
+                    } else if (action === 'default' && project.id !== getDefaultTranslationProjectId()) {
+                        setDefaultProject(project.id);
                     } else if (action === 'edit') {
                         editProject(project.id);
                     } else if (action === 'delete' && project.id !== 'yongbingxiaozhen') {
@@ -4028,6 +4058,16 @@ function initTranslateTool() {
     function selectProject(id) {
         currentProject = projects.find(p => p.id === id);
         renderProjects();
+    }
+
+    function setDefaultProject(id) {
+        const project = projects.find(p => p.id === id);
+        if (!project) return;
+        currentProject = project;
+        setDefaultTranslationProjectId(id);
+        saveProjectsToStorage();
+        renderProjects();
+        setStatus('success', '已设置默认游戏项目', project.name);
     }
 
     function openModal(project = null, viewOnly = false) {
@@ -4091,7 +4131,10 @@ function initTranslateTool() {
         if (id === 'yongbingxiaozhen') return;
         projects = projects.filter(p => p.id !== id);
         if (currentProject && currentProject.id === id) {
-            currentProject = projects[0] || null;
+            currentProject = getPreferredTranslationProject(projects);
+        }
+        if (getDefaultTranslationProjectId() === id) {
+            setDefaultTranslationProjectId(currentProject?.id || '');
         }
         saveProjectsToStorage();
         renderProjects();
@@ -4116,6 +4159,7 @@ function initTranslateTool() {
         } else {
             const id = 'project_' + Date.now();
             projects.push({ id, name, rules });
+            currentProject = projects.find(project => project.id === id) || currentProject;
         }
 
         saveProjectsToStorage();
@@ -5577,6 +5621,9 @@ function initGlossaryOrganizeTool() {
     const progressText = document.getElementById('organizeGlossaryProgressText');
     const progressPercent = document.getElementById('organizeGlossaryProgressPercent');
     const progressInfo = document.getElementById('organizeGlossaryProgressInfo');
+    const pauseBtn = document.getElementById('organizeGlossaryPauseBtn');
+    const resumeBtn = document.getElementById('organizeGlossaryResumeBtn');
+    const cancelBtn = document.getElementById('organizeGlossaryCancelBtn');
     const resultsPanel = document.getElementById('organizeGlossaryResults');
     const resultBody = document.getElementById('organizeGlossaryBody');
     const summaryText = document.getElementById('organizeGlossarySummary');
@@ -5597,6 +5644,9 @@ function initGlossaryOrganizeTool() {
     let combinedRows = [];
     let organizedTerms = [];
     let workbookName = 'organized_glossary';
+    let organizerTaskState = null;
+    let organizerTaskController = null;
+    let organizerResumeResolvers = [];
 
     uploadArea.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', event => {
@@ -5606,6 +5656,9 @@ function initGlossaryOrganizeTool() {
     });
     bindUploadDrop(uploadArea, fileInput, (file, files = []) => handleFiles(files.length > 0 ? files : [file]));
     organizeBtn?.addEventListener('click', () => void organizeGlossary());
+    pauseBtn?.addEventListener('click', pauseOrganizerTask);
+    resumeBtn?.addEventListener('click', resumeOrganizerTask);
+    cancelBtn?.addEventListener('click', cancelOrganizerTask);
     downloadBtn?.addEventListener('click', downloadOrganizedGlossary);
     saveBtn?.addEventListener('click', saveOrganizedGlossary);
     resetBtn?.addEventListener('click', resetOrganizer);
@@ -5616,9 +5669,146 @@ function initGlossaryOrganizeTool() {
     });
     document.addEventListener('nexus:glossary-library-updated', renderReferenceGlossaryList);
     renderReferenceGlossaryList();
+    updateOrganizerTaskButtons();
 
     function makeSourceId(fileName, sheetName, index) {
         return `organize_${makeStableId(`${fileName}:${sheetName}:${index}`)}`;
+    }
+
+    function createOrganizerAbortError() {
+        return new DOMException('Glossary organizer task cancelled', 'AbortError');
+    }
+
+    function isOrganizerAbortError(error) {
+        return error?.name === 'AbortError' || error?.message === 'ORGANIZER_TASK_CANCELLED';
+    }
+
+    function updateOrganizerTaskButtons() {
+        const isRunning = Boolean(organizerTaskState?.running);
+        const isPaused = Boolean(organizerTaskState?.paused);
+
+        if (organizeBtn) {
+            organizeBtn.disabled = isRunning;
+            organizeBtn.classList.toggle('disabled', isRunning);
+        }
+        if (pauseBtn) {
+            pauseBtn.style.display = isRunning && !isPaused ? 'inline-flex' : 'none';
+            pauseBtn.disabled = !isRunning || Boolean(organizerTaskState?.cancelled);
+        }
+        if (resumeBtn) {
+            resumeBtn.style.display = isRunning && isPaused ? 'inline-flex' : 'none';
+            resumeBtn.disabled = !isRunning || Boolean(organizerTaskState?.cancelled);
+        }
+        if (cancelBtn) {
+            cancelBtn.style.display = isRunning ? 'inline-flex' : 'none';
+            cancelBtn.disabled = !isRunning || Boolean(organizerTaskState?.cancelled);
+        }
+    }
+
+    function flushOrganizerResumeWaiters() {
+        const resolvers = organizerResumeResolvers;
+        organizerResumeResolvers = [];
+        resolvers.forEach(resolve => resolve());
+    }
+
+    function beginOrganizerTask() {
+        if (organizerTaskController) {
+            organizerTaskController.abort();
+        }
+        organizerTaskController = new AbortController();
+        organizerTaskState = {
+            running: true,
+            paused: false,
+            cancelled: false,
+            startedAt: Date.now(),
+            signal: organizerTaskController.signal
+        };
+        updateOrganizerTaskButtons();
+        return organizerTaskState;
+    }
+
+    function finishOrganizerTask(taskState = organizerTaskState) {
+        if (taskState && organizerTaskState === taskState) {
+            organizerTaskState.running = false;
+            organizerTaskState.paused = false;
+            organizerTaskState = null;
+            organizerTaskController = null;
+        }
+        flushOrganizerResumeWaiters();
+        updateOrganizerTaskButtons();
+    }
+
+    function pauseOrganizerTask() {
+        if (!organizerTaskState?.running || organizerTaskState.paused) return;
+        organizerTaskState.paused = true;
+        updateOrganizerTaskButtons();
+        if (progressInfo) {
+            progressInfo.textContent = '已暂停：当前请求如果已发出，会等它返回；暂停期间不会发起下一批。';
+        }
+        setStatus('warning', '术语整理已暂停', '当前已发出的请求会继续等待返回，暂停期间不会发起新的批次。');
+    }
+
+    function resumeOrganizerTask() {
+        if (!organizerTaskState?.running || !organizerTaskState.paused) return;
+        organizerTaskState.paused = false;
+        updateOrganizerTaskButtons();
+        setStatus('processing', '术语整理继续运行', '正在继续整理后续批次。');
+        flushOrganizerResumeWaiters();
+    }
+
+    function cancelOrganizerTask(options = {}) {
+        if (!organizerTaskState?.running) return;
+        const shouldCancel = options.skipConfirm || confirm('确定取消当前术语整理任务吗？已完成的批次会保留，可下载当前整理结果；未开始的批次不会继续消耗 API 额度。');
+        if (!shouldCancel) return;
+
+        organizerTaskState.cancelled = true;
+        organizerTaskState.paused = false;
+        if (organizerTaskController) {
+            organizerTaskController.abort();
+        }
+        flushOrganizerResumeWaiters();
+        updateOrganizerTaskButtons();
+        if (progressInfo) {
+            progressInfo.textContent = '正在取消任务，已停止后续批次。';
+        }
+        if (!options.silent) {
+            setStatus('warning', '正在取消术语整理', '已停止后续批次；正在中断或等待当前请求结束。');
+        }
+    }
+
+    function assertOrganizerTaskActive(taskState = organizerTaskState) {
+        if (taskState?.cancelled || taskState?.signal?.aborted) {
+            throw createOrganizerAbortError();
+        }
+    }
+
+    async function waitOrganizerIfPaused(taskState = organizerTaskState) {
+        while (taskState?.running && taskState.paused && !taskState.cancelled) {
+            await new Promise(resolve => {
+                organizerResumeResolvers.push(resolve);
+            });
+        }
+        assertOrganizerTaskActive(taskState);
+    }
+
+    function hasLikelyReviewWorkbookSource() {
+        const selectedNames = getSelectedSources().map(source => String(source.sheetName || '').trim());
+        return selectedNames.includes('修正后数据') ||
+            selectedNames.includes('原始数据') ||
+            selectedNames.includes('修改明细');
+    }
+
+    function shouldConfirmLargeOrganizerRun(rawTerms) {
+        if (rawTerms.length <= 3000 && !hasLikelyReviewWorkbookSource()) return true;
+
+        const selectedSummary = getSelectedSources()
+            .map(source => `${source.sheetName || 'Sheet1'}（${Math.max(0, (source.rows?.length || 0) - getSourceHeaderInfo(source).dataStart)} 行）`)
+            .join('、');
+        return confirm(
+            `当前将整理 ${rawTerms.length} 条记录，且所选工作表包含：${selectedSummary || '未识别'}。\n\n` +
+            '如果这是“术语提取返稿”并且你想按标色/备注过滤，请使用「术语表」页面里的「导入人工审核返稿」，不要用这里的「术语整理」。\n\n' +
+            '继续术语整理会调用 AI，可能明显消耗 token。确定继续吗？'
+        );
     }
 
     async function handleFiles(files) {
@@ -6007,6 +6197,11 @@ ${JSON.stringify(terms.map((term, index) => ({
     }
 
     async function organizeGlossary() {
+        if (organizerTaskState?.running) {
+            setStatus('warning', '术语整理正在运行', '请先暂停、继续或取消当前任务。');
+            return;
+        }
+
         const rawTerms = mergeDuplicateTerms(collectTermsFromRows());
         if (!rawTerms.length) {
             alert('没有可整理的术语');
@@ -6015,6 +6210,10 @@ ${JSON.stringify(terms.map((term, index) => ({
         if (!getApiConfig().apiKey) {
             alert('请先配置 API Key');
             revealApiConfigPanel();
+            return;
+        }
+        if (!shouldConfirmLargeOrganizerRun(rawTerms)) {
+            setStatus('warning', '已取消术语整理', '建议只勾选“术语表”工作表，或改用“导入人工审核返稿”处理标色返稿。');
             return;
         }
 
@@ -6026,75 +6225,126 @@ ${JSON.stringify(terms.map((term, index) => ({
             : (modelSelect.value || apiConfig.model);
         const referenceTerms = getReferenceGlossaryTerms();
         const referenceExamples = buildReferenceExamples(referenceTerms, rawTerms);
+        const taskState = beginOrganizerTask();
         organizedTerms = [];
         progressPanel.style.display = 'block';
         resultsPanel.style.display = 'none';
+        progressFill.style.width = '0%';
+        progressText.textContent = `0 / ${rawTerms.length}`;
+        progressPercent.textContent = '0%';
 
         const chunkSize = 80;
-        for (let i = 0; i < rawTerms.length; i += chunkSize) {
-            const chunk = rawTerms.slice(i, i + chunkSize);
-            const progress = Math.round((i / rawTerms.length) * 100);
-            progressFill.style.width = `${progress}%`;
-            progressText.textContent = `${Math.min(i + chunk.length, rawTerms.length)} / ${rawTerms.length}`;
-            progressPercent.textContent = `${progress}%`;
-            progressInfo.textContent = `正在整理第 ${Math.floor(i / chunkSize) + 1} 批`;
+        const totalChunks = Math.ceil(rawTerms.length / chunkSize);
 
-            try {
-                const content = await requestModelContent(getApiConfig(), {
-                    model,
-                    messages: [
-                        { role: 'system', content: '你是游戏本地化术语标准化整理专家，只返回 JSON。' },
-                        { role: 'user', content: buildOrganizerPrompt(chunk, categories, referenceExamples) }
-                    ],
-                    temperature: 0.1,
-                    max_tokens: 4096
-                });
-                const aiRows = parseOrganizerJson(content);
-                const aiById = new Map(aiRows.map(item => [Number(item.id), item]));
-                chunk.forEach((term, index) => {
-                    const ai = aiById.get(index) || {};
-                    const localQa = localQualityCheck(term);
-                    const organizedType = ai.organizedType || fallbackClassifyTerm(term, categories, synonymMap);
-                    organizedTerms.push({
-                        ...term,
-                        type: organizedType,
-                        organizedType,
-                        secondaryType: ai.secondaryType || '',
-                        confidence: Number(ai.confidence || term.confidence || 0),
-                        categoryReason: ai.categoryReason || '按术语文本、译文和原始类型综合判断',
-                        finalTranslation: ai.finalTranslation || term.finalTranslation || term.target || '',
-                        qualityStatus: ai.qualityStatus || localQa.qualityStatus,
-                        qualityIssues: ai.qualityIssues || localQa.qualityIssues,
-                        qualitySuggestion: ai.qualitySuggestion || localQa.qualitySuggestion,
-                        extractionSource: 'organizer-ai'
+        try {
+            for (let i = 0; i < rawTerms.length; i += chunkSize) {
+                await waitOrganizerIfPaused(taskState);
+                assertOrganizerTaskActive(taskState);
+
+                const chunk = rawTerms.slice(i, i + chunkSize);
+                const chunkNumber = Math.floor(i / chunkSize) + 1;
+                const progress = Math.round((i / rawTerms.length) * 100);
+                progressFill.style.width = `${progress}%`;
+                progressText.textContent = `${i} / ${rawTerms.length}`;
+                progressPercent.textContent = `${progress}%`;
+                progressInfo.textContent = `正在整理第 ${chunkNumber} / ${totalChunks} 批，已完成 ${i} 条`;
+
+                try {
+                    const content = await requestModelContent(apiConfig, {
+                        model,
+                        messages: [
+                            { role: 'system', content: '你是游戏本地化术语标准化整理专家，只返回 JSON。' },
+                            { role: 'user', content: buildOrganizerPrompt(chunk, categories, referenceExamples) }
+                        ],
+                        temperature: 0.1,
+                        max_tokens: 4096
+                    }, taskState.signal);
+                    assertOrganizerTaskActive(taskState);
+
+                    const aiRows = parseOrganizerJson(content);
+                    const aiById = new Map(aiRows.map(item => [Number(item.id), item]));
+                    chunk.forEach((term, index) => {
+                        const ai = aiById.get(index) || {};
+                        const localQa = localQualityCheck(term);
+                        const organizedType = ai.organizedType || fallbackClassifyTerm(term, categories, synonymMap);
+                        organizedTerms.push({
+                            ...term,
+                            type: organizedType,
+                            organizedType,
+                            secondaryType: ai.secondaryType || '',
+                            confidence: Number(ai.confidence || term.confidence || 0),
+                            categoryReason: ai.categoryReason || '按术语文本、译文和原始类型综合判断',
+                            finalTranslation: ai.finalTranslation || term.finalTranslation || term.target || '',
+                            qualityStatus: ai.qualityStatus || localQa.qualityStatus,
+                            qualityIssues: ai.qualityIssues || localQa.qualityIssues,
+                            qualitySuggestion: ai.qualitySuggestion || localQa.qualitySuggestion,
+                            extractionSource: 'organizer-ai'
+                        });
                     });
-                });
-            } catch (error) {
-                chunk.forEach(term => {
-                    const localQa = localQualityCheck(term);
-                    const organizedType = fallbackClassifyTerm(term, categories, synonymMap);
-                    organizedTerms.push({
-                        ...term,
-                        type: organizedType,
-                        organizedType,
-                        secondaryType: '',
-                        confidence: 50,
-                        categoryReason: `AI整理失败，已使用本地规则：${error.message}`,
-                        finalTranslation: term.finalTranslation || term.target || '',
-                        qualityStatus: localQa.qualityStatus,
-                        qualityIssues: localQa.qualityIssues,
-                        qualitySuggestion: localQa.qualitySuggestion,
-                        extractionSource: 'organizer-local-fallback'
+                } catch (error) {
+                    if (isOrganizerAbortError(error) || taskState.cancelled || taskState.signal?.aborted) {
+                        throw createOrganizerAbortError();
+                    }
+
+                    chunk.forEach(term => {
+                        const localQa = localQualityCheck(term);
+                        const organizedType = fallbackClassifyTerm(term, categories, synonymMap);
+                        organizedTerms.push({
+                            ...term,
+                            type: organizedType,
+                            organizedType,
+                            secondaryType: '',
+                            confidence: 50,
+                            categoryReason: `AI整理失败，已使用本地规则：${error.message}`,
+                            finalTranslation: term.finalTranslation || term.target || '',
+                            qualityStatus: localQa.qualityStatus,
+                            qualityIssues: localQa.qualityIssues,
+                            qualitySuggestion: localQa.qualitySuggestion,
+                            extractionSource: 'organizer-local-fallback'
+                        });
                     });
-                });
+                }
+
+                const completed = Math.min(i + chunk.length, rawTerms.length);
+                const completedProgress = Math.round((completed / rawTerms.length) * 100);
+                progressFill.style.width = `${completedProgress}%`;
+                progressText.textContent = `${completed} / ${rawTerms.length}`;
+                progressPercent.textContent = `${completedProgress}%`;
+                progressInfo.textContent = `已完成第 ${chunkNumber} / ${totalChunks} 批`;
             }
-        }
 
-        progressFill.style.width = '100%';
-        progressPercent.textContent = '100%';
-        progressInfo.textContent = '整理完成';
-        renderResults();
-        setStatus('success', '术语整理完成', `共整理 ${organizedTerms.length} 条术语`);
+            progressFill.style.width = '100%';
+            progressText.textContent = `${rawTerms.length} / ${rawTerms.length}`;
+            progressPercent.textContent = '100%';
+            progressInfo.textContent = '整理完成';
+            renderResults();
+            setStatus('success', '术语整理完成', `共整理 ${organizedTerms.length} 条术语`);
+        } catch (error) {
+            if (isOrganizerAbortError(error) || taskState.cancelled || taskState.signal?.aborted) {
+                const completed = organizedTerms.length;
+                const progress = rawTerms.length > 0 ? Math.round((completed / rawTerms.length) * 100) : 0;
+                progressFill.style.width = `${progress}%`;
+                progressText.textContent = `${completed} / ${rawTerms.length}`;
+                progressPercent.textContent = `${progress}%`;
+                progressInfo.textContent = completed > 0
+                    ? `任务已取消，已保留 ${completed} 条整理结果，可下载当前结果。`
+                    : '任务已取消，尚无可下载的整理结果。';
+                if (completed > 0) {
+                    renderResults();
+                }
+                setStatus('warning', '术语整理已取消', completed > 0
+                    ? `已保留 ${completed} 条整理结果，可下载当前结果。`
+                    : '未产生整理结果，未继续消耗后续批次。');
+            } else {
+                console.error('Glossary organizer failed:', error);
+                if (organizedTerms.length > 0) {
+                    renderResults();
+                }
+                setStatus('error', '术语整理失败', `${error.message || '请检查 API 通道或上传数据'}；已保留 ${organizedTerms.length} 条结果。`);
+            }
+        } finally {
+            finishOrganizerTask(taskState);
+        }
     }
 
     function renderResults() {
@@ -6203,6 +6453,7 @@ ${JSON.stringify(terms.map((term, index) => ({
     }
 
     function resetOrganizer() {
+        cancelOrganizerTask({ silent: true, skipConfirm: true });
         sources = [];
         selectedSourceIds = new Set();
         selectedReferenceIds = new Set();
@@ -6213,6 +6464,7 @@ ${JSON.stringify(terms.map((term, index) => ({
         columnPanel.style.display = 'none';
         progressPanel.style.display = 'none';
         resultsPanel.style.display = 'none';
+        updateOrganizerTaskButtons();
         renderReferenceGlossaryList();
     }
 }
@@ -7276,12 +7528,23 @@ function initL10nCheckTool() {
             const config = L10N_MODE_CONFIG[mode];
             const isActive = mode === selectedMode;
             return `
-                <div class="mode-card ${isActive ? 'active' : ''}" data-mode="${mode}">
+                <button class="mode-card ${isActive ? 'active' : ''}" data-mode="${mode}" type="button" aria-pressed="${isActive ? 'true' : 'false'}">
                     <strong>${escapeHtml(config.label)}${isActive ? ' · 当前选择' : ''}</strong>
                     <span>${escapeHtml(config.description)}</span>
-                </div>
+                </button>
             `;
         }).join('');
+
+        modeExplainer.querySelectorAll('.mode-card[data-mode]').forEach(card => {
+            card.addEventListener('click', () => {
+                const mode = card.dataset.mode;
+                if (!L10N_MODE_CONFIG[mode]) return;
+                if (checkModeSelect) {
+                    checkModeSelect.value = mode;
+                    checkModeSelect.dispatchEvent(new Event('change'));
+                }
+            });
+        });
     }
 
     function createEmptyHistoryImportState() {
@@ -8334,9 +8597,15 @@ function initL10nCheckTool() {
         l10nProjects.forEach(project => {
             const option = document.createElement('option');
             option.value = project.id;
-            option.textContent = project.name;
+            option.textContent = project.id === getDefaultTranslationProjectId()
+                ? `${project.name}（默认）`
+                : project.name;
             projectSelect.appendChild(option);
         });
+        const preferredProject = getPreferredTranslationProject(l10nProjects);
+        if (preferredProject) {
+            projectSelect.value = preferredProject.id;
+        }
         renderHistoryImportSummary();
     }
 
