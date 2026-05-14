@@ -420,6 +420,53 @@ function normalizeColorValue(value) {
     return text.replace(/^0X/, '').replace(/[^0-9A-F]/g, '');
 }
 
+function getColorAttributeValue(colorNode) {
+    if (!colorNode) return '';
+    return normalizeColorValue(
+        colorNode.getAttribute?.('rgb') ||
+        colorNode.getAttribute?.('indexed') ||
+        colorNode.getAttribute?.('theme') ||
+        colorNode.rgb ||
+        colorNode.indexed ||
+        colorNode.theme ||
+        ''
+    );
+}
+
+function createStyleMarker(fillColor = '', fontColor = '', source = '') {
+    const normalizedFill = normalizeColorValue(fillColor);
+    const normalizedFont = normalizeColorValue(fontColor);
+    if (!normalizedFill && !normalizedFont) return null;
+    return {
+        fillColor: normalizedFill,
+        fontColor: normalizedFont,
+        source: source || [
+            normalizedFill ? 'background' : '',
+            normalizedFont ? 'font' : ''
+        ].filter(Boolean).join('+')
+    };
+}
+
+function getMarkerFillColor(marker) {
+    if (!marker) return '';
+    if (typeof marker === 'string') return normalizeColorValue(marker);
+    return normalizeColorValue(marker.fillColor || marker.color || '');
+}
+
+function getMarkerFontColor(marker) {
+    if (!marker || typeof marker === 'string') return '';
+    return normalizeColorValue(marker.fontColor || '');
+}
+
+function getMarkerDisplaySource(marker) {
+    const fillColor = getMarkerFillColor(marker);
+    const fontColor = getMarkerFontColor(marker);
+    if (fillColor && fontColor) return '背景色+文字颜色';
+    if (fontColor) return '文字颜色';
+    if (fillColor) return '背景色';
+    return '';
+}
+
 function getWorkbookSheetXmlIndex(workbook, sheetName) {
     const sheets = workbook?.Workbook?.Sheets;
     if (!Array.isArray(sheets)) return -1;
@@ -439,10 +486,30 @@ function getStyleFillColorFromWorkbook(workbook, styleIndex) {
     return normalizeColorValue(fg.rgb || fg.indexed || fg.theme || bg.rgb || bg.indexed || bg.theme || '');
 }
 
-function getCellFillColor(workbook, cell) {
+function getStyleFontColorFromWorkbook(workbook, styleIndex) {
+    const styles = workbook?.Styles;
+    const cellXfs = styles?.CellXf || styles?.CellXfs || [];
+    const fonts = styles?.Fonts || styles?.fonts || [];
+    const xf = cellXfs?.[Number(styleIndex)];
+    const fontId = Number(xf?.fontId ?? xf?.fontID ?? xf?.fontid);
+    if (!Number.isFinite(fontId) || fontId < 0) return '';
+    const font = fonts?.[fontId];
+    const color = font?.color || font?.fgColor || font?.fgcolor || {};
+    return normalizeColorValue(color.rgb || color.indexed || color.theme || '');
+}
+
+function getCellStyleMarker(workbook, cell) {
     if (!cell) return '';
     const styleIndex = Number(cell?.s?.index ?? cell?.s?.style ?? cell?.s?.xfId ?? cell?.s ?? 0);
-    return getStyleFillColorFromWorkbook(workbook, styleIndex);
+    return createStyleMarker(
+        getStyleFillColorFromWorkbook(workbook, styleIndex),
+        getStyleFontColorFromWorkbook(workbook, styleIndex),
+        'workbook-style'
+    );
+}
+
+function getCellFillColor(workbook, cell) {
+    return getMarkerFillColor(getCellStyleMarker(workbook, cell));
 }
 
 function extractWorksheetColorMap(workbook, sheetName) {
@@ -454,8 +521,8 @@ function extractWorksheetColorMap(workbook, sheetName) {
     for (let row = range.s.r; row <= range.e.r; row++) {
         for (let col = range.s.c; col <= range.e.c; col++) {
             const addr = XLSX.utils.encode_cell({ r: row, c: col });
-            const color = getCellFillColor(workbook, sheet[addr]);
-            if (color) map.set(addr, color);
+            const marker = getCellStyleMarker(workbook, sheet[addr]);
+            if (marker) map.set(addr, marker);
         }
     }
     return map;
@@ -476,8 +543,8 @@ function readSheetRowsWithStyles(workbook, sheetName) {
             const addr = XLSX.utils.encode_cell({ r: row, c: col });
             const cell = sheet[addr];
             values.push(cell?.v ?? '');
-            const color = getCellFillColor(workbook, cell);
-            if (color) colorMap.set(addr, color);
+            const marker = getCellStyleMarker(workbook, cell);
+            if (marker) colorMap.set(addr, marker);
         }
         rows.push(values);
     }
@@ -551,6 +618,7 @@ function getSheetXmlPathMap(workbookXmlText, relsXmlText) {
 function parseStylesFillColorMap(stylesXmlText) {
     const doc = parseXmlDocument(stylesXmlText);
     const fills = [];
+    const fonts = [];
     const xfs = [];
 
     const fillsNode = getXmlChildrenByName(doc, 'fills')[0];
@@ -565,15 +633,16 @@ function parseStylesFillColorMap(stylesXmlText) {
         }
         const fgColor = getXmlChildrenByName(patternFill, 'fgColor')[0];
         const bgColor = getXmlChildrenByName(patternFill, 'bgColor')[0];
-        fills.push(normalizeColorValue(
-            fgColor?.getAttribute('rgb') ||
-            fgColor?.getAttribute('indexed') ||
-            fgColor?.getAttribute('theme') ||
-            bgColor?.getAttribute('rgb') ||
-            bgColor?.getAttribute('indexed') ||
-            bgColor?.getAttribute('theme') ||
-            ''
-        ));
+        fills.push(getColorAttributeValue(fgColor) || getColorAttributeValue(bgColor));
+    });
+
+    const fontsNode = getXmlChildrenByName(doc, 'fonts')[0];
+    const fontNodes = fontsNode
+        ? Array.from(fontsNode.children).filter(node => node.localName === 'font')
+        : getXmlChildrenByName(doc, 'font');
+    fontNodes.forEach(font => {
+        const colorNode = getXmlChildrenByName(font, 'color')[0];
+        fonts.push(getColorAttributeValue(colorNode));
     });
 
     const cellXfsNode = getXmlChildrenByName(doc, 'cellXfs')[0];
@@ -582,11 +651,12 @@ function parseStylesFillColorMap(stylesXmlText) {
         : getXmlChildrenByName(doc, 'xf');
     xfNodes.forEach(xf => {
         xfs.push({
-            fillId: Number(xf.getAttribute('fillId') || xf.getAttribute('fillid') || 0)
+            fillId: Number(xf.getAttribute('fillId') || xf.getAttribute('fillid') || 0),
+            fontId: Number(xf.getAttribute('fontId') || xf.getAttribute('fontid') || 0)
         });
     });
 
-    return { fills, xfs };
+    return { fills, fonts, xfs };
 }
 
 function getFillColorFromStyles(styleIndex, styleMap) {
@@ -598,24 +668,41 @@ function getFillColorFromStyles(styleIndex, styleMap) {
     return fills[fillId] || '';
 }
 
+function getFontColorFromStyles(styleIndex, styleMap) {
+    const xfs = styleMap?.xfs || [];
+    const fonts = styleMap?.fonts || [];
+    const xf = xfs[Number(styleIndex)] || null;
+    const fontId = Number(xf?.fontId);
+    if (!Number.isFinite(fontId) || fontId < 0) return '';
+    return fonts[fontId] || '';
+}
+
+function getStyleMarkerFromStyles(styleIndex, styleMap) {
+    return createStyleMarker(
+        getFillColorFromStyles(styleIndex, styleMap),
+        getFontColorFromStyles(styleIndex, styleMap),
+        'xlsx-style'
+    );
+}
+
 function parseSheetCellColorMap(sheetXmlText, styleMap) {
     const doc = parseXmlDocument(sheetXmlText);
     const map = new Map();
     getXmlChildrenByName(doc, 'row').forEach(row => {
         const ref = Number(row.getAttribute('r'));
         const styleIndex = Number(row.getAttribute('s') || 0);
-        const color = getFillColorFromStyles(styleIndex, styleMap);
-        if (Number.isFinite(ref) && color) {
-            map.set(`__ROW_${ref - 1}`, color);
+        const marker = getStyleMarkerFromStyles(styleIndex, styleMap);
+        if (Number.isFinite(ref) && marker) {
+            map.set(`__ROW_${ref - 1}`, marker);
         }
     });
     getXmlChildrenByName(doc, 'c').forEach(cell => {
         const ref = cell.getAttribute('r');
         if (!ref) return;
         const styleIndex = Number(cell.getAttribute('s') || 0);
-        const color = getFillColorFromStyles(styleIndex, styleMap);
-        if (color) {
-            map.set(ref, color);
+        const marker = getStyleMarkerFromStyles(styleIndex, styleMap);
+        if (marker) {
+            map.set(ref, marker);
         }
     });
     return map;
@@ -624,7 +711,18 @@ function parseSheetCellColorMap(sheetXmlText, styleMap) {
 function parseReviewMarkerColor(color) {
     const normalized = normalizeColorValue(color);
     if (!normalized) return false;
-    return !['0', '00', '1', '01', '64', '65', '000000', 'FFFFFF', '00000000', 'FFFFFFFF'].includes(normalized);
+    return !['0', '00', '1', '01', '64', '65', '000000', 'FFFFFF', '00000000', 'FFFFFFFF', 'FF000000', 'FFFFFFFF'].includes(normalized);
+}
+
+function isReviewStyleMarker(marker) {
+    return parseReviewMarkerColor(getMarkerFillColor(marker)) ||
+        parseReviewMarkerColor(getMarkerFontColor(marker));
+}
+
+function getReviewMarkerColor(marker) {
+    return parseReviewMarkerColor(getMarkerFillColor(marker))
+        ? getMarkerFillColor(marker)
+        : getMarkerFontColor(marker);
 }
 
 async function extractWorksheetColorMapFromFile(file, workbook, sheetName) {
@@ -713,8 +811,8 @@ function normalizeReviewDecisionText(text) {
 }
 
 function normalizeReviewDisplayDecision(decision) {
-    if (decision === 'ignore') return '排除';
-    if (decision === 'keep') return '保留';
+    if (decision === 'ignore') return '不采用修改';
+    if (decision === 'keep') return '采用术语';
     return '未标记';
 }
 
@@ -726,7 +824,8 @@ function buildReviewRows(report) {
         '原译文',
         'AI/最终译文',
         '人工处理状态',
-        '检测到标色',
+        '检测到颜色标记',
+        '标记来源',
         '匹配术语',
         '备注',
         '建议处理',
@@ -739,12 +838,13 @@ function buildReviewRows(report) {
         entry.finalTranslation || '',
         normalizeReviewDisplayDecision(entry.decision),
         entry.hasMarker ? '是' : '否',
+        entry.markerSource || '',
         (entry.matchedTerms || []).join('; '),
         entry.note || '',
         entry.decision === 'ignore'
-            ? '从最终术语表排除匹配术语'
+            ? '不采用该修改，从最终术语表排除匹配术语'
             : entry.decision === 'keep'
-                ? '保留匹配术语'
+                ? '采用该术语，保留匹配术语'
                 : '无人工标记，按原术语表保留',
         entry.decision && (!entry.matchedTerms || entry.matchedTerms.length === 0)
             ? '未匹配到术语表，已放入“需人工确认”'
@@ -805,7 +905,8 @@ function buildNeedsConfirmationRows(report) {
         '原文',
         '原译文',
         'AI/最终译文',
-        '标色',
+        '颜色标记',
+        '标记来源',
         '人工处理状态',
         '备注',
         '需要确认原因'
@@ -816,6 +917,7 @@ function buildNeedsConfirmationRows(report) {
         entry.originalTranslation || '',
         entry.finalTranslation || '',
         entry.hasMarker ? '是' : '否',
+        entry.markerSource || '',
         normalizeReviewDisplayDecision(entry.decision),
         entry.note || '',
         entry.unmatchedReason || '未能匹配到术语表条目'
@@ -829,7 +931,10 @@ function buildReviewSummaryRows(report) {
         ['审核工作表', report.sheetName || ''],
         ['术语来源', report.glossarySheetName || report.termSourceLabel || '当前术语表/返稿行'],
         ['审核总行数', report.totalRows || 0],
-        ['标色行数', report.markerRows || 0],
+        ['颜色标记行数', report.markerRows || 0],
+        ['仅背景色标记行数', report.fillMarkerRows || 0],
+        ['仅文字颜色标记行数', report.fontMarkerRows || 0],
+        ['背景色+文字颜色标记行数', report.mixedMarkerRows || 0],
         ['人工状态行数', report.statusCount || 0],
         ['原始术语数', report.sourceTermCount || 0],
         ['最终术语数', report.finalTermCount || report.keepCount || 0],
@@ -5806,7 +5911,7 @@ function initGlossaryOrganizeTool() {
             .join('、');
         return confirm(
             `当前将整理 ${rawTerms.length} 条记录，且所选工作表包含：${selectedSummary || '未识别'}。\n\n` +
-            '如果这是“术语提取返稿”并且你想按标色/备注过滤，请使用「术语表」页面里的「导入人工审核返稿」，不要用这里的「术语整理」。\n\n' +
+            '如果这是“术语提取返稿”并且你想按颜色标记/备注过滤，请使用「导入人工审核返稿」，不要用这里的“开始整理术语”。\n\n' +
             '继续术语整理会调用 AI，可能明显消耗 token。确定继续吗？'
         );
     }
@@ -6213,7 +6318,7 @@ ${JSON.stringify(terms.map((term, index) => ({
             return;
         }
         if (!shouldConfirmLargeOrganizerRun(rawTerms)) {
-            setStatus('warning', '已取消术语整理', '建议只勾选“术语表”工作表，或改用“导入人工审核返稿”处理标色返稿。');
+            setStatus('warning', '已取消术语整理', '建议只勾选“术语表”工作表，或改用“导入人工审核返稿”处理带颜色标记的返稿。');
             return;
         }
 
@@ -11371,7 +11476,7 @@ function initGlossaryTool() {
         if (reviewName) reviewName.textContent = glossaryReviewFile?.name || '未选择';
         if (reviewSummary) {
             reviewSummary.textContent = hasReview
-                ? `最终 ${glossaryReviewResult.finalTermCount || glossaryReviewResult.keepCount || 0} 条，排除 ${glossaryReviewResult.removedTermCount || glossaryReviewResult.ignoreCount || 0} 条`
+                ? `最终 ${glossaryReviewResult.finalTermCount || glossaryReviewResult.keepCount || 0} 条，不采用 ${glossaryReviewResult.removedTermCount || glossaryReviewResult.ignoreCount || 0} 条`
                 : '等待上传返稿';
         }
         if (reviewReportBtn) reviewReportBtn.disabled = !hasReview;
@@ -11383,7 +11488,7 @@ function initGlossaryTool() {
         glossaryReviewResult = null;
         if (reviewInput) reviewInput.value = '';
         if (reviewStatus) {
-            reviewStatus.textContent = '上传策划返稿后，工具会识别被标色或标记为“不改”的条目，并生成审核后的最终术语表。';
+            reviewStatus.textContent = '上传策划返稿后，工具会识别背景色、文字颜色、备注或状态列，并生成审核后的最终术语表。';
             reviewStatus.className = 'upload-status info';
         }
         updateGlossaryReviewState();
@@ -11518,7 +11623,7 @@ function initGlossaryTool() {
         return index >= 0 && row[index] !== undefined ? String(row[index]).trim() : '';
     }
 
-    function inferReviewDecision(row, columnIndexes, hasMarker) {
+    function inferReviewDecision(row, columnIndexes, hasMarker, markerSource = '') {
         const statusDecision = normalizeReviewDecisionText(getReviewCell(row, columnIndexes.statusIndex));
         if (statusDecision) {
             return { decision: statusDecision, reviewSource: '状态列' };
@@ -11533,7 +11638,7 @@ function initGlossaryTool() {
             const mode = reviewMode?.value || 'ignore';
             return {
                 decision: mode === 'keep' ? 'keep' : 'ignore',
-                reviewSource: '标色'
+                reviewSource: markerSource || '颜色标记'
             };
         }
 
@@ -11619,6 +11724,9 @@ function initGlossaryTool() {
         const colorMap = await extractWorksheetColorMapFromFile(file, workbook, sheetName);
         const entries = [];
         let markerRows = 0;
+        let fillMarkerRows = 0;
+        let fontMarkerRows = 0;
+        let mixedMarkerRows = 0;
 
         const headerRow = rows[0] || [];
         const dataRows = rows.slice(1);
@@ -11633,14 +11741,23 @@ function initGlossaryTool() {
             const finalTranslation = getReviewCell(row, columnIndexes.finalTranslationIndex);
             const note = getReviewCell(row, columnIndexes.noteIndex);
 
-            const rowColor = colorMap.get(`__ROW_${offset + 1}`) || Array.from({ length: Math.max(headerRow.length, row.length) }, (_, col) => {
+            const rowMarker = colorMap.get(`__ROW_${offset + 1}`) || Array.from({ length: Math.max(headerRow.length, row.length) }, (_, col) => {
                 const addr = XLSX.utils.encode_cell({ r: offset + 1, c: col });
-                return colorMap.get(addr) || '';
-            }).find(color => parseReviewMarkerColor(color)) || '';
-            const hasMarker = Boolean(rowColor);
-            if (hasMarker) markerRows++;
+                return colorMap.get(addr) || null;
+            }).find(marker => isReviewStyleMarker(marker)) || null;
+            const hasFillMarker = parseReviewMarkerColor(getMarkerFillColor(rowMarker));
+            const hasFontMarker = parseReviewMarkerColor(getMarkerFontColor(rowMarker));
+            const markerSource = getMarkerDisplaySource(rowMarker);
+            const rowColor = getReviewMarkerColor(rowMarker);
+            const hasMarker = Boolean(rowMarker && (hasFillMarker || hasFontMarker));
+            if (hasMarker) {
+                markerRows++;
+                if (hasFillMarker && hasFontMarker) mixedMarkerRows++;
+                else if (hasFillMarker) fillMarkerRows++;
+                else if (hasFontMarker) fontMarkerRows++;
+            }
 
-            const { decision, reviewSource } = inferReviewDecision(row, columnIndexes, hasMarker);
+            const { decision, reviewSource } = inferReviewDecision(row, columnIndexes, hasMarker, markerSource);
             const sourceKey = normalizeTermKey(sourceText || referenceId || rowNumber);
             entries.push({
                 excelRowNumber,
@@ -11653,6 +11770,9 @@ function initGlossaryTool() {
                 note,
                 hasMarker,
                 rowColor,
+                fillColor: getMarkerFillColor(rowMarker),
+                fontColor: getMarkerFontColor(rowMarker),
+                markerSource,
                 decision,
                 reviewSource,
                 sourceKey
@@ -11730,6 +11850,9 @@ function initGlossaryTool() {
             termSourceLabel,
             totalRows: dataRows.length,
             markerRows,
+            fillMarkerRows,
+            fontMarkerRows,
+            mixedMarkerRows,
             sourceTermCount: sourceTerms.length,
             finalTermCount: finalTerms.length,
             removedTermCount: removedTerms.length,
@@ -11768,7 +11891,12 @@ function initGlossaryTool() {
                 const result = await analyzeGlossaryReviewFile(file);
                 glossaryReviewResult = result;
                 if (reviewStatus) {
-                reviewStatus.textContent = `已识别 ${result.markerRows} 条标色行，来源 ${result.termSourceLabel || '术语表'}，最终 ${result.finalTermCount} 条，排除 ${result.removedTermCount} 条${result.unmatchedIgnoreCount ? `，${result.unmatchedIgnoreCount} 条需人工确认` : ''}。`;
+                const markerDetail = [
+                    result.fillMarkerRows ? `背景色 ${result.fillMarkerRows}` : '',
+                    result.fontMarkerRows ? `文字颜色 ${result.fontMarkerRows}` : '',
+                    result.mixedMarkerRows ? `背景+文字 ${result.mixedMarkerRows}` : ''
+                ].filter(Boolean).join('，');
+                reviewStatus.textContent = `已识别 ${result.markerRows} 条颜色标记行${markerDetail ? `（${markerDetail}）` : ''}，来源 ${result.termSourceLabel || '术语表'}，最终 ${result.finalTermCount} 条，不采用 ${result.removedTermCount} 条${result.unmatchedIgnoreCount ? `，${result.unmatchedIgnoreCount} 条需人工确认` : ''}。`;
                 reviewStatus.className = 'upload-status success';
             }
             updateGlossaryReviewState();

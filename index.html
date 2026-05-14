@@ -907,103 +907,96 @@
                 </div>
                 
                 <div class="tool-body">
-                    <div class="settings-panel">
-                        <h3>提取设置</h3>
-                        <div class="setting-row">
-                            <label for="glossaryMode">提取模式</label>
-                            <select id="glossaryMode">
-                                <option value="ai" selected>AI 专业提取 V2（推荐）</option>
-                                <option value="rule">规则提取 V2（本地快速）</option>
-                            </select>
-                        </div>
-                        <div class="mode-description" id="modeDescription">
-                            <div class="mode-info">
-                                <h4>🤖 AI 专业提取 V2</h4>
-                                <ul>
-                                    <li>先识别原文/译文/定位列，再由 AI 直接阅读全部文本分批提炼术语</li>
-                                    <li>不再依赖本地候选和出现次数，按游戏语境判断术语价值并细分类</li>
-                                    <li>保留定位 ID/行号、置信度、提取依据、推荐英文译法和术语质量检测</li>
-                                    <li>需要配置 API Key，长文件会分批调用并消耗更多 API 额度</li>
-                                </ul>
-                            </div>
-                            <div class="mode-info">
-                                <h4>⚡ 规则提取 V2</h4>
-                                <ul>
-                                    <li>适合先快速生成可编辑的术语候选</li>
-                                    <li>基于游戏领域词库、括号名词和原文/译文列匹配</li>
-                                    <li>无需API，完全本地处理</li>
-                                    <li>不会提取完整句子、纯数字、ID 和常见提示语</li>
-                                </ul>
+                    <div class="settings-panel glossary-extract-settings">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>提取设置</h3>
+                                <p class="panel-subtitle">先选提取方式，再上传文件。大项目建议用 AI 模式，小样本或预筛选可用本地规则。</p>
                             </div>
                         </div>
-                        <div class="collapsible-section">
-                            <button class="collapsible-header" id="rulesHeader">
-                                <span>📋 规则提取逻辑</span>
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="collapse-icon">
-                                    <polyline points="6 9 12 15 18 9"/>
-                                </svg>
-                            </button>
-                            <div class="collapsible-content" id="rulesContent" style="display: none;">
-                                <div class="extraction-rules">
-                                    <ul>
-                                        <li><strong>列识别：</strong>自动判断中文原文列、英文译文列和 ID 列</li>
-                                        <li><strong>候选召回：</strong>优先提取短中文专名、括号内名称、游戏对象和系统 UI 名词</li>
-                                        <li><strong>低价值过滤：</strong>跳过完整句子、纯数字、ID、常见按钮提示和临时状态描述</li>
-                                        <li><strong>类型识别：</strong>角色/NPC、地点/建筑、道具/装备、资源/货币、技能/状态、任务/活动、系统/UI</li>
-                                        <li><strong>译法绑定：</strong>方向固定为中文原文术语 -> 英文指定译法，不反向命中英文</li>
-                                        <li><strong>置信度：</strong>结合出现次数、上下文和译文匹配给出可排序的质量分</li>
-                                    </ul>
+                        <div class="glossary-settings-grid">
+                            <div class="glossary-settings-main">
+                                <div class="setting-row">
+                                    <label for="glossaryMode">提取模式</label>
+                                    <select id="glossaryMode">
+                                        <option value="ai" selected>AI 专业提取 V2（推荐）</option>
+                                        <option value="rule">规则提取 V2（本地快速）</option>
+                                    </select>
+                                </div>
+                                <div class="setting-row model-select-row" id="glossaryModelRow">
+                                    <label for="glossaryModel">AI模型</label>
+                                    <select id="glossaryModel">
+                                        <option value="deepseek-v4-flash" selected>DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                                        <option value="deepseek-v4-pro">DeepSeek V4 Pro (deepseek-v4-pro)</option>
+                                        <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
+                                        <option value="deepseek-reasoner">DeepSeek Reasoner (deepseek-reasoner)</option>
+                                    </select>
+                                </div>
+                                <div class="setting-row" id="glossarySpeedRow">
+                                    <label for="glossarySpeedMode">术语提取速度</label>
+                                    <select id="glossarySpeedMode">
+                                        <option value="auto" selected>自动推荐（按模型智能选择）</option>
+                                        <option value="stable">稳定档（慢一些，失败率最低）</option>
+                                        <option value="balanced">均衡档（推荐通用模型）</option>
+                                        <option value="fast">快速档（推荐 Flash / Lite 模型）</option>
+                                        <option value="turbo">极速档（推荐 Gemini Flash-Lite）</option>
+                                    </select>
+                                    <p class="setting-hint" id="glossarySpeedHint">Gemini Flash-Lite 建议用快速或极速；Claude、Pro、Reasoner 模型建议用稳定或均衡。</p>
+                                </div>
+                            </div>
+                            <div class="mode-description compact" id="modeDescription">
+                                <div class="mode-info recommended">
+                                    <h4>AI 专业提取 V2</h4>
+                                    <p>推荐用于正式项目。AI 会结合原文、译文和上下文提炼术语，并输出译法、分类、置信度和质量提示。</p>
+                                    <small>需要 API Key；长文件会分批消耗额度。</small>
+                                </div>
+                                <div class="mode-info">
+                                    <h4>规则提取 V2</h4>
+                                    <p>适合快速预筛选，不调用 API。会提取短专名、括号名词、UI/道具/角色等候选。</p>
+                                    <small>速度快，但结果需要人工筛选更多。</small>
+                                </div>
+                                <div class="glossary-output-summary">
+                                    <strong>输出会包含</strong>
+                                    <span>原文术语、指定译文、类型、定位ID/行号、出现次数、置信度、质量提示、提取依据。</span>
                                 </div>
                             </div>
                         </div>
-                        <div class="collapsible-section">
-                            <button class="collapsible-header" id="formatHeader">
-                                <span>📊 CSV输出格式</span>
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="collapse-icon">
-                                    <polyline points="6 9 12 15 18 9"/>
-                                </svg>
-                            </button>
-                            <div class="collapsible-content" id="formatContent" style="display: none;">
-                                <div class="csv-format">
-                                    <div class="format-preview">
-                                        <pre>定位ID/Key,定位行号,原文术语（中文）,原译文/当前译法,指定译文（英文）,整理后译文（可直接使用）,类型,出现次数,置信度,术语质量状态,术语问题,修正建议,提取依据,提取来源
-quest_main_12,行 12,领主,Lord,Lord,Lord,角色/NPC,15,96,通过,,,核心称谓，需要固定译法,ai-full-v2
-shop_77,行 77,兑换码,Enter Code,Redemption Code,Redemption Code,系统/UI,6,88,需确认,Enter Code 偏按钮动作,建议作为功能名使用 Redemption Code,UI 功能术语,ai-full-v2</pre>
+                        <div class="glossary-help-row">
+                            <div class="collapsible-section">
+                                <button class="collapsible-header" id="rulesHeader">
+                                    <span>规则模式会怎么筛选</span>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="collapse-icon">
+                                        <polyline points="6 9 12 15 18 9"/>
+                                    </svg>
+                                </button>
+                                <div class="collapsible-content" id="rulesContent" style="display: none;">
+                                    <div class="extraction-rules">
+                                        <ul>
+                                            <li><strong>优先保留：</strong>短中文专名、括号内名称、角色/NPC、道具、技能、UI 功能名。</li>
+                                            <li><strong>自动过滤：</strong>完整句子、纯数字、ID、普通按钮提示和临时状态描述。</li>
+                                            <li><strong>方向固定：</strong>按中文原文术语匹配英文译法，不反向用英文命中中文。</li>
+                                        </ul>
                                     </div>
-                                    <p class="format-hint">输出字段说明：</p>
-                                    <ul class="format-fields">
-                                        <li><strong>原文术语：</strong>原文中的中文术语</li>
-                                        <li><strong>指定译文：</strong>该中文术语必须使用的英文译法</li>
-                                        <li><strong>类型：</strong>术语分类（角色名、技能名、物品名等）</li>
-                                        <li><strong>定位ID/Key：</strong>原文件中可用于回查的 ID、key 或行号</li>
-                                        <li><strong>整理后译文：</strong>AI 综合原译文、指定译文和修正建议后给出的最终可用译法</li>
-                                        <li><strong>出现次数：</strong>该术语在文本中出现的次数，仅作参考，不再作为主要筛选依据</li>
-                                        <li><strong>术语质量：</strong>AI 对英文译法、行业规范、拼写、数字和一致性风险的检测结论</li>
-                                        <li><strong>提取依据：</strong>用于回查的示例行或 AI 判断理由</li>
-                                        <li><strong>提取来源：</strong>AI 全文提炼或本地规则提取</li>
-                                    </ul>
                                 </div>
                             </div>
-                        </div>
-                        <div class="setting-row model-select-row" id="glossaryModelRow">
-                            <label for="glossaryModel">AI模型</label>
-                            <select id="glossaryModel">
-                                <option value="deepseek-v4-flash" selected>DeepSeek V4 Flash (deepseek-v4-flash)</option>
-                                <option value="deepseek-v4-pro">DeepSeek V4 Pro (deepseek-v4-pro)</option>
-                                <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
-                                <option value="deepseek-reasoner">DeepSeek Reasoner (deepseek-reasoner)</option>
-                            </select>
-                        </div>
-                        <div class="setting-row" id="glossarySpeedRow">
-                            <label for="glossarySpeedMode">术语提取速度</label>
-                            <select id="glossarySpeedMode">
-                                <option value="auto" selected>自动推荐（按模型智能选择）</option>
-                                <option value="stable">稳定档（慢一些，失败率最低）</option>
-                                <option value="balanced">均衡档（推荐通用模型）</option>
-                                <option value="fast">快速档（推荐 Flash / Lite 模型）</option>
-                                <option value="turbo">极速档（推荐 Gemini Flash-Lite）</option>
-                            </select>
-                            <p class="setting-hint" id="glossarySpeedHint">Gemini Flash-Lite 建议用快速或极速；Claude、Pro、Reasoner 模型建议用稳定或均衡。</p>
+                            <div class="collapsible-section">
+                                <button class="collapsible-header" id="formatHeader">
+                                    <span>下载表格里有哪些列</span>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="collapse-icon">
+                                        <polyline points="6 9 12 15 18 9"/>
+                                    </svg>
+                                </button>
+                                <div class="collapsible-content" id="formatContent" style="display: none;">
+                                    <div class="csv-format">
+                                        <ul class="format-fields compact">
+                                            <li><strong>术语与译法：</strong>原文术语、原译文、指定译文、整理后译文。</li>
+                                            <li><strong>回查定位：</strong>定位 ID/Key、定位行号、提取依据。</li>
+                                            <li><strong>审核辅助：</strong>类型、出现次数、置信度、术语质量状态、问题和建议。</li>
+                                            <li><strong>来源记录：</strong>提取来源会标明 AI 全文提炼或本地规则提取。</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
@@ -1268,7 +1261,7 @@ shop_77,行 77,兑换码,Enter Code,Redemption Code,Redemption Code,系统/UI,6,
                         <div class="panel-header-row">
                             <div>
                                 <h3>导入人工审核返稿</h3>
-                                <p class="panel-subtitle">上传策划审核后的 Excel，工具会识别标色、备注或状态列，生成可直接使用的最终术语表。</p>
+                                <p class="panel-subtitle">上传策划审核后的 Excel，工具会识别单元格背景色、文字颜色、备注或状态列，生成可直接使用的最终术语表。</p>
                             </div>
                             <span class="panel-count" id="glossaryReviewCount">0 / 0</span>
                         </div>
@@ -1280,13 +1273,13 @@ shop_77,行 77,兑换码,Enter Code,Redemption Code,Redemption Code,系统/UI,6,
                                 <input type="file" id="glossaryReviewInput" accept=".xlsx,.xls" hidden>
                             </label>
                             <label class="glossary-restore-item" for="glossaryReviewMode">
-                                <span class="restore-label">标色含义</span>
+                                <span class="restore-label">颜色标记怎么处理</span>
                                 <select id="glossaryReviewMode" class="review-mode-select">
-                                    <option value="ignore" selected>标色表示不改/排除该行术语</option>
-                                    <option value="keep">标色表示审核通过/保留术语</option>
-                                    <option value="auto">自动识别优先</option>
+                                    <option value="ignore" selected>颜色标记 = 不采用这条修改</option>
+                                    <option value="keep">颜色标记 = 采用这条术语</option>
+                                    <option value="auto">优先按备注/状态判断</option>
                                 </select>
-                                <small>如果策划用颜色表示“不改/保持原译”，保持默认；如果颜色表示该术语通过审核，切换为保留。</small>
+                                <small>默认适合“策划把不需要修改的行改颜色”：这些行不会进入最终术语表。工具会同时识别背景色和文字颜色。</small>
                             </label>
                             <label class="glossary-restore-item">
                                 <span class="restore-label">识别结果</span>
@@ -1299,7 +1292,7 @@ shop_77,行 77,兑换码,Enter Code,Redemption Code,Redemption Code,系统/UI,6,
                             <button class="action-btn primary" id="glossaryReviewDownloadBtn" type="button" disabled>生成最终术语表</button>
                             <button class="action-btn secondary" id="clearGlossaryReviewBtn" type="button">清空审核文件</button>
                         </div>
-                        <div class="upload-status info" id="glossaryReviewStatus">上传策划返稿后，工具会识别被标色或标记为“不改”的条目，并生成审核后的最终术语表。</div>
+                        <div class="upload-status info" id="glossaryReviewStatus">上传策划返稿后，工具会识别背景色、文字颜色、备注或状态列，并生成审核后的最终术语表。</div>
                     </div>
 
                     <div class="column-select-panel" id="organizeGlossaryColumnPanel" style="display: none;">
