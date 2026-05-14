@@ -3117,6 +3117,282 @@ function syncGlobalModel() {
     });
 }
 
+function initWorkbenchResizers() {
+    const root = document.documentElement;
+    const sidebarHandle = document.getElementById('sidebarResizeHandle');
+    const panelHandle = document.getElementById('panelResizeHandle');
+
+    function getStoredSize(key, fallback, min, max) {
+        const raw = Number(localStorage.getItem(key));
+        return Number.isFinite(raw) ? Math.min(max, Math.max(min, raw)) : fallback;
+    }
+
+    function setSize(name, key, value, min, max) {
+        const next = Math.min(max, Math.max(min, value));
+        root.style.setProperty(name, `${next}px`);
+        localStorage.setItem(key, String(Math.round(next)));
+    }
+
+    setSize('--sidebar-width', 'nexus_sidebar_width', getStoredSize('nexus_sidebar_width', 236, 184, 300), 184, 300);
+    setSize('--inspector-width', 'nexus_inspector_width', getStoredSize('nexus_inspector_width', 420, 340, 560), 340, 560);
+
+    function installDrag(handle, onMove) {
+        if (!handle) return;
+
+        handle.addEventListener('pointerdown', (event) => {
+            if (window.innerWidth < 1500 && handle === panelHandle) return;
+            event.preventDefault();
+            handle.setPointerCapture?.(event.pointerId);
+            document.body.classList.add('is-resizing-layout');
+
+            const move = (moveEvent) => onMove(moveEvent.clientX);
+            const up = () => {
+                document.body.classList.remove('is-resizing-layout');
+                window.removeEventListener('pointermove', move);
+                window.removeEventListener('pointerup', up);
+            };
+
+            window.addEventListener('pointermove', move);
+            window.addEventListener('pointerup', up, { once: true });
+        });
+    }
+
+    installDrag(sidebarHandle, (clientX) => {
+        setSize('--sidebar-width', 'nexus_sidebar_width', clientX, 184, 300);
+    });
+
+    installDrag(panelHandle, (clientX) => {
+        const contentRight = window.innerWidth - 24;
+        setSize('--inspector-width', 'nexus_inspector_width', contentRight - clientX, 340, 560);
+    });
+}
+
+function initCommandPalette({ showTool }) {
+    const trigger = document.getElementById('commandSearchTrigger');
+    const palette = document.getElementById('commandPalette');
+    const input = document.getElementById('commandPaletteInput');
+    const results = document.getElementById('commandPaletteResults');
+    const closeButton = document.getElementById('commandPaletteClose');
+    if (!trigger || !palette || !input || !results) return;
+
+    let activeIndex = 0;
+    let visibleCommands = [];
+
+    const staticCommands = [
+        {
+            id: 'tool-split',
+            title: '文件拆分',
+            hint: '上传 CSV 或 Excel，按行数拆分并打包下载',
+            group: '工具',
+            keywords: 'split 文件 拆分 切分 csv excel xlsx',
+            action: () => showTool('split')
+        },
+        {
+            id: 'tool-translate',
+            title: '文本翻译',
+            hint: '批量翻译游戏文本，支持项目规则和术语表',
+            group: '工具',
+            keywords: 'translate 翻译 文本 ai 多语言 游戏 项目',
+            action: () => showTool('translate')
+        },
+        {
+            id: 'tool-convert',
+            title: '格式转换',
+            hint: '转换编码、分隔符和换行符',
+            group: '工具',
+            keywords: 'convert 格式 转换 编码 utf csv 分隔符 换行',
+            action: () => showTool('convert')
+        },
+        {
+            id: 'tool-l10n',
+            title: '本地化检测',
+            hint: '检查术语、变量、长度和译文质量',
+            group: '工具',
+            keywords: 'l10n 本地化 检测 质检 校对 检查 质量',
+            action: () => showTool('l10n-check')
+        },
+        {
+            id: 'tool-glossary',
+            title: '术语表',
+            hint: '提取、上传、恢复和管理项目术语表',
+            group: '工具',
+            keywords: 'glossary 术语 术语表 提取 上传 恢复 管理',
+            action: () => showTool('glossary')
+        },
+        {
+            id: 'tool-glossary-organize',
+            title: '术语整理',
+            hint: '合并重复项，整理已有术语表',
+            group: '工具',
+            keywords: 'organize 整理 术语 合并 去重 分类',
+            action: () => showTool('glossary-organize')
+        },
+        {
+            id: 'api-config',
+            title: 'API 配置',
+            hint: '打开 API 通道、平台、模型和 Key 设置',
+            group: '设置',
+            keywords: 'api key 模型 model 平台 provider gemini openai deepseek 配置 通道',
+            action: () => {
+                showTool('translate');
+                setTimeout(() => revealApiConfigPanel(), 80);
+            }
+        },
+        {
+            id: 'project-section',
+            title: '游戏项目',
+            hint: '跳到文本翻译中的项目选择区',
+            group: '设置',
+            keywords: '项目 游戏 project 规则 标准 佣兵小镇',
+            action: () => {
+                showTool('translate');
+                setTimeout(() => document.querySelector('.project-selector')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80);
+            }
+        }
+    ];
+
+    function getProjectCommands() {
+        return loadTranslationProjectsFromStorage().map(project => ({
+            id: `project-${project.id}`,
+            title: project.name,
+            hint: '选择这个游戏项目，并跳到文本翻译',
+            group: '项目',
+            keywords: `项目 游戏 project ${project.name} ${project.rules || ''}`,
+            action: () => {
+                showTool('translate');
+                setDefaultTranslationProjectId(project.id);
+                setTimeout(() => {
+                    const safeProjectId = window.CSS?.escape ? CSS.escape(project.id) : String(project.id).replace(/"/g, '\\"');
+                    const projectItem = document.querySelector(`[data-project-id="${safeProjectId}"]`);
+                    if (projectItem) {
+                        projectItem.click();
+                        projectItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    } else {
+                        document.querySelector('.project-selector')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }
+                }, 120);
+            }
+        }));
+    }
+
+    function normalizeText(value) {
+        return String(value || '').trim().toLowerCase();
+    }
+
+    function getCommands() {
+        const deduped = new Map();
+        [...staticCommands, ...getProjectCommands()].forEach(command => {
+            if (!deduped.has(command.id)) deduped.set(command.id, command);
+        });
+        return [...deduped.values()];
+    }
+
+    function scoreCommand(command, query) {
+        if (!query) return 1;
+        const title = normalizeText(command.title);
+        const group = normalizeText(command.group);
+        const haystack = normalizeText(`${command.title} ${command.hint} ${command.group} ${command.keywords}`);
+        if (title === query) return 100;
+        if (title.includes(query)) return 80;
+        if (group.includes(query)) return 60;
+        if (haystack.includes(query)) return 40;
+        return 0;
+    }
+
+    function renderResults() {
+        const query = normalizeText(input.value);
+        visibleCommands = getCommands()
+            .map(command => ({ command, score: scoreCommand(command, query) }))
+            .filter(item => item.score > 0)
+            .sort((a, b) => b.score - a.score || a.command.title.localeCompare(b.command.title, 'zh-CN'))
+            .slice(0, 12)
+            .map(item => item.command);
+
+        activeIndex = Math.min(activeIndex, Math.max(visibleCommands.length - 1, 0));
+
+        if (visibleCommands.length === 0) {
+            results.innerHTML = '<div class="command-empty">没有找到匹配项。可以试试“翻译”、“API”、“术语表”或项目名称。</div>';
+            return;
+        }
+
+        results.innerHTML = visibleCommands.map((command, index) => `
+            <button class="command-item ${index === activeIndex ? 'active' : ''}" type="button" data-command-index="${index}">
+                <span class="command-item-main">
+                    <strong>${escapeHtml(command.title)}</strong>
+                    <small>${escapeHtml(command.hint || '')}</small>
+                </span>
+                <span class="command-item-group">${escapeHtml(command.group || '命令')}</span>
+            </button>
+        `).join('');
+
+        results.querySelectorAll('[data-command-index]').forEach(button => {
+            button.addEventListener('mouseenter', () => {
+                activeIndex = Number(button.dataset.commandIndex) || 0;
+                renderResults();
+            });
+            button.addEventListener('click', () => runActiveCommand(Number(button.dataset.commandIndex) || 0));
+        });
+    }
+
+    function openPalette() {
+        palette.style.display = 'flex';
+        palette.setAttribute('aria-hidden', 'false');
+        input.value = '';
+        activeIndex = 0;
+        renderResults();
+        requestAnimationFrame(() => input.focus());
+    }
+
+    function closePalette() {
+        palette.style.display = 'none';
+        palette.setAttribute('aria-hidden', 'true');
+        input.value = '';
+    }
+
+    function runActiveCommand(index = activeIndex) {
+        const command = visibleCommands[index];
+        if (!command) return;
+        closePalette();
+        command.action();
+    }
+
+    trigger.addEventListener('click', openPalette);
+    closeButton?.addEventListener('click', closePalette);
+    palette.addEventListener('click', (event) => {
+        if (event.target === palette) closePalette();
+    });
+    input.addEventListener('input', () => {
+        activeIndex = 0;
+        renderResults();
+    });
+    input.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            closePalette();
+        } else if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            activeIndex = Math.min(activeIndex + 1, visibleCommands.length - 1);
+            renderResults();
+        } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            activeIndex = Math.max(activeIndex - 1, 0);
+            renderResults();
+        } else if (event.key === 'Enter') {
+            event.preventDefault();
+            runActiveCommand();
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        const isMac = navigator.platform.toLowerCase().includes('mac');
+        const isShortcut = (isMac ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === 'k';
+        if (!isShortcut) return;
+        event.preventDefault();
+        if (palette.style.display === 'flex') closePalette();
+        else openPalette();
+    });
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     const navItems = document.querySelectorAll('.nav-item');
     const tools = {
@@ -3130,6 +3406,43 @@ document.addEventListener('DOMContentLoaded', function() {
 
     const apiConfigPanel = document.getElementById('apiConfigPanel');
     const toolsRequiringApi = ['translate', 'l10n-check', 'glossary', 'glossary-organize'];
+    const currentToolLabel = document.getElementById('currentToolLabel');
+    const inspectorToolName = document.getElementById('inspectorToolName');
+    const inspectorToolDesc = document.getElementById('inspectorToolDesc');
+    const inspectorToolBadge = document.getElementById('inspectorToolBadge');
+    const workspaceInspector = document.getElementById('workspaceInspector');
+    const toolMeta = {
+        split: {
+            name: '文件拆分',
+            badge: '本地处理',
+            desc: '上传 CSV 或 Excel 文件，按行数拆分并打包下载。'
+        },
+        translate: {
+            name: '文本翻译',
+            badge: '需要 API',
+            desc: '按项目、语言、术语表和模型通道批量翻译游戏文本。'
+        },
+        convert: {
+            name: '格式转换',
+            badge: '本地处理',
+            desc: '转换编码、分隔符和换行符，输出干净的 CSV 或 Excel 文件。'
+        },
+        'l10n-check': {
+            name: '本地化检测',
+            badge: '需要 API',
+            desc: '对照原文和译文，检查术语、变量、长度和语言质量。'
+        },
+        glossary: {
+            name: '术语表',
+            badge: '可用 API',
+            desc: '提取、上传、恢复和管理项目术语表。'
+        },
+        'glossary-organize': {
+            name: '术语整理',
+            badge: '需要 API',
+            desc: '整理已有术语表，合并重复项并生成审核后的最终术语表。'
+        }
+    };
 
     function showTool(targetTool) {
         navItems.forEach(i => {
@@ -3144,7 +3457,17 @@ document.addEventListener('DOMContentLoaded', function() {
             tools[targetTool].style.display = 'block';
         }
 
-        apiConfigPanel.style.display = toolsRequiringApi.includes(targetTool) ? 'block' : 'none';
+        const requiresApi = toolsRequiringApi.includes(targetTool);
+        apiConfigPanel.style.display = requiresApi ? 'block' : 'none';
+        if (workspaceInspector) {
+            workspaceInspector.style.display = requiresApi ? 'none' : 'grid';
+        }
+
+        const meta = toolMeta[targetTool] || toolMeta.split;
+        if (currentToolLabel) currentToolLabel.textContent = meta.name;
+        if (inspectorToolName) inspectorToolName.textContent = meta.name;
+        if (inspectorToolDesc) inspectorToolDesc.textContent = meta.desc;
+        if (inspectorToolBadge) inspectorToolBadge.textContent = meta.badge;
     }
 
     navItems.forEach(item => {
@@ -3155,7 +3478,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     initApiConfig();
     syncGlobalModel();
+    initWorkbenchResizers();
     installFileDropGuards();
+    initCommandPalette({ showTool });
 
     const activeTool = document.querySelector('.nav-item.active')?.dataset.tool || 'split';
     showTool(activeTool);
@@ -4094,6 +4419,7 @@ function initTranslateTool() {
         projects.forEach(project => {
             const div = document.createElement('div');
             div.className = `project-item ${currentProject && currentProject.id === project.id ? 'active' : ''}`;
+            div.dataset.projectId = project.id;
             const isDefaultProject = project.id === defaultProjectId;
             div.innerHTML = `
                 <div class="project-info">
@@ -11052,6 +11378,7 @@ function initGlossaryTool() {
     const glossaryMode = document.getElementById('glossaryMode');
     const glossaryModelRow = document.getElementById('glossaryModelRow');
     const glossarySpeedRow = document.getElementById('glossarySpeedRow');
+    const glossaryModeCards = document.querySelectorAll('.glossary-mode-card[data-glossary-mode]');
     const glossarySpeedMode = document.getElementById('glossarySpeedMode');
     const glossarySpeedHint = document.getElementById('glossarySpeedHint');
     const extractTermsBtn = document.getElementById('extractTermsBtn');
@@ -11219,7 +11546,14 @@ function initGlossaryTool() {
     }
 
     function syncGlossaryModeVisibility() {
-        if (glossaryMode.value === 'ai') {
+        const selectedMode = glossaryMode?.value || 'ai';
+        glossaryModeCards.forEach(card => {
+            const isActive = card.dataset.glossaryMode === selectedMode;
+            card.classList.toggle('active', isActive);
+            card.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        });
+
+        if (selectedMode === 'ai') {
             glossaryModelRow.style.display = 'flex';
             if (glossarySpeedRow) glossarySpeedRow.style.display = 'flex';
         } else {
@@ -11229,6 +11563,21 @@ function initGlossaryTool() {
         updateGlossarySpeedHint();
     }
 
+    glossaryModeCards.forEach(card => {
+        const selectModeFromCard = () => {
+            const mode = card.dataset.glossaryMode;
+            if (!mode || !glossaryMode) return;
+            glossaryMode.value = mode;
+            glossaryMode.dispatchEvent(new Event('change'));
+        };
+
+        card.addEventListener('click', selectModeFromCard);
+        card.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            selectModeFromCard();
+        });
+    });
     glossaryMode.addEventListener('change', syncGlossaryModeVisibility);
     glossarySpeedMode?.addEventListener('change', updateGlossarySpeedHint);
     document.getElementById('glossaryModel')?.addEventListener('change', updateGlossarySpeedHint);

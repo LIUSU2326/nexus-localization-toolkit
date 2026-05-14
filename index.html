@@ -80,8 +80,28 @@
                 <p class="version">v1.0.0</p>
             </div>
         </aside>
+        <div class="sidebar-resize-handle" id="sidebarResizeHandle" aria-hidden="true"></div>
 
         <main class="main-content">
+            <div class="app-topbar">
+                <div class="breadcrumbs">
+                    <span>NEXUS</span>
+                    <span>/</span>
+                    <strong id="currentToolLabel">文件拆分</strong>
+                </div>
+                <div class="topbar-actions">
+                    <button class="command-search" id="commandSearchTrigger" type="button" aria-label="打开命令搜索">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="7"/>
+                            <path d="M20 20l-3.5-3.5"/>
+                        </svg>
+                        <span>搜索项目、文件、术语</span>
+                        <kbd>Ctrl K</kbd>
+                    </button>
+                    <span class="runtime-chip">本地运行</span>
+                </div>
+            </div>
+
             <div class="status-bar" id="statusBar" style="display: none;">
                 <div class="status-icon" id="statusIcon"></div>
                 <div class="status-content">
@@ -90,6 +110,7 @@
                 </div>
                 <button class="status-action" id="statusAction" style="display: none;">查看</button>
             </div>
+            <div class="panel-resize-handle" id="panelResizeHandle" aria-hidden="true"></div>
 
             <div class="api-config-panel" id="apiConfigPanel" style="display: none;">
                 <div class="api-config-header">
@@ -105,8 +126,8 @@
                         <label for="apiProfileName">通道名称</label>
                         <input type="text" id="apiProfileName" placeholder="例如：DeepSeek 主账号">
                     </div>
-                    <div class="setting-row api-provider-row">
-                        <label for="apiProvider">API 平台</label>
+                    <div class="setting-row api-provider-row choice-setting">
+                        <label for="apiProvider">API 平台 <span class="field-affordance">点击选择</span></label>
                         <select id="apiProvider">
                             <optgroup label="官方 / 直连平台">
                                 <option value="deepseek" selected>DeepSeek</option>
@@ -130,8 +151,8 @@
                             </optgroup>
                         </select>
                     </div>
-                    <div class="setting-row model-select-row api-model-row">
-                        <label for="globalAiModel">默认AI模型</label>
+                    <div class="setting-row model-select-row api-model-row choice-setting">
+                        <label for="globalAiModel">默认AI模型 <span class="field-affordance">点击选择</span></label>
                         <select id="globalAiModel">
                             <option value="deepseek-v4-flash" selected>DeepSeek V4 Flash (deepseek-v4-flash)</option>
                             <option value="deepseek-v4-pro">DeepSeek V4 Pro (deepseek-v4-pro)</option>
@@ -204,6 +225,28 @@
                     </div>
                 </div>
             </div>
+
+            <aside class="workspace-inspector" id="workspaceInspector">
+                <div class="inspector-card">
+                    <div class="inspector-card-header">
+                        <h3>当前工具</h3>
+                        <span id="inspectorToolBadge">本地处理</span>
+                    </div>
+                    <strong id="inspectorToolName">文件拆分</strong>
+                    <p id="inspectorToolDesc">上传 CSV 或 Excel 文件，按行数拆分并打包下载。</p>
+                </div>
+                <div class="inspector-card">
+                    <div class="inspector-card-header">
+                        <h3>工作状态</h3>
+                        <span>就绪</span>
+                    </div>
+                    <div class="inspector-list">
+                        <div><span>输入</span><strong>等待文件</strong></div>
+                        <div><span>输出</span><strong>本地生成</strong></div>
+                        <div><span>数据</span><strong>仅在浏览器内处理</strong></div>
+                    </div>
+                </div>
+            </aside>
 
             <div class="tool-content" id="split-tool">
                 <div class="tool-header">
@@ -945,12 +988,12 @@
                                 </div>
                             </div>
                             <div class="mode-description compact" id="modeDescription">
-                                <div class="mode-info recommended">
+                                <div class="mode-info glossary-mode-card active" data-glossary-mode="ai" role="button" tabindex="0" aria-pressed="true">
                                     <h4>AI 专业提取 V2</h4>
                                     <p>推荐用于正式项目。AI 会结合原文、译文和上下文提炼术语，并输出译法、分类、置信度和质量提示。</p>
                                     <small>需要 API Key；长文件会分批消耗额度。</small>
                                 </div>
-                                <div class="mode-info">
+                                <div class="mode-info glossary-mode-card" data-glossary-mode="rule" role="button" tabindex="0" aria-pressed="false">
                                     <h4>规则提取 V2</h4>
                                     <p>适合快速预筛选，不调用 API。会提取短专名、括号名词、UI/道具/角色等候选。</p>
                                     <small>速度快，但结果需要人工筛选更多。</small>
@@ -1392,6 +1435,23 @@
                 </div>
             </div>
         </main>
+    </div>
+
+    <div class="command-palette" id="commandPalette" style="display: none;" aria-hidden="true">
+        <div class="command-palette-card" role="dialog" aria-modal="true" aria-labelledby="commandPaletteTitle">
+            <div class="command-palette-input-row">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="7"/>
+                    <path d="M20 20l-3.5-3.5"/>
+                </svg>
+                <input type="text" id="commandPaletteInput" autocomplete="off" spellcheck="false" placeholder="搜索工具、项目、API、术语..." aria-label="命令搜索">
+                <button type="button" id="commandPaletteClose" aria-label="关闭命令搜索">Esc</button>
+            </div>
+            <div class="command-palette-body">
+                <div class="command-palette-title" id="commandPaletteTitle">命令搜索</div>
+                <div class="command-palette-results" id="commandPaletteResults"></div>
+            </div>
+        </div>
     </div>
 
     <div class="modal" id="projectModal" style="display: none;">

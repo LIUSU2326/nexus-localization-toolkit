@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const port = Number(process.env.PORT || 1420);
+const host = '127.0.0.1';
 
 const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -32,6 +33,42 @@ function resolveRequestPath(url) {
   return filePath;
 }
 
+function checkExistingServer() {
+  return new Promise((resolveExisting) => {
+    const request = globalThis.fetch
+      ? fetch(`http://${host}:${port}/index.html`, { signal: AbortSignal.timeout(1500) })
+        .then(async (response) => {
+          const text = await response.text();
+          resolveExisting(response.ok && text.includes('NEXUS'));
+        })
+        .catch(() => resolveExisting(false))
+      : null;
+
+    if (!request) {
+      resolveExisting(false);
+    }
+  });
+}
+
+async function handleListenError(error) {
+  if (error?.code !== 'EADDRINUSE') {
+    throw error;
+  }
+
+  const isNexusServer = await checkExistingServer();
+
+  if (isNexusServer) {
+    console.log(`NEXUS web dev server is already running at http://${host}:${port}`);
+    console.log('Reusing the existing server for this desktop session.');
+    process.exit(0);
+    return;
+  }
+
+  console.error(`[ERROR] Port ${port} is already in use by another app.`);
+  console.error(`Close the process using ${host}:${port}, then start NEXUS again.`);
+  process.exit(1);
+}
+
 const server = createServer((request, response) => {
   const filePath = resolveRequestPath(request.url || '/');
 
@@ -47,8 +84,15 @@ const server = createServer((request, response) => {
   createReadStream(filePath).pipe(response);
 });
 
-server.listen(port, '127.0.0.1', () => {
-  console.log(`NEXUS web dev server running at http://127.0.0.1:${port}`);
+server.on('error', (error) => {
+  handleListenError(error).catch((fatalError) => {
+    console.error(fatalError);
+    process.exit(1);
+  });
+});
+
+server.listen(port, host, () => {
+  console.log(`NEXUS web dev server running at http://${host}:${port}`);
 });
 
 process.on('SIGTERM', () => server.close(() => process.exit(0)));
