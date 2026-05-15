@@ -680,17 +680,126 @@ function normalizeColorValue(value) {
     return text.replace(/^0X/, '').replace(/[^0-9A-F]/g, '');
 }
 
-function getColorAttributeValue(colorNode) {
+const EXCEL_INDEXED_COLORS = {
+    2: 'FFFFFF',
+    3: 'FF0000',
+    4: '00FF00',
+    5: '0000FF',
+    6: 'FFFF00',
+    7: 'FF00FF',
+    8: '00FFFF',
+    9: '800000',
+    10: '008000',
+    11: '000080',
+    12: '808000',
+    13: '800080',
+    14: '008080',
+    15: 'C0C0C0',
+    16: '808080',
+    17: '9999FF',
+    18: '993366',
+    19: 'FFFFCC',
+    20: 'CCFFFF',
+    21: '660066',
+    22: 'FF8080',
+    23: '0066CC',
+    24: 'CCCCFF',
+    25: '000080',
+    26: 'FF00FF',
+    27: 'FFFF00',
+    28: '00FFFF',
+    29: '800080',
+    30: '800000',
+    31: '008080',
+    32: '0000FF',
+    33: '00CCFF',
+    34: 'CCFFFF',
+    35: 'CCFFCC',
+    36: 'FFFF99',
+    37: '99CCFF',
+    38: 'FF99CC',
+    39: 'CC99FF',
+    40: 'FFCC99',
+    41: '3366FF',
+    42: '33CCCC',
+    43: '99CC00',
+    44: 'FFCC00',
+    45: 'FF9900',
+    46: 'FF6600',
+    47: '666699',
+    48: '969696',
+    49: '003366',
+    50: '339966',
+    51: '003300',
+    52: '333300',
+    53: '993300',
+    54: '993366',
+    55: '333399',
+    56: '333333'
+};
+
+const EXCEL_DEFAULT_THEME_COLORS = [
+    '000000',
+    'FFFFFF',
+    '1F497D',
+    'EEECE1',
+    '4F81BD',
+    'C0504D',
+    '9BBB59',
+    '8064A2',
+    '4BACC6',
+    'F79646',
+    '0000FF',
+    '800080'
+];
+
+function normalizeRgbHex(value) {
+    let color = normalizeColorValue(value);
+    if (color.length === 8) color = color.slice(2);
+    return color.length === 6 ? color : '';
+}
+
+function clampColorChannel(value) {
+    return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function applyExcelTint(hexColor, tintValue) {
+    const color = normalizeRgbHex(hexColor);
+    const tint = Number(tintValue);
+    if (!color || !Number.isFinite(tint) || tint === 0) return color;
+    const channels = [0, 2, 4].map(index => Number.parseInt(color.slice(index, index + 2), 16));
+    const tinted = channels.map(channel => {
+        const next = tint < 0
+            ? channel * (1 + tint)
+            : channel + (255 - channel) * tint;
+        return clampColorChannel(next).toString(16).padStart(2, '0').toUpperCase();
+    });
+    return tinted.join('');
+}
+
+function getThemeColor(themeIndex, themeColors = []) {
+    const index = Number(themeIndex);
+    if (!Number.isFinite(index)) return '';
+    return normalizeRgbHex(themeColors[index] || EXCEL_DEFAULT_THEME_COLORS[index] || '');
+}
+
+function getColorAttributeValue(colorNode, themeColors = []) {
     if (!colorNode) return '';
-    return normalizeColorValue(
-        colorNode.getAttribute?.('rgb') ||
-        colorNode.getAttribute?.('indexed') ||
-        colorNode.getAttribute?.('theme') ||
-        colorNode.rgb ||
-        colorNode.indexed ||
-        colorNode.theme ||
-        ''
-    );
+    const rgb = colorNode.getAttribute?.('rgb') || colorNode.rgb || '';
+    if (rgb) return normalizeColorValue(rgb);
+
+    const indexed = colorNode.getAttribute?.('indexed') ?? colorNode.indexed;
+    if (indexed !== undefined && indexed !== '') {
+        return normalizeColorValue(EXCEL_INDEXED_COLORS[Number(indexed)] || indexed);
+    }
+
+    const theme = colorNode.getAttribute?.('theme') ?? colorNode.theme;
+    if (theme !== undefined && theme !== '') {
+        const tint = colorNode.getAttribute?.('tint') ?? colorNode.tint;
+        return applyExcelTint(getThemeColor(theme, themeColors), tint);
+    }
+
+    return '';
 }
 
 function createStyleMarker(fillColor = '', fontColor = '', source = '', fontColors = null) {
@@ -861,6 +970,19 @@ function getXmlChildrenByName(node, name) {
     return Array.from(node.getElementsByTagNameNS('*', name));
 }
 
+function parseThemeColorMap(themeXmlText) {
+    const doc = parseXmlDocument(themeXmlText);
+    const scheme = getXmlChildrenByName(doc, 'clrScheme')[0];
+    if (!scheme) return EXCEL_DEFAULT_THEME_COLORS;
+    const themeOrder = ['dk1', 'lt1', 'dk2', 'lt2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'hlink', 'folHlink'];
+    return themeOrder.map(name => {
+        const node = Array.from(scheme.children || []).find(child => child.localName === name);
+        const srgb = getXmlChildrenByName(node, 'srgbClr')[0]?.getAttribute('val');
+        const sys = getXmlChildrenByName(node, 'sysClr')[0]?.getAttribute('lastClr');
+        return normalizeRgbHex(srgb || sys || '') || EXCEL_DEFAULT_THEME_COLORS[themeOrder.indexOf(name)] || '';
+    });
+}
+
 function normalizeZipTargetPath(target) {
     let path = String(target || '').replace(/^\//, '');
     if (!path.startsWith('xl/')) {
@@ -895,7 +1017,7 @@ function getSheetXmlPathMap(workbookXmlText, relsXmlText) {
     return sheetMap;
 }
 
-function parseStylesFillColorMap(stylesXmlText) {
+function parseStylesFillColorMap(stylesXmlText, themeColors = []) {
     const doc = parseXmlDocument(stylesXmlText);
     const fills = [];
     const fonts = [];
@@ -913,7 +1035,7 @@ function parseStylesFillColorMap(stylesXmlText) {
         }
         const fgColor = getXmlChildrenByName(patternFill, 'fgColor')[0];
         const bgColor = getXmlChildrenByName(patternFill, 'bgColor')[0];
-        fills.push(getColorAttributeValue(fgColor) || getColorAttributeValue(bgColor));
+        fills.push(getColorAttributeValue(fgColor, themeColors) || getColorAttributeValue(bgColor, themeColors));
     });
 
     const fontsNode = getXmlChildrenByName(doc, 'fonts')[0];
@@ -922,7 +1044,7 @@ function parseStylesFillColorMap(stylesXmlText) {
         : getXmlChildrenByName(doc, 'font');
     fontNodes.forEach(font => {
         const colorNode = getXmlChildrenByName(font, 'color')[0];
-        fonts.push(getColorAttributeValue(colorNode));
+        fonts.push(getColorAttributeValue(colorNode, themeColors));
     });
 
     const cellXfsNode = getXmlChildrenByName(doc, 'cellXfs')[0];
@@ -965,17 +1087,17 @@ function getStyleMarkerFromStyles(styleIndex, styleMap) {
     );
 }
 
-function parseRichTextMarkerFromNode(node, source = 'rich-text') {
+function parseRichTextMarkerFromNode(node, source = 'rich-text', themeColors = []) {
     if (!node) return null;
     const colors = getXmlChildrenByName(node, 'rPr')
         .flatMap(runProperties => getXmlChildrenByName(runProperties, 'color'))
-        .map(colorNode => getColorAttributeValue(colorNode))
+        .map(colorNode => getColorAttributeValue(colorNode, themeColors))
         .filter(Boolean);
     if (!colors.length) return null;
     return createStyleMarker('', colors[0], source, colors);
 }
 
-function parseSharedStringRichTextColorMap(sharedStringsXmlText) {
+function parseSharedStringRichTextColorMap(sharedStringsXmlText, themeColors = []) {
     const doc = parseXmlDocument(sharedStringsXmlText);
     const map = new Map();
     const root = getXmlChildrenByName(doc, 'sst')[0] || doc?.documentElement;
@@ -983,7 +1105,7 @@ function parseSharedStringRichTextColorMap(sharedStringsXmlText) {
         ? Array.from(root.children).filter(node => node.localName === 'si')
         : [];
     items.forEach((item, index) => {
-        const marker = parseRichTextMarkerFromNode(item, 'shared-rich-text');
+        const marker = parseRichTextMarkerFromNode(item, 'shared-rich-text', themeColors);
         if (marker) map.set(index, marker);
     });
     return map;
@@ -995,12 +1117,12 @@ function getCellSharedStringIndex(cell) {
     return Number.isFinite(value) ? value : -1;
 }
 
-function getInlineRichTextMarker(cell) {
+function getInlineRichTextMarker(cell, themeColors = []) {
     const inlineString = getXmlChildrenByName(cell, 'is')[0];
-    return parseRichTextMarkerFromNode(inlineString, 'inline-rich-text');
+    return parseRichTextMarkerFromNode(inlineString, 'inline-rich-text', themeColors);
 }
 
-function parseSheetCellColorMap(sheetXmlText, styleMap, sharedRichTextMarkers = new Map()) {
+function parseSheetCellColorMap(sheetXmlText, styleMap, sharedRichTextMarkers = new Map(), themeColors = []) {
     const doc = parseXmlDocument(sheetXmlText);
     const map = new Map();
     getXmlChildrenByName(doc, 'row').forEach(row => {
@@ -1019,7 +1141,7 @@ function parseSheetCellColorMap(sheetXmlText, styleMap, sharedRichTextMarkers = 
         const type = cell.getAttribute('t') || '';
         const richMarker = type === 's'
             ? sharedRichTextMarkers.get(getCellSharedStringIndex(cell))
-            : getInlineRichTextMarker(cell);
+            : getInlineRichTextMarker(cell, themeColors);
         const marker = mergeStyleMarkers(styleMarker, richMarker);
         if (marker) {
             map.set(ref, marker);
@@ -1090,6 +1212,7 @@ async function extractWorksheetColorMapFromFile(file, workbook, sheetName) {
         const workbookXml = await loadZipFileText(zip, 'xl/workbook.xml');
         const relsXml = await loadZipFileText(zip, 'xl/_rels/workbook.xml.rels');
         const stylesXml = await loadZipFileText(zip, 'xl/styles.xml');
+        const themeXml = await loadZipFileText(zip, 'xl/theme/theme1.xml');
         const sheetMap = getSheetXmlPathMap(workbookXml, relsXml);
         const workbookIndex = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames.indexOf(sheetName) : -1;
         const sheetXmlPath = sheetMap.get(sheetName) || (workbookIndex >= 0 ? `xl/worksheets/sheet${workbookIndex + 1}.xml` : '');
@@ -1097,9 +1220,10 @@ async function extractWorksheetColorMapFromFile(file, workbook, sheetName) {
 
         const sheetXml = await loadZipFileText(zip, sheetXmlPath);
         const sharedStringsXml = await loadZipFileText(zip, 'xl/sharedStrings.xml');
-        const styleMap = parseStylesFillColorMap(stylesXml);
-        const sharedRichTextMarkers = parseSharedStringRichTextColorMap(sharedStringsXml);
-        return parseSheetCellColorMap(sheetXml, styleMap, sharedRichTextMarkers);
+        const themeColors = parseThemeColorMap(themeXml);
+        const styleMap = parseStylesFillColorMap(stylesXml, themeColors);
+        const sharedRichTextMarkers = parseSharedStringRichTextColorMap(sharedStringsXml, themeColors);
+        return parseSheetCellColorMap(sheetXml, styleMap, sharedRichTextMarkers, themeColors);
     } catch (error) {
         console.warn('Failed to read worksheet colors from xlsx XML:', error);
         return extractWorksheetColorMap(workbook, sheetName);
