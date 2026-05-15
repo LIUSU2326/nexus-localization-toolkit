@@ -305,6 +305,204 @@ function revealWorkspaceInspector() {
     if (inspector) inspector.style.display = 'grid';
 }
 
+const REFERENCE_TOOL_SKIN = {
+    split: {
+        name: '文件拆分',
+        desc: '将大型 CSV/XLSX 本地化文件按行数拆分为多个小文件，便于分发翻译、协作处理与质量把控。',
+        icon: '↔',
+        action: '开始拆分',
+        steps: ['上传文件', '拆分设置', '拆分预览'],
+        preview: `
+            <div class="reference-metric-card">
+                <div><span>预计输出文件数</span><strong>12 个</strong></div>
+                <div><span>原始总行数</span><strong>57,842 行</strong></div>
+                <div><span>预计平均行数/文件</span><strong>4,820 行</strong></div>
+                <div><span>总大小（原文件）</span><strong>18.6 MB</strong></div>
+            </div>
+            <div class="reference-table-card">
+                <div class="reference-table-title">预计输出文件示例（共 12 个）</div>
+                <table><thead><tr><th>文件名</th><th>预计行数</th><th>预计大小</th></tr></thead><tbody>
+                    <tr><td>game_part_01.csv</td><td>5,000</td><td>1.63 MB</td></tr>
+                    <tr><td>game_part_02.csv</td><td>5,000</td><td>1.61 MB</td></tr>
+                    <tr><td>game_part_03.csv</td><td>5,000</td><td>1.62 MB</td></tr>
+                    <tr><td>game_part_12.csv</td><td>2,842</td><td>0.92 MB</td></tr>
+                </tbody></table>
+            </div>`
+    },
+    translate: {
+        name: '文本翻译',
+        desc: 'AI 驱动的高质量翻译，支持术语增强与格式保留。',
+        icon: '⌘',
+        action: '开始翻译',
+        steps: ['上传文件', '选择语言', '术语与资源', 'AI 翻译设置', '运行与结果'],
+        preview: `
+            <div class="reference-run-card">
+                <button class="reference-primary-visual" type="button" data-click-target="translateBtn">✦ 开始翻译</button>
+                <p>预计耗时 2-4 分钟（视文件大小而定）</p>
+                <div class="reference-feature-row"><span>术语增强</span><span>格式保留</span><span>智能校验</span></div>
+            </div>`
+    },
+    convert: {
+        name: '格式转换',
+        desc: '将本地化文件在不同格式之间进行转换，支持编码、分隔符与换行符设置。',
+        icon: '↔',
+        action: '开始转换',
+        steps: ['上传文件', '转换设置', '预览与结果'],
+        preview: `
+            <div class="reference-format-flow"><span>源格式<br><strong>Excel (.xlsx)</strong></span><b>→</b><span>目标格式<br><strong>CSV (.csv)</strong></span></div>
+            <div class="reference-table-card compact">
+                <table><thead><tr><th>Key</th><th>中文（简体）</th><th>English（英文）</th></tr></thead><tbody>
+                    <tr><td>app.title</td><td>NEXUS 本地化工具集</td><td>NEXUS Localization Toolkit</td></tr>
+                    <tr><td>menu.file</td><td>文件</td><td>File</td></tr>
+                    <tr><td>btn.save</td><td>保存</td><td>Save</td></tr>
+                </tbody></table>
+            </div>
+            <div class="reference-stat-row"><span>输出文件数 <b>3 个</b></span><span>总行数 <b>12,458 行</b></span><span>预计耗时 <b>~ 8 秒</b></span></div>`
+    },
+    'l10n-check': {
+        name: '本地化检测',
+        desc: 'AI 驱动的本地化质量检测，智能识别错误与格式问题，保障翻译一致性与质量。',
+        icon: '◈',
+        action: '开始检测',
+        steps: ['上传文件', '选择项目', '选择检测通道', '选择检测模式', '其他设置', '开始检测'],
+        preview: `
+            <div class="reference-run-card">
+                <button class="reference-primary-visual" type="button" data-click-target="l10nCheckBtn">✦ 开始检测</button>
+                <p>预计耗时 2-4 分钟（视文件大小与通道并发）</p>
+                <div class="reference-feature-row"><span>错误覆盖</span><span>术语一致</span><span>历史复用</span></div>
+            </div>`
+    },
+    glossary: {
+        name: '术语表',
+        desc: '提取、管理并复用术语资产，持续提升本地化一致性与质量。',
+        icon: '◆',
+        action: '开始提取术语',
+        steps: ['提取设置', '上传待提取文本', '上传已有术语表', '恢复失败任务', '已保存术语表'],
+        preview: ''
+    },
+    'glossary-organize': {
+        name: '术语资产',
+        desc: '整理已有术语表，统一分类、合并重复项，并检测术语质量。',
+        icon: '☷',
+        action: '开始整理',
+        steps: ['整理设置', '上传术语表', '导入审核返稿', '质量检查', '导出结果'],
+        preview: `
+            <div class="reference-metric-card">
+                <div><span>合并策略</span><strong>AI + 规则</strong></div>
+                <div><span>审核识别</span><strong>文字标色</strong></div>
+                <div><span>分类体系</span><strong>14 类</strong></div>
+                <div><span>输出格式</span><strong>CSV/XLSX</strong></div>
+            </div>`
+    }
+};
+
+function makeReferenceStepShell(title, subtitle = '') {
+    return `<div class="reference-step-heading"><span></span><div><strong>${title}</strong>${subtitle ? `<small>${subtitle}</small>` : ''}</div></div>`;
+}
+
+function addReferencePanel(tool, className, html) {
+    if (!tool || tool.querySelector(`.${className}`)) return;
+    const panel = document.createElement('div');
+    panel.className = `reference-extra-panel ${className}`;
+    panel.innerHTML = html;
+    tool.querySelector('.tool-body')?.appendChild(panel);
+}
+
+function applyReferenceImageSkin() {
+    document.body.classList.add('reference-image-skin');
+
+    const navLabels = {
+        split: '文件拆分',
+        translate: '文本翻译',
+        convert: '格式转换',
+        'l10n-check': '本地化检测',
+        glossary: '术语表',
+        'glossary-organize': '术语资产'
+    };
+
+    document.querySelector('.logo')?.replaceChildren(document.createTextNode('NEXUS 本地化工具集'));
+    document.querySelector('.tagline')?.replaceChildren(document.createTextNode(''));
+    document.querySelectorAll('.nav-item').forEach(item => {
+        const label = navLabels[item.dataset.tool];
+        if (label) item.querySelector('span').textContent = label;
+    });
+
+    Object.entries(REFERENCE_TOOL_SKIN).forEach(([key, meta]) => {
+        const tool = document.getElementById(`${key}-tool`);
+        if (!tool || tool.dataset.referenceSkinned === 'true') return;
+        tool.dataset.referenceSkinned = 'true';
+        tool.dataset.referenceTool = key;
+
+        const header = tool.querySelector('.tool-header');
+        if (header) {
+            header.innerHTML = `
+                <div class="reference-title-block">
+                    <span class="reference-title-icon">${meta.icon}</span>
+                    <div>
+                        <h2>${meta.name}</h2>
+                        <p>${meta.desc}</p>
+                    </div>
+                </div>
+                <button class="reference-help-btn" type="button">ⓘ 使用说明</button>`;
+        }
+
+        const body = tool.querySelector('.tool-body');
+        if (body && meta.steps?.length) {
+            const stepper = document.createElement('div');
+            stepper.className = 'reference-stepper';
+            stepper.innerHTML = meta.steps.map((step, index) => `
+                <div class="reference-stepper-item">
+                    <span>${index + 1}</span>
+                    <strong>${step}</strong>
+                </div>`).join('');
+            body.prepend(stepper);
+        }
+
+        tool.querySelectorAll('.upload-area-large, .upload-area-small').forEach((area, index) => {
+            area.classList.add('reference-upload-zone');
+            if (!area.querySelector('.reference-recent-files') && index === 0 && ['translate', 'convert', 'l10n-check'].includes(key)) {
+                const recent = document.createElement('div');
+                recent.className = 'reference-recent-files';
+                recent.innerHTML = `
+                    <strong>最近使用</strong>
+                    <span>产品_UI_文案_待翻译.xlsx <small>刚刚</small></span>
+                    <span>帮助中心_内容_20240520.csv <small>2 小时前</small></span>
+                    <span>App_Strings_zh.xlsx <small>昨天</small></span>`;
+                area.appendChild(recent);
+            }
+        });
+
+        tool.querySelectorAll('.settings-panel, .project-selector, .upload-card, .glossary-restore-panel, .glossary-library-panel, .upload-section-double').forEach(panel => {
+            panel.classList.add('reference-card-shell');
+        });
+
+        if (meta.preview) {
+            addReferencePanel(tool, `reference-preview-${key}`, `
+                ${makeReferenceStepShell(key === 'convert' ? '预览与结果' : key === 'split' ? '拆分预览' : '运行与结果')}
+                <div class="reference-preview-grid">${meta.preview}</div>`);
+        }
+    });
+
+    document.addEventListener('click', (event) => {
+        const proxy = event.target.closest('[data-click-target]');
+        if (!proxy) return;
+        const target = document.getElementById(proxy.dataset.clickTarget);
+        target?.click();
+    });
+}
+
+function syncReferenceToolSkin(targetTool) {
+    const meta = REFERENCE_TOOL_SKIN[targetTool] || REFERENCE_TOOL_SKIN.split;
+    const currentToolLabel = document.getElementById('currentToolLabel');
+    if (currentToolLabel) currentToolLabel.textContent = meta.name;
+    document.body.dataset.referenceActiveTool = targetTool;
+
+    const inspectorName = document.getElementById('inspectorToolName');
+    const inspectorDesc = document.getElementById('inspectorToolDesc');
+    if (inspectorName) inspectorName.textContent = meta.name;
+    if (inspectorDesc) inspectorDesc.textContent = meta.desc;
+}
+
 const TRANSLATION_STORAGE_KEY = 'nexus_translation_progress';
 
 function saveTranslationProgress(data) {
@@ -3955,6 +4153,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (outputState) outputState.textContent = requiresApi ? 'AI 生成 / 本地导出' : '本地生成';
         updateInspectorEstimate([]);
         renderApiSummary();
+        syncReferenceToolSkin(targetTool);
     }
 
     navItems.forEach(item => {
@@ -3970,6 +4169,7 @@ document.addEventListener('DOMContentLoaded', function() {
     initCommandPalette({ showTool });
     bindUxFileTelemetry();
     enhanceDeepChoiceSurfaces();
+    applyReferenceImageSkin();
     renderRecentTasks();
     renderApiSummary();
     document.getElementById('openApiConfigBtn')?.addEventListener('click', revealApiConfigPanel);
