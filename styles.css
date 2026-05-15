@@ -2061,6 +2061,332 @@ body.file-drag-active .file-input-overlay {
     gap: 10px;
 }
 
+/* C方案：image2 风格的工作流壳层与上下文信息 */
+.topbar-chip,
+.topbar-icon-btn,
+.link-btn {
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.topbar-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    padding: 0 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.topbar-chip svg {
+    width: 16px;
+    height: 16px;
+    color: var(--accent-primary);
+}
+
+.topbar-chip:hover,
+.topbar-icon-btn:hover,
+.link-btn:hover {
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
+    color: var(--accent-primary);
+}
+
+.ai-status-chip .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--warning-color);
+}
+
+.ai-status-chip.online .status-dot {
+    background: var(--success-color);
+}
+
+.topbar-icon-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+}
+
+.topbar-icon-btn svg {
+    width: 17px;
+    height: 17px;
+}
+
+.link-btn {
+    min-height: 24px;
+    padding: 0 8px;
+    border-radius: 7px;
+    color: var(--accent-primary);
+    font-size: 12px;
+    font-weight: 750;
+}
+
+.inspector-card-header .link-btn {
+    margin-left: auto;
+}
+
+.api-summary-main {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+
+.api-summary-icon {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    background: var(--accent-soft);
+    color: var(--accent-primary);
+    font-size: 18px;
+    font-weight: 900;
+}
+
+.api-summary-main strong {
+    display: block;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.api-summary-main p {
+    overflow: hidden;
+    margin: 2px 0 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.inspector-list.compact {
+    gap: 7px;
+}
+
+.estimate-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.estimate-grid div {
+    display: grid;
+    gap: 4px;
+    min-height: 58px;
+    align-content: center;
+    padding: 9px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+
+.estimate-grid span {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.estimate-grid strong {
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.recent-task-list {
+    display: grid;
+    gap: 8px;
+}
+
+.recent-task-empty {
+    padding: 12px;
+    border: 1px dashed var(--border-color);
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: center;
+}
+
+.recent-task-item {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+    padding: 9px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+
+.recent-task-icon {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 7px;
+    background: var(--bg-primary);
+    color: var(--accent-primary);
+    font-weight: 800;
+}
+
+.recent-task-item.success .recent-task-icon {
+    color: var(--success-color);
+}
+
+.recent-task-item.error .recent-task-icon {
+    color: var(--error-color);
+}
+
+.recent-task-item strong,
+.recent-task-item small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.recent-task-item strong {
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.recent-task-item small {
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.quick-action-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.quick-action-grid button {
+    min-height: 38px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 750;
+    cursor: pointer;
+}
+
+.quick-action-grid button:hover {
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
+    color: var(--accent-primary);
+}
+
+.tool-body {
+    counter-reset: workflow-step;
+}
+
+.tool-body > .upload-area-large,
+.tool-body > .settings-panel,
+.tool-body > .project-selector,
+.tool-body > .column-select-panel,
+.tool-body > .info-panel,
+.tool-body > .glossary-extract-settings,
+.tool-body > .upload-section-double,
+.tool-body > .glossary-restore-panel,
+.tool-body > .glossary-library-panel {
+    position: relative;
+}
+
+.tool-body > .upload-area-large::after,
+.tool-body > .settings-panel::before,
+.tool-body > .project-selector::before,
+.tool-body > .column-select-panel::before,
+.tool-body > .info-panel::before,
+.tool-body > .glossary-extract-settings::before,
+.tool-body > .upload-section-double::before,
+.tool-body > .glossary-restore-panel::before,
+.tool-body > .glossary-library-panel::before {
+    counter-increment: workflow-step;
+    content: counter(workflow-step);
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent-primary);
+    font-size: 13px;
+    font-weight: 850;
+}
+
+.tool-body > .upload-area-large {
+    padding-top: 48px;
+}
+
+.tool-body > .settings-panel,
+.tool-body > .project-selector,
+.tool-body > .column-select-panel,
+.tool-body > .info-panel,
+.tool-body > .glossary-extract-settings,
+.tool-body > .upload-section-double,
+.tool-body > .glossary-restore-panel,
+.tool-body > .glossary-library-panel {
+    padding-top: 48px;
+}
+
+.selected-file-list {
+    display: none;
+    width: min(480px, 100%);
+    margin: 18px auto 0;
+    gap: 8px;
+}
+
+.selected-file-pill,
+.selected-file-more {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 34px;
+    padding: 7px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.selected-file-pill span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.selected-file-pill small,
+.selected-file-more {
+    color: var(--text-muted);
+}
+
+.selected-file-more {
+    justify-content: center;
+}
+
 .glossary-restore-item:hover,
 .glossary-restore-item.dragover {
     border-color: var(--accent-primary);
@@ -3787,6 +4113,12 @@ body.is-resizing-layout .panel-resize-handle {
 .panel-header-row,
 .progress-header {
     border-bottom-color: var(--border-color);
+}
+
+.api-config-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
 }
 
 .api-config-header h3,

@@ -32,17 +32,186 @@ function setStatus(type, text, subtext = '', actionCallback = null, actionLabel 
     statusBar.style.display = 'flex';
 
     if (type === 'success') {
+        recordRecentTask({
+            title: text || '任务完成',
+            detail: subtext || '',
+            status: 'success'
+        });
         if (Notification.permission === 'granted') {
             new Notification('任务完成', {
                 body: subtext || text
             });
         }
+    } else if (type === 'error') {
+        recordRecentTask({
+            title: text || '任务异常',
+            detail: subtext || '',
+            status: 'error'
+        });
     }
 }
 
 function hideStatus() {
     const statusBar = document.getElementById('statusBar');
     statusBar.style.display = 'none';
+}
+
+const UX_RECENT_TASKS_KEY = 'nexus_ux_recent_tasks_v1';
+
+function getActiveToolKey() {
+    return document.querySelector('.nav-item.active')?.dataset.tool || 'split';
+}
+
+function loadRecentTasks() {
+    try {
+        return JSON.parse(localStorage.getItem(UX_RECENT_TASKS_KEY) || '[]');
+    } catch {
+        return [];
+    }
+}
+
+function saveRecentTasks(tasks) {
+    localStorage.setItem(UX_RECENT_TASKS_KEY, JSON.stringify((tasks || []).slice(0, 8)));
+}
+
+function recordRecentTask(task) {
+    const nextTask = {
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        tool: getActiveToolKey(),
+        title: task?.title || '未命名任务',
+        detail: task?.detail || '',
+        status: task?.status || 'ready',
+        createdAt: Date.now()
+    };
+    saveRecentTasks([nextTask, ...loadRecentTasks()]);
+    renderRecentTasks();
+}
+
+function formatRelativeTime(timestamp) {
+    const diff = Math.max(0, Date.now() - Number(timestamp || Date.now()));
+    const minute = 60 * 1000;
+    const hour = 60 * minute;
+    if (diff < minute) return '刚刚';
+    if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
+    if (diff < 24 * hour) return `${Math.floor(diff / hour)} 小时前`;
+    return `${Math.floor(diff / (24 * hour))} 天前`;
+}
+
+function renderRecentTasks() {
+    const list = document.getElementById('recentTaskList');
+    if (!list) return;
+    const tasks = loadRecentTasks();
+    if (!tasks.length) {
+        list.innerHTML = '<div class="recent-task-empty">选择文件或完成任务后会显示在这里</div>';
+        return;
+    }
+    list.innerHTML = tasks.map(task => `
+        <div class="recent-task-item ${escapeAttribute(task.status || 'ready')}">
+            <span class="recent-task-icon">${task.status === 'success' ? '✓' : task.status === 'error' ? '!' : '•'}</span>
+            <div>
+                <strong>${escapeHtml(task.title)}</strong>
+                <small>${escapeHtml(task.detail || '')}${task.detail ? ' · ' : ''}${formatRelativeTime(task.createdAt)}</small>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderSelectedFileList(input, files = []) {
+    const uploadArea = input?.closest?.('.upload-area-large, .upload-area-small') ||
+        input?.parentElement?.querySelector?.('.upload-area-large, .upload-area-small');
+    if (!uploadArea) return;
+    let list = uploadArea.querySelector('.selected-file-list');
+    if (!list) {
+        list = document.createElement('div');
+        list.className = 'selected-file-list';
+        uploadArea.appendChild(list);
+    }
+    const selectedFiles = Array.from(files || []);
+    if (!selectedFiles.length) {
+        list.innerHTML = '';
+        list.style.display = 'none';
+        return;
+    }
+    list.style.display = 'grid';
+    list.innerHTML = selectedFiles.slice(0, 4).map(file => `
+        <div class="selected-file-pill">
+            <span>${escapeHtml(file.name)}</span>
+            <small>${formatFileSize(file.size || 0)}</small>
+        </div>
+    `).join('') + (selectedFiles.length > 4 ? `<div class="selected-file-more">还有 ${selectedFiles.length - 4} 个文件</div>` : '');
+}
+
+function bindUxFileTelemetry() {
+    document.querySelectorAll('input[type="file"]').forEach(input => {
+        input.addEventListener('change', () => {
+            const files = Array.from(input.files || []);
+            renderSelectedFileList(input, files);
+            if (!files.length) return;
+            const totalSize = files.reduce((sum, file) => sum + (file.size || 0), 0);
+            const inputState = document.getElementById('inspectorInputState');
+            const outputState = document.getElementById('inspectorOutputState');
+            if (inputState) inputState.textContent = files.length > 1 ? `${files.length} 个文件` : files[0].name;
+            if (outputState) outputState.textContent = '等待开始';
+            updateInspectorEstimate(files);
+            recordRecentTask({
+                title: files.length > 1 ? `${files.length} 个文件已选择` : files[0].name,
+                detail: `${formatFileSize(totalSize)} · 等待处理`,
+                status: 'ready'
+            });
+        });
+    });
+}
+
+function getToolEstimateText(tool, files, totalSize) {
+    if (!files.length) return '上传后估算';
+    if (tool === 'split' || tool === 'convert') return totalSize > 5 * 1024 * 1024 ? '约 10 秒内' : '约数秒';
+    if (tool === 'translate') return files.length > 1 || totalSize > 1024 * 1024 ? '约 2 到 8 分钟' : '约 1 到 3 分钟';
+    if (tool === 'l10n-check') return files.length > 1 || totalSize > 1024 * 1024 ? '约 3 到 10 分钟' : '约 1 到 4 分钟';
+    if (tool === 'glossary' || tool === 'glossary-organize') return totalSize > 1024 * 1024 ? '约 2 到 6 分钟' : '约 1 到 3 分钟';
+    return '上传后估算';
+}
+
+function updateInspectorEstimate(files = []) {
+    const selectedFiles = Array.from(files || []);
+    const totalSize = selectedFiles.reduce((sum, file) => sum + (file.size || 0), 0);
+    const filesEl = document.getElementById('inspectorEstimateFiles');
+    const sizeEl = document.getElementById('inspectorEstimateSize');
+    const timeEl = document.getElementById('inspectorEstimateTime');
+    const badgeEl = document.getElementById('inspectorEstimateBadge');
+    if (filesEl) filesEl.textContent = String(selectedFiles.length);
+    if (sizeEl) sizeEl.textContent = selectedFiles.length ? formatFileSize(totalSize) : '-';
+    if (timeEl) timeEl.textContent = getToolEstimateText(getActiveToolKey(), selectedFiles, totalSize);
+    if (badgeEl) badgeEl.textContent = selectedFiles.length ? '已估算' : '待上传';
+}
+
+function renderApiSummary() {
+    const apiConfig = typeof getApiConfig === 'function' ? getApiConfig() : null;
+    const profileName = apiConfig?.profileName || getPlatformName(apiConfig?.provider) || '未配置通道';
+    const model = apiConfig?.model || getDefaultModelForProvider?.(apiConfig?.provider) || '';
+    const hasKey = Boolean(String(apiConfig?.apiKey || '').trim());
+    const concurrency = Number(apiConfig?.concurrency || apiConfig?.profileConcurrency || 1);
+
+    const apiName = document.getElementById('inspectorApiName');
+    const apiModel = document.getElementById('inspectorApiModel');
+    const apiHealth = document.getElementById('inspectorApiHealth');
+    const apiConcurrency = document.getElementById('inspectorApiConcurrency');
+    const topbarApiStatus = document.getElementById('topbarApiStatus');
+
+    if (apiName) apiName.textContent = hasKey ? profileName : '未配置通道';
+    if (apiModel) apiModel.textContent = hasKey ? model : '保存 API Key 后可用于翻译、检测和术语处理';
+    if (apiHealth) apiHealth.textContent = hasKey ? '已连接' : '待配置';
+    if (apiConcurrency) apiConcurrency.textContent = hasKey ? String(concurrency) : '-';
+    if (topbarApiStatus) {
+        topbarApiStatus.classList.toggle('online', hasKey);
+        topbarApiStatus.innerHTML = `<span class="status-dot"></span>${hasKey ? 'AI 通道已连接' : 'AI 通道待配置'}`;
+    }
+}
+
+function revealWorkspaceInspector() {
+    const panel = document.getElementById('apiConfigPanel');
+    const inspector = document.getElementById('workspaceInspector');
+    if (panel) panel.style.display = 'none';
+    if (inspector) inspector.style.display = 'grid';
 }
 
 const TRANSLATION_STORAGE_KEY = 'nexus_translation_progress';
@@ -1846,6 +2015,7 @@ function initApiConfig() {
     const clearBtn = document.getElementById('clearApiKeyBtn');
     const apiStatus = document.getElementById('apiStatus');
     const toggleBtn = document.getElementById('toggleApiConfig');
+    const closeBtn = document.getElementById('closeApiConfig');
     const configContent = document.getElementById('apiConfigContent');
     const baseUrlRow = document.getElementById('baseUrlRow');
     const globalAiModelSelect = document.getElementById('globalAiModel');
@@ -2245,6 +2415,7 @@ function initApiConfig() {
             toggleBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18,15 12,9 6,15"/></svg>';
         }
     });
+    closeBtn?.addEventListener('click', revealWorkspaceInspector);
 
     testBtn.addEventListener('click', () => {
         testCurrentProfile();
@@ -2303,6 +2474,7 @@ function initApiConfig() {
             : 'API 通道已保存，但该平台当前不参与 AI 检测');
         apiStatus.textContent += `：${savedProfileName}`;
         apiStatus.className = 'api-status success';
+        renderApiSummary();
         setTimeout(() => {
             apiStatus.textContent = '';
         }, 2000);
@@ -2310,6 +2482,7 @@ function initApiConfig() {
 
     clearBtn.addEventListener('click', () => {
         clearProfileForm();
+        renderApiSummary();
         apiStatus.textContent = '已清空表单，已保存通道不会被删除';
         apiStatus.className = 'api-status';
         setTimeout(() => {
@@ -2359,10 +2532,14 @@ function revealApiConfigPanel() {
     const panel = document.getElementById('apiConfigPanel');
     const content = document.getElementById('apiConfigContent');
     const apiKeyInput = document.getElementById('apiKey');
+    const inspector = document.getElementById('workspaceInspector');
 
     if (panel) {
         panel.style.display = 'block';
         panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    if (inspector) {
+        inspector.style.display = 'none';
     }
 
     if (content) {
@@ -3583,9 +3760,9 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         const requiresApi = toolsRequiringApi.includes(targetTool);
-        apiConfigPanel.style.display = requiresApi ? 'block' : 'none';
+        if (apiConfigPanel) apiConfigPanel.style.display = 'none';
         if (workspaceInspector) {
-            workspaceInspector.style.display = requiresApi ? 'none' : 'grid';
+            workspaceInspector.style.display = 'grid';
         }
 
         const meta = toolMeta[targetTool] || toolMeta.split;
@@ -3593,6 +3770,13 @@ document.addEventListener('DOMContentLoaded', function() {
         if (inspectorToolName) inspectorToolName.textContent = meta.name;
         if (inspectorToolDesc) inspectorToolDesc.textContent = meta.desc;
         if (inspectorToolBadge) inspectorToolBadge.textContent = meta.badge;
+        if (inspectorToolBadge) inspectorToolBadge.classList.toggle('api-needed', requiresApi);
+        const inputState = document.getElementById('inspectorInputState');
+        const outputState = document.getElementById('inspectorOutputState');
+        if (inputState) inputState.textContent = '等待文件';
+        if (outputState) outputState.textContent = requiresApi ? 'AI 生成 / 本地导出' : '本地生成';
+        updateInspectorEstimate([]);
+        renderApiSummary();
     }
 
     navItems.forEach(item => {
@@ -3606,6 +3790,20 @@ document.addEventListener('DOMContentLoaded', function() {
     initWorkbenchResizers();
     installFileDropGuards();
     initCommandPalette({ showTool });
+    bindUxFileTelemetry();
+    renderRecentTasks();
+    renderApiSummary();
+    document.getElementById('openApiConfigBtn')?.addEventListener('click', revealApiConfigPanel);
+    document.querySelectorAll('[data-open-api-config]').forEach(button => {
+        button.addEventListener('click', revealApiConfigPanel);
+    });
+    document.getElementById('clearRecentTasksBtn')?.addEventListener('click', () => {
+        saveRecentTasks([]);
+        renderRecentTasks();
+    });
+    document.querySelectorAll('[data-quick-tool]').forEach(button => {
+        button.addEventListener('click', () => showTool(button.dataset.quickTool));
+    });
 
     const activeTool = document.querySelector('.nav-item.active')?.dataset.tool || 'split';
     showTool(activeTool);
