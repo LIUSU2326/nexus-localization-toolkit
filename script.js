@@ -207,6 +207,97 @@ function renderApiSummary() {
     }
 }
 
+function getSelectVisualConfig(select) {
+    if (!select) return null;
+    if (select.id === 'sourceLang' || select.id === 'targetLang') {
+        const visual = getLanguageVisual(select.value);
+        return { kind: 'language', mark: visual.flag, text: visual.name };
+    }
+    if (select.id === 'apiProvider') {
+        const visual = getPlatformVisual(select.value);
+        return { kind: `provider ${visual.tone}`, mark: visual.mark, text: visual.label };
+    }
+    if (['globalAiModel', 'aiModel', 'glossaryModel', 'organizeGlossaryModel'].includes(select.id)) {
+        const provider = document.getElementById('apiProvider')?.value || getApiConfig()?.provider || 'custom';
+        const visual = getPlatformVisual(provider);
+        return { kind: `provider ${visual.tone}`, mark: visual.mark, text: getModelTraitTags(select.value)[0] || '模型' };
+    }
+    return null;
+}
+
+function enhanceVisualSelect(select) {
+    if (!select || select.dataset.visualEnhanced === 'true') return;
+    const row = select.closest('.setting-row, .api-config-content .setting-row');
+    if (!row) return;
+    row.classList.add('visual-select-row');
+    const prefix = document.createElement('span');
+    prefix.className = 'select-visual-prefix';
+    row.appendChild(prefix);
+
+    const update = () => {
+        const config = getSelectVisualConfig(select);
+        if (!config) return;
+        prefix.className = `select-visual-prefix ${config.kind}`;
+        prefix.textContent = config.mark;
+        prefix.title = config.text;
+        row.dataset.visualText = config.text;
+    };
+
+    select.addEventListener('change', () => {
+        update();
+        renderApiSummary();
+    });
+    select.dataset.visualEnhanced = 'true';
+    update();
+}
+
+function enhanceDeepChoiceSurfaces() {
+    [
+        'sourceLang',
+        'targetLang',
+        'apiProvider',
+        'globalAiModel',
+        'aiModel',
+        'glossaryModel',
+        'organizeGlossaryModel'
+    ].forEach(id => enhanceVisualSelect(document.getElementById(id)));
+
+    const updateModelSelects = () => {
+        ['globalAiModel', 'aiModel', 'glossaryModel', 'organizeGlossaryModel'].forEach(id => {
+            const select = document.getElementById(id);
+            if (!select) return;
+            const row = select.closest('.setting-row');
+            if (!row) return;
+            let hint = row.querySelector('.model-trait-strip');
+            if (!hint) {
+                hint = document.createElement('div');
+                hint.className = 'model-trait-strip';
+                row.appendChild(hint);
+            }
+            hint.innerHTML = getModelTraitHtml(select.value);
+        });
+    };
+
+    document.addEventListener('change', (event) => {
+        if (event.target?.matches?.('#apiProvider, #globalAiModel, #aiModel, #glossaryModel, #organizeGlossaryModel')) {
+            updateModelSelects();
+            ['globalAiModel', 'aiModel', 'glossaryModel', 'organizeGlossaryModel'].forEach(id => {
+                const select = document.getElementById(id);
+                const row = select?.closest('.visual-select-row');
+                const prefix = row?.querySelector('.select-visual-prefix');
+                if (select && prefix) {
+                    const config = getSelectVisualConfig(select);
+                    prefix.className = `select-visual-prefix ${config.kind}`;
+                    prefix.textContent = config.mark;
+                    prefix.title = config.text;
+                }
+            });
+        }
+    });
+    document.addEventListener('nexus:api-profiles-updated', updateModelSelects);
+    updateModelSelects();
+}
+
 function revealWorkspaceInspector() {
     const panel = document.getElementById('apiConfigPanel');
     const inspector = document.getElementById('workspaceInspector');
@@ -1652,6 +1743,68 @@ function getPlatformName(provider) {
     return PLATFORM_CONFIG[provider]?.name || provider || '未知平台';
 }
 
+const PLATFORM_VISUALS = {
+    deepseek: { mark: 'DS', tone: 'deepseek', label: 'DeepSeek' },
+    openai: { mark: 'AI', tone: 'openai', label: 'OpenAI' },
+    openaiProxy: { mark: 'AI', tone: 'openai', label: 'OpenAI' },
+    gemini: { mark: 'G', tone: 'gemini', label: 'Gemini' },
+    aigocodeGemini: { mark: 'G', tone: 'gemini', label: 'Gemini' },
+    aigocodeOpenai: { mark: 'AI', tone: 'openai', label: 'GPT' },
+    aigocodeClaude: { mark: 'C', tone: 'claude', label: 'Claude' },
+    xiaomi: { mark: 'MI', tone: 'mimo', label: 'MiMo' },
+    aliyun: { mark: 'Q', tone: 'qwen', label: 'Qwen' },
+    tencent: { mark: 'T', tone: 'tencent', label: 'Tencent' },
+    doubao: { mark: '豆', tone: 'doubao', label: 'Doubao' },
+    youdao: { mark: '有', tone: 'youdao', label: 'Youdao' },
+    youdaoTranslate: { mark: '译', tone: 'youdao', label: 'Youdao' },
+    custom: { mark: 'API', tone: 'custom', label: 'Custom' }
+};
+
+const LANGUAGE_VISUALS = {
+    'zh-CN': { flag: '🇨🇳', name: '中文（简体）' },
+    'zh-TW': { flag: '🇨🇳', name: '中文（繁体）' },
+    en: { flag: '🇺🇸', name: '英语' },
+    ja: { flag: '🇯🇵', name: '日语' },
+    ko: { flag: '🇰🇷', name: '韩语' },
+    fr: { flag: '🇫🇷', name: '法语' },
+    de: { flag: '🇩🇪', name: '德语' },
+    es: { flag: '🇪🇸', name: '西班牙语' },
+    pt: { flag: '🇵🇹', name: '葡萄牙语' },
+    ru: { flag: '🇷🇺', name: '俄语' },
+    th: { flag: '🇹🇭', name: '泰语' },
+    vi: { flag: '🇻🇳', name: '越南语' },
+    id: { flag: '🇮🇩', name: '印尼语' }
+};
+
+function getPlatformVisual(provider) {
+    return PLATFORM_VISUALS[provider] || { mark: 'API', tone: 'custom', label: getPlatformName(provider) };
+}
+
+function getProviderMarkHtml(provider) {
+    const visual = getPlatformVisual(provider);
+    return `<span class="provider-mark ${escapeAttribute(visual.tone)}" title="${escapeAttribute(visual.label)}">${escapeHtml(visual.mark)}</span>`;
+}
+
+function getModelTraitTags(modelId = '') {
+    const id = String(modelId || '').toLowerCase();
+    const tags = [];
+    if (/flash|lite|mini|turbo|haiku/.test(id)) tags.push('快速');
+    if (/pro|opus|max|reason|thinking/.test(id)) tags.push('高精度');
+    if (/preview/.test(id)) tags.push('预览');
+    if (/codex/.test(id)) tags.push('代码');
+    return tags.slice(0, 3);
+}
+
+function getModelTraitHtml(modelId) {
+    const tags = getModelTraitTags(modelId);
+    if (tags.length === 0) return '<span class="model-trait muted">通用</span>';
+    return tags.map(tag => `<span class="model-trait">${escapeHtml(tag)}</span>`).join('');
+}
+
+function getLanguageVisual(lang) {
+    return LANGUAGE_VISUALS[lang] || { flag: '🌐', name: lang || '语言' };
+}
+
 function getProviderProtocol(provider) {
     return PLATFORM_CONFIG[provider]?.protocol || 'openai-chat';
 }
@@ -1905,16 +2058,23 @@ function renderApiProfileChecklist(container, selectedIds, onChange, emptyText) 
             ? '未保存 API Key'
             : (!compatible ? '该平台当前不是 Chat Completions 兼容接口' : '');
         const label = document.createElement('label');
-        label.className = `resource-check-item ${isUsable ? '' : 'disabled'}`;
+        label.className = `resource-check-item ai-channel-card ${nextSelectedIds.has(profile.id) ? 'selected' : ''} ${isUsable ? '' : 'disabled'}`;
         label.innerHTML = `
+            ${getProviderMarkHtml(profile.provider)}
             <input type="checkbox" value="${profile.id}" ${nextSelectedIds.has(profile.id) ? 'checked' : ''} ${isUsable ? '' : 'disabled'}>
             <span class="resource-main">
                 <span class="resource-title-line">
                     <span class="resource-title">${escapeHtml(profile.name)}</span>
                     ${isDefaultProfile ? `<span class="resource-default-tag">${isDefaultSelected ? '默认主检测' : '默认通道'}</span>` : ''}
+                    ${hasKey ? '<span class="resource-status-tag online">已连接</span>' : '<span class="resource-status-tag warning">缺少 Key</span>'}
                 </span>
                 <span class="resource-meta">
-                    ${getPlatformName(profile.provider)} · ${escapeHtml(getModelDisplayName(profile.provider, profile.model))} · 并发 ${getProfileConcurrency(profile)}${disabledReason ? ` · ${disabledReason}` : ''}
+                    ${getPlatformName(profile.provider)} · ${escapeHtml(getModelDisplayName(profile.provider, profile.model))}
+                </span>
+                <span class="resource-chip-row">
+                    ${getModelTraitHtml(profile.model)}
+                    <span class="model-trait muted">并发 ${getProfileConcurrency(profile)}</span>
+                    ${disabledReason ? `<span class="model-trait warning">${escapeHtml(disabledReason)}</span>` : ''}
                 </span>
             </span>
         `;
@@ -1926,6 +2086,7 @@ function renderApiProfileChecklist(container, selectedIds, onChange, emptyText) 
             } else {
                 nextSelectedIds.delete(profile.id);
             }
+            label.classList.toggle('selected', checkbox.checked);
             onChange(new Set(nextSelectedIds));
         });
 
@@ -1970,13 +2131,23 @@ function renderTranslationProfileChecklist(container, selectedIds, onChange, emp
             ? '未保存 API Key/应用 ID'
             : (!hasSecret ? '未保存应用密钥' : (!compatible ? '该平台当前不支持文本翻译' : ''));
         const label = document.createElement('label');
-        label.className = `resource-check-item ${isUsable ? '' : 'disabled'}`;
+        label.className = `resource-check-item ai-channel-card ${nextSelectedIds.has(profile.id) ? 'selected' : ''} ${isUsable ? '' : 'disabled'}`;
         label.innerHTML = `
+            ${getProviderMarkHtml(profile.provider)}
             <input type="checkbox" value="${profile.id}" ${nextSelectedIds.has(profile.id) ? 'checked' : ''} ${isUsable ? '' : 'disabled'}>
             <span class="resource-main">
-                <span class="resource-title">${escapeHtml(profile.name)}</span>
+                <span class="resource-title-line">
+                    <span class="resource-title">${escapeHtml(profile.name)}</span>
+                    ${hasKey ? '<span class="resource-status-tag online">已连接</span>' : '<span class="resource-status-tag warning">缺少 Key</span>'}
+                    ${isApiProfileTranslationOnly(profile) ? '<span class="resource-status-tag">翻译专用</span>' : ''}
+                </span>
                 <span class="resource-meta">
-                    ${getPlatformName(profile.provider)} · ${escapeHtml(getModelDisplayName(profile.provider, profile.model))} · 并发 ${getProfileConcurrency(profile)}${isApiProfileTranslationOnly(profile) ? ' · 翻译专用' : ''}${disabledReason ? ` · ${disabledReason}` : ''}
+                    ${getPlatformName(profile.provider)} · ${escapeHtml(getModelDisplayName(profile.provider, profile.model))}
+                </span>
+                <span class="resource-chip-row">
+                    ${getModelTraitHtml(profile.model)}
+                    <span class="model-trait muted">并发 ${getProfileConcurrency(profile)}</span>
+                    ${disabledReason ? `<span class="model-trait warning">${escapeHtml(disabledReason)}</span>` : ''}
                 </span>
             </span>
         `;
@@ -1988,6 +2159,7 @@ function renderTranslationProfileChecklist(container, selectedIds, onChange, emp
             } else {
                 nextSelectedIds.delete(profile.id);
             }
+            label.classList.toggle('selected', checkbox.checked);
             onChange(new Set(nextSelectedIds));
         });
 
@@ -2240,15 +2412,21 @@ function initApiConfig() {
             item.className = `api-profile-item ${isActive ? 'active' : ''}`;
             const deletePending = pendingDeleteProfileId === profile.id;
             item.innerHTML = `
+                ${getProviderMarkHtml(profile.provider)}
                 <div class="api-profile-main">
                     <div class="api-profile-title">
                         <strong title="${escapeAttribute(profile.name)}">${escapeHtml(profile.name)}</strong>
                         <span class="api-profile-tag">${isActive ? '默认' : getPlatformName(profile.provider)}</span>
+                        ${profile.apiKey ? '<span class="api-profile-tag success">已保存 Key</span>' : '<span class="api-profile-tag warning">未填写 Key</span>'}
                         ${isGatewayProvider(profile.provider) ? '<span class="api-profile-tag gateway">中转网关</span>' : ''}
                         ${translationOnly ? '<span class="api-profile-tag">翻译专用</span>' : (compatible ? '' : '<span class="api-profile-tag warning">需单独适配</span>')}
                     </div>
                     <div class="api-profile-meta">
-                        ${getPlatformName(profile.provider)} · ${escapeHtml(getModelDisplayName(profile.provider, profile.model))} · 并发 ${getProfileConcurrency(profile)} · ${profile.apiKey ? '已保存 Key' : '未填写 Key'}${translationOnly ? ` · ${profile.apiSecret ? '已保存 Secret' : '未填写 Secret'}` : ''}
+                        ${getPlatformName(profile.provider)} · ${escapeHtml(getModelDisplayName(profile.provider, profile.model))} · 并发 ${getProfileConcurrency(profile)}${translationOnly ? ` · ${profile.apiSecret ? '已保存 Secret' : '未填写 Secret'}` : ''}
+                    </div>
+                    <div class="resource-chip-row">
+                        ${getModelTraitHtml(profile.model)}
+                        <span class="model-trait muted">${getProviderProtocol(profile.provider)}</span>
                     </div>
                 </div>
                 <div class="api-profile-actions">
@@ -3791,6 +3969,7 @@ document.addEventListener('DOMContentLoaded', function() {
     installFileDropGuards();
     initCommandPalette({ showTool });
     bindUxFileTelemetry();
+    enhanceDeepChoiceSurfaces();
     renderRecentTasks();
     renderApiSummary();
     document.getElementById('openApiConfigBtn')?.addEventListener('click', revealApiConfigPanel);
