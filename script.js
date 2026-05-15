@@ -1869,11 +1869,11 @@ function getPlatformName(provider) {
 
 const PLATFORM_VISUALS = {
     deepseek: { mark: 'DS', tone: 'deepseek', label: 'DeepSeek' },
-    openai: { mark: 'AI', tone: 'openai', label: 'OpenAI' },
-    openaiProxy: { mark: 'AI', tone: 'openai', label: 'OpenAI' },
-    gemini: { mark: 'G', tone: 'gemini', label: 'Gemini' },
-    aigocodeGemini: { mark: 'G', tone: 'gemini', label: 'Gemini' },
-    aigocodeOpenai: { mark: 'AI', tone: 'openai', label: 'GPT' },
+    openai: { mark: '◎', tone: 'openai', label: 'OpenAI' },
+    openaiProxy: { mark: '◎', tone: 'openai', label: 'OpenAI' },
+    gemini: { mark: '✦', tone: 'gemini', label: 'Gemini' },
+    aigocodeGemini: { mark: '✦', tone: 'gemini', label: 'Gemini' },
+    aigocodeOpenai: { mark: '◎', tone: 'openai', label: 'GPT' },
     aigocodeClaude: { mark: 'C', tone: 'claude', label: 'Claude' },
     xiaomi: { mark: 'MI', tone: 'mimo', label: 'MiMo' },
     aliyun: { mark: 'Q', tone: 'qwen', label: 'Qwen' },
