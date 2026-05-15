@@ -1318,11 +1318,18 @@
                             <label class="glossary-restore-item" for="glossaryReviewMode">
                                 <span class="restore-label">颜色标记怎么处理</span>
                                 <select id="glossaryReviewMode" class="review-mode-select">
-                                    <option value="ignore" selected>颜色标记 = 不采用这条修改</option>
-                                    <option value="keep">颜色标记 = 采用这条术语</option>
-                                    <option value="auto">优先按备注/状态判断</option>
+                                    <option value="planner" selected>策划标色：绿色采用建议，红色理解备注</option>
+                                    <option value="ignore">所有颜色标记 = 不采用这条修改</option>
+                                    <option value="keep">所有颜色标记 = 采用这条术语</option>
                                 </select>
-                                <small>默认适合“策划把不需要修改的行改颜色”：这些行不会进入最终术语表。工具会同时识别背景色和文字颜色。</small>
+                                <small>适合在术语表里用文字标色返稿：绿色会直接采用，红色优先读取备注/状态说明。</small>
+                            </label>
+                            <label class="glossary-restore-item checkbox-setting compact" for="glossaryReviewAiAssist">
+                                <input type="checkbox" id="glossaryReviewAiAssist" checked>
+                                <span>
+                                    <strong>红色复杂备注使用 AI 小批量理解</strong>
+                                    <small>只把红色且规则看不懂的备注送给当前 API，不会通读整份表；没有 API Key 时会保留为待人工确认。</small>
+                                </span>
                             </label>
                             <label class="glossary-restore-item">
                                 <span class="restore-label">识别结果</span>

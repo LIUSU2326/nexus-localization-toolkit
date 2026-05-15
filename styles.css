@@ -2056,6 +2056,11 @@ body.file-drag-active .file-input-overlay {
     transition: var(--transition);
 }
 
+.glossary-restore-item.checkbox-setting {
+    display: flex;
+    gap: 10px;
+}
+
 .glossary-restore-item:hover,
 .glossary-restore-item.dragover {
     border-color: var(--accent-primary);

@@ -433,16 +433,20 @@ function getColorAttributeValue(colorNode) {
     );
 }
 
-function createStyleMarker(fillColor = '', fontColor = '', source = '') {
+function createStyleMarker(fillColor = '', fontColor = '', source = '', fontColors = null) {
     const normalizedFill = normalizeColorValue(fillColor);
     const normalizedFont = normalizeColorValue(fontColor);
-    if (!normalizedFill && !normalizedFont) return null;
+    const normalizedFonts = Array.isArray(fontColors)
+        ? [...new Set(fontColors.map(color => normalizeColorValue(color)).filter(Boolean))]
+        : [];
+    if (!normalizedFill && !normalizedFont && normalizedFonts.length === 0) return null;
     return {
         fillColor: normalizedFill,
-        fontColor: normalizedFont,
+        fontColor: normalizedFont || normalizedFonts[0] || '',
+        fontColors: normalizedFonts.length ? normalizedFonts : (normalizedFont ? [normalizedFont] : []),
         source: source || [
             normalizedFill ? 'background' : '',
-            normalizedFont ? 'font' : ''
+            (normalizedFont || normalizedFonts.length) ? 'font' : ''
         ].filter(Boolean).join('+')
     };
 }
@@ -456,6 +460,22 @@ function getMarkerFillColor(marker) {
 function getMarkerFontColor(marker) {
     if (!marker || typeof marker === 'string') return '';
     return normalizeColorValue(marker.fontColor || '');
+}
+
+function getMarkerFontColors(marker) {
+    if (!marker || typeof marker === 'string') return [];
+    const colors = Array.isArray(marker.fontColors) ? marker.fontColors : [marker.fontColor];
+    return [...new Set(colors.map(color => normalizeColorValue(color)).filter(Boolean))];
+}
+
+function mergeStyleMarkers(...markers) {
+    const usable = markers.filter(Boolean);
+    if (!usable.length) return null;
+    const fillColor = usable.map(marker => getMarkerFillColor(marker)).find(Boolean) || '';
+    const fontColors = usable.flatMap(marker => getMarkerFontColors(marker));
+    const fontColor = fontColors[0] || usable.map(marker => getMarkerFontColor(marker)).find(Boolean) || '';
+    const source = [...new Set(usable.map(marker => marker?.source).filter(Boolean))].join('+');
+    return createStyleMarker(fillColor, fontColor, source, fontColors);
 }
 
 function getMarkerDisplaySource(marker) {
@@ -685,7 +705,42 @@ function getStyleMarkerFromStyles(styleIndex, styleMap) {
     );
 }
 
-function parseSheetCellColorMap(sheetXmlText, styleMap) {
+function parseRichTextMarkerFromNode(node, source = 'rich-text') {
+    if (!node) return null;
+    const colors = getXmlChildrenByName(node, 'rPr')
+        .flatMap(runProperties => getXmlChildrenByName(runProperties, 'color'))
+        .map(colorNode => getColorAttributeValue(colorNode))
+        .filter(Boolean);
+    if (!colors.length) return null;
+    return createStyleMarker('', colors[0], source, colors);
+}
+
+function parseSharedStringRichTextColorMap(sharedStringsXmlText) {
+    const doc = parseXmlDocument(sharedStringsXmlText);
+    const map = new Map();
+    const root = getXmlChildrenByName(doc, 'sst')[0] || doc?.documentElement;
+    const items = root
+        ? Array.from(root.children).filter(node => node.localName === 'si')
+        : [];
+    items.forEach((item, index) => {
+        const marker = parseRichTextMarkerFromNode(item, 'shared-rich-text');
+        if (marker) map.set(index, marker);
+    });
+    return map;
+}
+
+function getCellSharedStringIndex(cell) {
+    const valueNode = getXmlChildrenByName(cell, 'v')[0];
+    const value = Number(valueNode?.textContent || '');
+    return Number.isFinite(value) ? value : -1;
+}
+
+function getInlineRichTextMarker(cell) {
+    const inlineString = getXmlChildrenByName(cell, 'is')[0];
+    return parseRichTextMarkerFromNode(inlineString, 'inline-rich-text');
+}
+
+function parseSheetCellColorMap(sheetXmlText, styleMap, sharedRichTextMarkers = new Map()) {
     const doc = parseXmlDocument(sheetXmlText);
     const map = new Map();
     getXmlChildrenByName(doc, 'row').forEach(row => {
@@ -700,7 +755,12 @@ function parseSheetCellColorMap(sheetXmlText, styleMap) {
         const ref = cell.getAttribute('r');
         if (!ref) return;
         const styleIndex = Number(cell.getAttribute('s') || 0);
-        const marker = getStyleMarkerFromStyles(styleIndex, styleMap);
+        const styleMarker = getStyleMarkerFromStyles(styleIndex, styleMap);
+        const type = cell.getAttribute('t') || '';
+        const richMarker = type === 's'
+            ? sharedRichTextMarkers.get(getCellSharedStringIndex(cell))
+            : getInlineRichTextMarker(cell);
+        const marker = mergeStyleMarkers(styleMarker, richMarker);
         if (marker) {
             map.set(ref, marker);
         }
@@ -725,6 +785,40 @@ function getReviewMarkerColor(marker) {
         : getMarkerFontColor(marker);
 }
 
+function colorToRgb(color) {
+    let value = normalizeColorValue(color);
+    if (!value) return null;
+    if (value.length === 8) value = value.slice(2);
+    if (value.length !== 6) return null;
+    const r = Number.parseInt(value.slice(0, 2), 16);
+    const g = Number.parseInt(value.slice(2, 4), 16);
+    const b = Number.parseInt(value.slice(4, 6), 16);
+    if (![r, g, b].every(Number.isFinite)) return null;
+    return { r, g, b };
+}
+
+function classifyReviewColor(color) {
+    const rgb = colorToRgb(color);
+    if (!rgb) return '';
+    if (rgb.g >= 95 && rgb.g > rgb.r * 1.25 && rgb.g > rgb.b * 1.2) return 'green';
+    if (rgb.r >= 150 && rgb.r > rgb.g * 1.25 && rgb.r > rgb.b * 1.2) return 'red';
+    return '';
+}
+
+function getReviewMarkerSemantics(marker) {
+    const colors = [
+        ...getMarkerFontColors(marker),
+        getMarkerFontColor(marker),
+        getMarkerFillColor(marker)
+    ].filter(color => parseReviewMarkerColor(color));
+    const semantics = new Set(colors.map(classifyReviewColor).filter(Boolean));
+    return {
+        hasGreen: semantics.has('green'),
+        hasRed: semantics.has('red'),
+        semanticList: [...semantics]
+    };
+}
+
 async function extractWorksheetColorMapFromFile(file, workbook, sheetName) {
     if (!file || !/\.xlsx$/i.test(file.name || '') || typeof JSZip === 'undefined') {
         return extractWorksheetColorMap(workbook, sheetName);
@@ -742,8 +836,10 @@ async function extractWorksheetColorMapFromFile(file, workbook, sheetName) {
         if (!sheetXmlPath) return extractWorksheetColorMap(workbook, sheetName);
 
         const sheetXml = await loadZipFileText(zip, sheetXmlPath);
+        const sharedStringsXml = await loadZipFileText(zip, 'xl/sharedStrings.xml');
         const styleMap = parseStylesFillColorMap(stylesXml);
-        return parseSheetCellColorMap(sheetXml, styleMap);
+        const sharedRichTextMarkers = parseSharedStringRichTextColorMap(sharedStringsXml);
+        return parseSheetCellColorMap(sheetXml, styleMap, sharedRichTextMarkers);
     } catch (error) {
         console.warn('Failed to read worksheet colors from xlsx XML:', error);
         return extractWorksheetColorMap(workbook, sheetName);
@@ -805,15 +901,26 @@ function inferReviewColumns(rows) {
 function normalizeReviewDecisionText(text) {
     const value = String(text || '').trim().toLowerCase();
     if (!value) return '';
+    if (/(不采用|不用|不要|拒绝|驳回|忽略|排除|删除|去掉|不改|维持原译|保持原译|skip|ignore|exclude|remove|reject)/i.test(value)) return 'ignore';
+    if (/(采用|通过|同意|执行|按.*修改|改成|改为|替换为|使用|保留建议|accept|apply|keep|pass)/i.test(value)) return 'keep';
     if (/(忽略|排除|删除|去掉|不改|不用改|无需改|保持|维持原译|不要|skip|ignore|exclude|remove)/i.test(value)) return 'ignore';
     if (/(保留|通过|采用|keep|pass|accept)/i.test(value)) return 'keep';
     return '';
 }
 
 function normalizeReviewDisplayDecision(decision) {
+    if (decision === 'revise') return '按备注修正';
+    if (decision === 'ai-review') return '等待 AI 理解';
     if (decision === 'ignore') return '不采用修改';
     if (decision === 'keep') return '采用术语';
     return '未标记';
+}
+
+function reviewTextNeedsAiDecision(text) {
+    const value = String(text || '').trim();
+    if (!value) return false;
+    if (normalizeReviewDecisionText(value)) return false;
+    return value.length >= 4 || /[，。；、,.!?？！]/.test(value);
 }
 
 function buildReviewRows(report) {
@@ -840,12 +947,16 @@ function buildReviewRows(report) {
         entry.hasMarker ? '是' : '否',
         entry.markerSource || '',
         (entry.matchedTerms || []).join('; '),
-        entry.note || '',
+        [entry.note, entry.aiReason ? `AI理解：${entry.aiReason}` : ''].filter(Boolean).join('；'),
         entry.decision === 'ignore'
             ? '不采用该修改，从最终术语表排除匹配术语'
             : entry.decision === 'keep'
                 ? '采用该术语，保留匹配术语'
-                : '无人工标记，按原术语表保留',
+                : entry.decision === 'revise'
+                    ? '按人工备注修正译文并保留'
+                    : entry.decision === 'ai-review'
+                        ? '备注需要人工确认，暂按原术语表保留'
+                        : '无人工标记，按原术语表保留',
         entry.decision && (!entry.matchedTerms || entry.matchedTerms.length === 0)
             ? '未匹配到术语表，已放入“需人工确认”'
             : ''
@@ -940,6 +1051,10 @@ function buildReviewSummaryRows(report) {
         ['最终术语数', report.finalTermCount || report.keepCount || 0],
         ['排除术语数', report.removedTermCount || report.ignoreCount || 0],
         ['缩小适用范围术语数', report.prunedTermCount || 0],
+        ['按返稿修正术语数', report.modifiedTermCount || 0],
+        ['AI 理解红色复杂备注数', report.aiReviewStats?.resolved || 0],
+        ['待人工理解红色备注数', report.aiReviewStats?.skipped || 0],
+        ['AI 理解失败数', report.aiReviewStats?.failed || 0],
         ['待人工确认行数', report.unmatchedIgnoreCount || 0],
         ['生成时间', new Date().toISOString()]
     ];
@@ -11411,6 +11526,7 @@ function initGlossaryTool() {
     const reviewStatus = document.getElementById('glossaryReviewStatus');
     const reviewSummary = document.getElementById('glossaryReviewSummary');
     const reviewMode = document.getElementById('glossaryReviewMode');
+    const reviewAiAssist = document.getElementById('glossaryReviewAiAssist');
     const reviewReportBtn = document.getElementById('glossaryReviewReportBtn');
     const reviewDownloadBtn = document.getElementById('glossaryReviewDownloadBtn');
     const clearReviewBtn = document.getElementById('clearGlossaryReviewBtn');
@@ -11982,19 +12098,40 @@ function initGlossaryTool() {
         return index >= 0 && row[index] !== undefined ? String(row[index]).trim() : '';
     }
 
-    function inferReviewDecision(row, columnIndexes, hasMarker, markerSource = '') {
+    function inferReviewDecision(row, columnIndexes, hasMarker, markerSource = '', markerSemantic = null) {
         const statusDecision = normalizeReviewDecisionText(getReviewCell(row, columnIndexes.statusIndex));
         if (statusDecision) {
             return { decision: statusDecision, reviewSource: '状态列' };
         }
 
-        const noteDecision = normalizeReviewDecisionText(getReviewCell(row, columnIndexes.noteIndex));
+        const note = getReviewCell(row, columnIndexes.noteIndex);
+        const noteDecision = normalizeReviewDecisionText(note);
         if (noteDecision) {
             return { decision: noteDecision, reviewSource: '备注列' };
         }
 
         if (hasMarker) {
-            const mode = reviewMode?.value || 'ignore';
+            const mode = reviewMode?.value || 'planner';
+            if (mode === 'planner') {
+                if (markerSemantic?.hasGreen && !markerSemantic?.hasRed) {
+                    return {
+                        decision: 'keep',
+                        reviewSource: markerSource || '绿色文字/颜色标记'
+                    };
+                }
+                if (markerSemantic?.hasRed) {
+                    if (reviewTextNeedsAiDecision(note)) {
+                        return {
+                            decision: 'ai-review',
+                            reviewSource: markerSource || '红色文字/颜色标记'
+                        };
+                    }
+                    return {
+                        decision: 'ignore',
+                        reviewSource: markerSource || '红色文字/颜色标记'
+                    };
+                }
+            }
             return {
                 decision: mode === 'keep' ? 'keep' : 'ignore',
                 reviewSource: markerSource || '颜色标记'
@@ -12066,6 +12203,119 @@ function initGlossaryTool() {
         }).filter(Boolean);
     }
 
+    function normalizeAiReviewDecision(value) {
+        const decision = String(value || '').trim().toLowerCase();
+        if (['keep', 'accept', 'apply', 'use'].includes(decision)) return 'keep';
+        if (['ignore', 'reject', 'skip', 'remove'].includes(decision)) return 'ignore';
+        if (['revise', 'modify', 'change'].includes(decision)) return 'revise';
+        return '';
+    }
+
+    function applyReviewEntryToTerm(term, entry, reviewReason = '') {
+        const revisedTranslation = String(entry.aiFinalTranslation || entry.finalTranslation || '').trim();
+        if (!revisedTranslation) return term;
+        const currentFinal = String(term.finalTranslation || term.translation || term.target || '').trim();
+        if (revisedTranslation === currentFinal) return term;
+        return {
+            ...term,
+            translation: revisedTranslation,
+            finalTranslation: revisedTranslation,
+            note: [term.note, reviewReason || entry.aiReason || entry.note ? `人工返稿修正：${reviewReason || entry.aiReason || entry.note}` : '人工返稿修正'].filter(Boolean).join('；'),
+            reviewDecision: entry.decision || 'keep'
+        };
+    }
+
+    async function resolveGlossaryReviewEntriesWithAi(entries) {
+        const pendingEntries = (entries || []).filter(entry => entry.decision === 'ai-review');
+        if (!pendingEntries.length) {
+            return { resolved: 0, skipped: 0, failed: 0 };
+        }
+
+        if (!reviewAiAssist?.checked) {
+            pendingEntries.forEach(entry => {
+                entry.aiReason = 'AI 辅助未开启，保留为待人工确认';
+            });
+            return { resolved: 0, skipped: pendingEntries.length, failed: 0 };
+        }
+
+        const apiConfig = getApiConfig();
+        if (!apiConfig?.apiKey) {
+            pendingEntries.forEach(entry => {
+                entry.aiReason = '未配置 API Key，保留为待人工确认';
+            });
+            return { resolved: 0, skipped: pendingEntries.length, failed: 0 };
+        }
+
+        let resolved = 0;
+        let failed = 0;
+        const model = apiConfig.model || getDefaultModelForProvider(apiConfig.provider);
+        for (let start = 0; start < pendingEntries.length; start += 12) {
+            const batch = pendingEntries.slice(start, start + 12);
+            if (reviewStatus) {
+                reviewStatus.textContent = `正在小批量理解红色复杂备注 ${Math.min(start + batch.length, pendingEntries.length)} / ${pendingEntries.length} ...`;
+                reviewStatus.className = 'upload-status info';
+            }
+            const payload = batch.map(entry => ({
+                excelRowNumber: entry.excelRowNumber,
+                referenceId: entry.referenceId,
+                rowNumber: entry.rowNumber,
+                sourceText: entry.sourceText,
+                termText: entry.termText,
+                originalTranslation: entry.originalTranslation,
+                aiSuggestedTranslation: entry.finalTranslation,
+                status: entry.statusText,
+                note: entry.note,
+                rowText: entry.rowText
+            }));
+            const prompt = [
+                '你是游戏本地化术语表审核助手。策划在返稿表里用红色文字写了对 AI 修改建议的人工判断。',
+                '请只判断这些红色备注对应的处理结果，不要重新翻译整份表。',
+                'decision 只能是 keep、ignore、revise：',
+                '- keep：采用 AI 建议或保留该术语。',
+                '- ignore：不采用这条 AI 修改建议，从最终术语表中排除这条建议。',
+                '- revise：按策划备注修正，必须给 finalTranslation。',
+                '如果备注说“改成/改为/用某某”，优先输出 revise 和明确译文。看不懂时用 keep，并在 reason 说明需要人工确认。',
+                '只返回 JSON 数组，不要 Markdown。',
+                JSON.stringify(payload)
+            ].join('\n\n');
+
+            try {
+                const content = await requestModelContent(apiConfig, {
+                    model,
+                    messages: [{ role: 'user', content: prompt }],
+                    temperature: 0.1,
+                    max_tokens: 1800
+                });
+                const parsed = extractJsonFromText(content);
+                const results = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.items) ? parsed.items : []);
+                const resultMap = new Map(results.map(item => [Number(item.excelRowNumber), item]));
+                batch.forEach(entry => {
+                    const item = resultMap.get(Number(entry.excelRowNumber));
+                    const decision = normalizeAiReviewDecision(item?.decision);
+                    if (!decision) {
+                        entry.decision = 'keep';
+                        entry.aiReason = 'AI 未返回明确判断，已保留并标记人工复核';
+                        resolved++;
+                        return;
+                    }
+                    entry.decision = decision;
+                    entry.aiFinalTranslation = String(item?.finalTranslation || item?.translation || '').trim();
+                    entry.aiReason = String(item?.reason || '').trim();
+                    entry.reviewSource = `${entry.reviewSource || '红色备注'} + AI理解`;
+                    resolved++;
+                });
+            } catch (error) {
+                console.warn('Failed to resolve glossary review notes with AI:', error);
+                failed += batch.length;
+                batch.forEach(entry => {
+                    entry.decision = 'keep';
+                    entry.aiReason = `AI 理解失败，已保留并标记人工复核：${error.message || error}`;
+                });
+            }
+        }
+        return { resolved, skipped: 0, failed };
+    }
+
     async function analyzeGlossaryReviewFile(file) {
         const { workbook, fileName } = await readSpreadsheetWorkbook(file);
         const sheetName = findWorksheetByName(workbook.SheetNames, ['修正后数据', '审核结果', 'review']);
@@ -12098,15 +12348,19 @@ function initGlossaryTool() {
             const termText = getReviewCell(row, columnIndexes.termIndex);
             const originalTranslation = getReviewCell(row, columnIndexes.originalTranslationIndex);
             const finalTranslation = getReviewCell(row, columnIndexes.finalTranslationIndex);
+            const statusText = getReviewCell(row, columnIndexes.statusIndex);
             const note = getReviewCell(row, columnIndexes.noteIndex);
 
-            const rowMarker = colorMap.get(`__ROW_${offset + 1}`) || Array.from({ length: Math.max(headerRow.length, row.length) }, (_, col) => {
+            const rowStyleMarker = colorMap.get(`__ROW_${offset + 1}`);
+            const rowCellMarkers = Array.from({ length: Math.max(headerRow.length, row.length) }, (_, col) => {
                 const addr = XLSX.utils.encode_cell({ r: offset + 1, c: col });
                 return colorMap.get(addr) || null;
-            }).find(marker => isReviewStyleMarker(marker)) || null;
+            }).filter(marker => marker && isReviewStyleMarker(marker));
+            const rowMarker = mergeStyleMarkers(rowStyleMarker, ...rowCellMarkers) || null;
             const hasFillMarker = parseReviewMarkerColor(getMarkerFillColor(rowMarker));
             const hasFontMarker = parseReviewMarkerColor(getMarkerFontColor(rowMarker));
             const markerSource = getMarkerDisplaySource(rowMarker);
+            const markerSemantic = getReviewMarkerSemantics(rowMarker);
             const rowColor = getReviewMarkerColor(rowMarker);
             const hasMarker = Boolean(rowMarker && (hasFillMarker || hasFontMarker));
             if (hasMarker) {
@@ -12116,7 +12370,7 @@ function initGlossaryTool() {
                 else if (hasFontMarker) fontMarkerRows++;
             }
 
-            const { decision, reviewSource } = inferReviewDecision(row, columnIndexes, hasMarker, markerSource);
+            const { decision, reviewSource } = inferReviewDecision(row, columnIndexes, hasMarker, markerSource, markerSemantic);
             const sourceKey = normalizeTermKey(sourceText || referenceId || rowNumber);
             entries.push({
                 excelRowNumber,
@@ -12126,11 +12380,14 @@ function initGlossaryTool() {
                 termText,
                 originalTranslation,
                 finalTranslation,
+                statusText,
                 note,
+                rowText: row.map(cell => String(cell || '').trim()).filter(Boolean).join(' | '),
                 hasMarker,
                 rowColor,
                 fillColor: getMarkerFillColor(rowMarker),
                 fontColor: getMarkerFontColor(rowMarker),
+                markerSemantics: markerSemantic.semanticList || [],
                 markerSource,
                 decision,
                 reviewSource,
@@ -12150,8 +12407,10 @@ function initGlossaryTool() {
             termSourceLabel = '返稿行兜底生成';
         }
 
+        const aiReviewStats = await resolveGlossaryReviewEntriesWithAi(entries);
         const removedTermMap = new Map();
         const prunedTermMap = new Map();
+        const modifiedTermMap = new Map();
         const prunedReviewItems = [];
         const unmatchedEntries = [];
         entries.forEach(entry => {
@@ -12161,6 +12420,13 @@ function initGlossaryTool() {
                 unmatchedEntries.push({
                     ...entry,
                     unmatchedReason: sourceTerms.length > 0 ? '审核标记未匹配到术语表条目' : '返稿中没有可用术语来源'
+                });
+            }
+
+            if (entry.decision === 'keep' || entry.decision === 'revise') {
+                matches.forEach(match => {
+                    const currentTerm = modifiedTermMap.get(match.key) || match.term;
+                    modifiedTermMap.set(match.key, applyReviewEntryToTerm(currentTerm, entry, match.matchReason));
                 });
             }
 
@@ -12196,9 +12462,13 @@ function initGlossaryTool() {
 
         const finalTerms = sourceTerms
             .filter((term, index) => !removedTermMap.has(getReviewTermUniqueKey(term, index)))
-            .map((term, index) => prunedTermMap.get(getReviewTermUniqueKey(term, index)) || term);
+            .map((term, index) => {
+                const key = getReviewTermUniqueKey(term, index);
+                return prunedTermMap.get(key) || modifiedTermMap.get(key) || term;
+            });
         const removedTerms = [...removedTermMap.values()];
         const prunedTerms = [...prunedTermMap.values()];
+        const modifiedTerms = [...modifiedTermMap.values()];
         const ignoredTerms = [...removedTerms, ...prunedReviewItems];
         const keepCount = finalTerms.length;
         const ignoreCount = ignoredTerms.length;
@@ -12216,7 +12486,9 @@ function initGlossaryTool() {
             finalTermCount: finalTerms.length,
             removedTermCount: removedTerms.length,
             prunedTermCount: prunedTerms.length,
+            modifiedTermCount: modifiedTerms.length,
             unmatchedIgnoreCount: unmatchedEntries.length,
+            aiReviewStats,
             keepCount,
             ignoreCount,
             statusCount: entries.filter(entry => entry.decision).length,
@@ -12224,6 +12496,7 @@ function initGlossaryTool() {
             ignoredTerms,
             removedTerms,
             prunedTerms,
+            modifiedTerms,
             unmatchedEntries,
             keptTerms: finalTerms.map(term => ({
                 ...term,
@@ -12255,7 +12528,10 @@ function initGlossaryTool() {
                     result.fontMarkerRows ? `文字颜色 ${result.fontMarkerRows}` : '',
                     result.mixedMarkerRows ? `背景+文字 ${result.mixedMarkerRows}` : ''
                 ].filter(Boolean).join('，');
-                reviewStatus.textContent = `已识别 ${result.markerRows} 条颜色标记行${markerDetail ? `（${markerDetail}）` : ''}，来源 ${result.termSourceLabel || '术语表'}，最终 ${result.finalTermCount} 条，不采用 ${result.removedTermCount} 条${result.unmatchedIgnoreCount ? `，${result.unmatchedIgnoreCount} 条需人工确认` : ''}。`;
+                const aiDetail = result.aiReviewStats?.resolved
+                    ? `，AI 已理解 ${result.aiReviewStats.resolved} 条红色复杂备注`
+                    : (result.aiReviewStats?.skipped ? `，${result.aiReviewStats.skipped} 条红色复杂备注待人工确认` : '');
+                reviewStatus.textContent = `已识别 ${result.markerRows} 条颜色标记行${markerDetail ? `（${markerDetail}）` : ''}，来源 ${result.termSourceLabel || '术语表'}，最终 ${result.finalTermCount} 条，不采用 ${result.removedTermCount} 条，修正 ${result.modifiedTermCount || 0} 条${result.unmatchedIgnoreCount ? `，${result.unmatchedIgnoreCount} 条需人工确认` : ''}${aiDetail}。`;
                 reviewStatus.className = 'upload-status success';
             }
             updateGlossaryReviewState();
