@@ -4985,9 +4985,9 @@ body {
 }
 
 .api-profile-item {
-    grid-template-columns: 40px minmax(0, 1fr) auto !important;
-    align-items: center;
-    min-height: 118px;
+    grid-template-columns: 40px minmax(0, 1fr) !important;
+    align-items: start;
+    min-height: 0;
     background: #ffffff;
 }
 
@@ -4995,6 +4995,51 @@ body {
     width: 40px;
     height: 40px;
     border-radius: 12px;
+}
+
+.api-profile-item .api-profile-main {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+}
+
+.api-profile-item .api-profile-title {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-width: 0;
+    margin: 0;
+}
+
+.api-profile-item .api-profile-title strong {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.api-profile-item .api-profile-meta {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: normal;
+    line-height: 1.55;
+}
+
+.api-profile-item .api-profile-actions {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    width: 100%;
+    margin-top: 4px;
+}
+
+.api-profile-item .api-profile-actions .action-btn {
+    min-width: 0;
+    width: 100%;
+    min-height: 40px;
+    padding-inline: 8px;
 }
 
 .api-profile-tag.success {
