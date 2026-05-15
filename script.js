@@ -3328,9 +3328,19 @@ function initCommandPalette({ showTool }) {
         results.querySelectorAll('[data-command-index]').forEach(button => {
             button.addEventListener('mouseenter', () => {
                 activeIndex = Number(button.dataset.commandIndex) || 0;
-                renderResults();
+                updateActiveResult();
             });
-            button.addEventListener('click', () => runActiveCommand(Number(button.dataset.commandIndex) || 0));
+            button.addEventListener('pointerdown', (event) => {
+                event.preventDefault();
+                runActiveCommand(Number(button.dataset.commandIndex) || 0);
+            });
+        });
+    }
+
+    function updateActiveResult() {
+        results.querySelectorAll('[data-command-index]').forEach(button => {
+            const index = Number(button.dataset.commandIndex) || 0;
+            button.classList.toggle('active', index === activeIndex);
         });
     }
 
