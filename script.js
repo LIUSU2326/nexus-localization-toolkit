@@ -1182,8 +1182,8 @@ function colorToRgb(color) {
 function classifyReviewColor(color) {
     const rgb = colorToRgb(color);
     if (!rgb) return '';
-    if (rgb.g >= 95 && rgb.g > rgb.r * 1.25 && rgb.g > rgb.b * 1.2) return 'green';
-    if (rgb.r >= 150 && rgb.r > rgb.g * 1.25 && rgb.r > rgb.b * 1.2) return 'red';
+    if (rgb.g >= 70 && rgb.g > rgb.r * 1.08 && rgb.g > rgb.b * 1.15) return 'green';
+    if (rgb.r >= 80 && rgb.r > rgb.g * 1.25 && rgb.r > rgb.b * 1.15) return 'red';
     return '';
 }
 
@@ -12817,6 +12817,108 @@ function initGlossaryTool() {
         return { resolved, skipped: 0, failed };
     }
 
+    function getGlossaryReviewSheetCandidates(workbook) {
+        const preferredNames = ['修正后数据', '术语表', '审核结果', '修改明细', '原始数据', 'review', 'glossary'];
+        const normalizedSheets = new Map(workbook.SheetNames.map(name => [normalizeName(name), name]));
+        const preferred = preferredNames
+            .map(name => normalizedSheets.get(normalizeName(name)))
+            .filter(Boolean);
+        return [...new Set([...preferred, ...workbook.SheetNames])];
+    }
+
+    async function analyzeGlossaryReviewSheet(file, workbook, sheetName) {
+        const sheet = workbook.Sheets[sheetName];
+        if (!sheet) return null;
+
+        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+        if (!rows.length) return null;
+
+        const columnIndexes = inferReviewColumns(rows);
+        const colorMap = await extractWorksheetColorMapFromFile(file, workbook, sheetName);
+        const entries = [];
+        let markerRows = 0;
+        let fillMarkerRows = 0;
+        let fontMarkerRows = 0;
+        let mixedMarkerRows = 0;
+
+        const headerRow = rows[0] || [];
+        const dataRows = rows.slice(1);
+
+        dataRows.forEach((row, offset) => {
+            const excelRowNumber = offset + 2;
+            const referenceId = getReviewCell(row, columnIndexes.idIndex);
+            const rowNumber = getReviewCell(row, columnIndexes.rowIndex) || `行${excelRowNumber}`;
+            const sourceText = getReviewCell(row, columnIndexes.sourceIndex) || getReviewCell(row, columnIndexes.termIndex);
+            const termText = getReviewCell(row, columnIndexes.termIndex);
+            const originalTranslation = getReviewCell(row, columnIndexes.originalTranslationIndex);
+            const finalTranslation = getReviewCell(row, columnIndexes.finalTranslationIndex);
+            const statusText = getReviewCell(row, columnIndexes.statusIndex);
+            const note = getReviewCell(row, columnIndexes.noteIndex);
+
+            const rowStyleMarker = colorMap.get(`__ROW_${offset + 1}`);
+            const rowCellMarkers = Array.from({ length: Math.max(headerRow.length, row.length) }, (_, col) => {
+                const addr = XLSX.utils.encode_cell({ r: offset + 1, c: col });
+                return colorMap.get(addr) || null;
+            }).filter(marker => marker && isReviewStyleMarker(marker));
+            const rowMarker = mergeStyleMarkers(rowStyleMarker, ...rowCellMarkers) || null;
+            const hasFillMarker = parseReviewMarkerColor(getMarkerFillColor(rowMarker));
+            const hasFontMarker = parseReviewMarkerColor(getMarkerFontColor(rowMarker));
+            const markerSource = getMarkerDisplaySource(rowMarker);
+            const markerSemantic = getReviewMarkerSemantics(rowMarker);
+            const rowColor = getReviewMarkerColor(rowMarker);
+            const hasMarker = Boolean(rowMarker && (hasFillMarker || hasFontMarker));
+            if (hasMarker) {
+                markerRows++;
+                if (hasFillMarker && hasFontMarker) mixedMarkerRows++;
+                else if (hasFillMarker) fillMarkerRows++;
+                else if (hasFontMarker) fontMarkerRows++;
+            }
+
+            const { decision, reviewSource } = inferReviewDecision(row, columnIndexes, hasMarker, markerSource, markerSemantic);
+            const sourceKey = normalizeTermKey(sourceText || referenceId || rowNumber);
+            entries.push({
+                excelRowNumber,
+                referenceId,
+                rowNumber,
+                sourceText,
+                termText,
+                originalTranslation,
+                finalTranslation,
+                statusText,
+                note,
+                rowText: row.map(cell => String(cell || '').trim()).filter(Boolean).join(' | '),
+                hasMarker,
+                rowColor,
+                fillColor: getMarkerFillColor(rowMarker),
+                fontColor: getMarkerFontColor(rowMarker),
+                markerSemantics: markerSemantic.semanticList || [],
+                markerSource,
+                decision,
+                reviewSource,
+                sourceKey
+            });
+        });
+
+        return {
+            sheetName,
+            entries,
+            totalRows: dataRows.length,
+            markerRows,
+            fillMarkerRows,
+            fontMarkerRows,
+            mixedMarkerRows
+        };
+    }
+
+    function chooseGlossaryReviewSheetAnalysis(analyses) {
+        return analyses.filter(Boolean).reduce((best, item) => {
+            if (!best) return item;
+            if ((item.markerRows || 0) > (best.markerRows || 0)) return item;
+            if ((item.markerRows || 0) === (best.markerRows || 0) && (item.totalRows || 0) > (best.totalRows || 0)) return item;
+            return best;
+        }, null);
+    }
+
     async function analyzeGlossaryReviewFile(file) {
         const { workbook, fileName } = await readSpreadsheetWorkbook(file);
         const sheetName = findWorksheetByName(workbook.SheetNames, ['修正后数据', '审核结果', 'review']);
@@ -13012,6 +13114,150 @@ function initGlossaryTool() {
         return reviewResult;
     }
 
+    async function analyzeGlossaryReviewFileAutoSheet(file) {
+        const { workbook, fileName } = await readSpreadsheetWorkbook(file);
+        const candidates = getGlossaryReviewSheetCandidates(workbook);
+        const analyses = [];
+        for (const sheetName of candidates) {
+            const analysis = await analyzeGlossaryReviewSheet(file, workbook, sheetName);
+            if (analysis) analyses.push(analysis);
+        }
+        const selectedAnalysis = chooseGlossaryReviewSheetAnalysis(analyses);
+        if (!selectedAnalysis) {
+            throw new Error('未找到可用的审核工作表');
+        }
+
+        const {
+            sheetName,
+            entries,
+            totalRows,
+            markerRows,
+            fillMarkerRows,
+            fontMarkerRows,
+            mixedMarkerRows
+        } = selectedAnalysis;
+        const reviewSheetMarkerSummary = analyses.map(item => ({
+            sheetName: item.sheetName,
+            markerRows: item.markerRows || 0,
+            totalRows: item.totalRows || 0
+        }));
+
+        const glossarySheet = readReviewGlossarySheetTerms(workbook);
+        const currentSourceTerms = getCurrentReviewSourceTerms();
+        let sourceTerms = glossarySheet.terms.length > 0 ? glossarySheet.terms : currentSourceTerms;
+        let termSourceLabel = glossarySheet.terms.length > 0
+            ? `返稿工作簿：${glossarySheet.sheetName}`
+            : (currentSourceTerms.length > 0 ? '当前已打开术语表' : '返稿行兜底生成');
+
+        if (sourceTerms.length === 0) {
+            sourceTerms = buildFallbackReviewTerms(entries);
+            termSourceLabel = '返稿行兜底生成';
+        }
+
+        const aiReviewStats = await resolveGlossaryReviewEntriesWithAi(entries);
+        const removedTermMap = new Map();
+        const prunedTermMap = new Map();
+        const modifiedTermMap = new Map();
+        const prunedReviewItems = [];
+        const unmatchedEntries = [];
+        entries.forEach(entry => {
+            const matches = findMatchingReviewTerms(entry, sourceTerms);
+            entry.matchedTerms = matches.map(match => match.term.term || match.term.source || '').filter(Boolean);
+            if (entry.decision && matches.length === 0) {
+                unmatchedEntries.push({
+                    ...entry,
+                    unmatchedReason: sourceTerms.length > 0 ? '审核标记未匹配到术语表条目' : '返稿中没有可用术语来源'
+                });
+            }
+
+            if (entry.decision === 'keep' || entry.decision === 'revise') {
+                matches.forEach(match => {
+                    const currentTerm = modifiedTermMap.get(match.key) || match.term;
+                    modifiedTermMap.set(match.key, applyReviewEntryToTerm(currentTerm, entry, match.matchReason));
+                });
+            }
+
+            if (entry.decision !== 'ignore') return;
+            matches.forEach(match => {
+                const currentTerm = prunedTermMap.get(match.key) || match.term;
+                const scoped = pruneReviewTermScope(currentTerm, entry);
+                if (scoped.action === 'pruned') {
+                    prunedTermMap.set(match.key, scoped.term);
+                    prunedReviewItems.push({
+                        term: match.term,
+                        matchReason: `${match.matchReason}（仅排除该行/ID，其他行继续保留）`,
+                        reviewSource: entry.reviewSource || '人工标记',
+                        note: entry.note || '',
+                        referenceId: entry.referenceId || '',
+                        rowNumber: entry.rowNumber || ''
+                    });
+                    return;
+                }
+
+                prunedTermMap.delete(match.key);
+                if (removedTermMap.has(match.key)) return;
+                removedTermMap.set(match.key, {
+                    term: scoped.term,
+                    matchReason: match.matchReason,
+                    reviewSource: entry.reviewSource || '人工标记',
+                    note: entry.note || '',
+                    referenceId: entry.referenceId || match.term.referenceId || '',
+                    rowNumber: entry.rowNumber || match.term.referenceRows || ''
+                });
+            });
+        });
+
+        const finalTerms = sourceTerms
+            .filter((term, index) => !removedTermMap.has(getReviewTermUniqueKey(term, index)))
+            .map((term, index) => {
+                const key = getReviewTermUniqueKey(term, index);
+                return prunedTermMap.get(key) || modifiedTermMap.get(key) || term;
+            });
+        const removedTerms = [...removedTermMap.values()];
+        const prunedTerms = [...prunedTermMap.values()];
+        const modifiedTerms = [...modifiedTermMap.values()];
+        const ignoredTerms = [...removedTerms, ...prunedReviewItems];
+        const keepCount = finalTerms.length;
+        const ignoreCount = ignoredTerms.length;
+
+        return {
+            sourceFileName: fileName,
+            sheetName,
+            glossarySheetName: glossarySheet.sheetName,
+            termSourceLabel,
+            totalRows,
+            markerRows,
+            fillMarkerRows,
+            fontMarkerRows,
+            mixedMarkerRows,
+            reviewSheetMarkerSummary,
+            sourceTermCount: sourceTerms.length,
+            finalTermCount: finalTerms.length,
+            removedTermCount: removedTerms.length,
+            prunedTermCount: prunedTerms.length,
+            modifiedTermCount: modifiedTerms.length,
+            unmatchedIgnoreCount: unmatchedEntries.length,
+            aiReviewStats,
+            keepCount,
+            ignoreCount,
+            statusCount: entries.filter(entry => entry.decision).length,
+            entries,
+            ignoredTerms,
+            removedTerms,
+            prunedTerms,
+            modifiedTerms,
+            unmatchedEntries,
+            keptTerms: finalTerms.map(term => ({
+                ...term,
+                reviewDecision: 'keep'
+            })),
+            finalTerms: finalTerms.map(term => ({
+                ...term,
+                reviewDecision: 'keep'
+            }))
+        };
+    }
+
     async function importGlossaryReview(file) {
         glossaryReviewFile = file;
         if (reviewStatus) {
@@ -13021,7 +13267,7 @@ function initGlossaryTool() {
         updateGlossaryReviewState();
 
             try {
-                const result = await analyzeGlossaryReviewFile(file);
+                const result = await analyzeGlossaryReviewFileAutoSheet(file);
                 glossaryReviewResult = result;
                 if (reviewStatus) {
                 const markerDetail = [
@@ -13033,6 +13279,8 @@ function initGlossaryTool() {
                     ? `，AI 已理解 ${result.aiReviewStats.resolved} 条红色复杂备注`
                     : (result.aiReviewStats?.skipped ? `，${result.aiReviewStats.skipped} 条红色复杂备注待人工确认` : '');
                 reviewStatus.textContent = `已识别 ${result.markerRows} 条颜色标记行${markerDetail ? `（${markerDetail}）` : ''}，来源 ${result.termSourceLabel || '术语表'}，最终 ${result.finalTermCount} 条，不采用 ${result.removedTermCount} 条，修正 ${result.modifiedTermCount || 0} 条${result.unmatchedIgnoreCount ? `，${result.unmatchedIgnoreCount} 条需人工确认` : ''}${aiDetail}。`;
+                const sheetDetail = result.sheetName ? `，标色表：${result.sheetName}` : '';
+                reviewStatus.textContent = `已识别 ${result.markerRows} 条颜色标记行${markerDetail ? `（${markerDetail}）` : ''}${sheetDetail}，来源 ${result.termSourceLabel || '术语表'}，最终 ${result.finalTermCount} 条，不采用 ${result.removedTermCount} 条，修正 ${result.modifiedTermCount || 0} 条${result.unmatchedIgnoreCount ? `，${result.unmatchedIgnoreCount} 条需人工确认` : ''}${aiDetail}。`;
                 reviewStatus.className = 'upload-status success';
             }
             updateGlossaryReviewState();
