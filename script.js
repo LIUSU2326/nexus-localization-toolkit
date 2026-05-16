@@ -12826,9 +12826,9 @@ function initGlossaryTool() {
 
     function getGlossaryReviewSheetCandidates(workbook) {
         const preferredNames = ['修正后数据', '术语表', '审核结果', '修改明细', '原始数据', 'review', 'glossary'];
-        const normalizedSheets = new Map(workbook.SheetNames.map(name => [normalizeName(name), name]));
+        const normalizedSheets = new Map(workbook.SheetNames.map(name => [normalizeHeaderText(name), name]));
         const preferred = preferredNames
-            .map(name => normalizedSheets.get(normalizeName(name)))
+            .map(name => normalizedSheets.get(normalizeHeaderText(name)))
             .filter(Boolean);
         return [...new Set([...preferred, ...workbook.SheetNames])];
     }
