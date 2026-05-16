@@ -2711,10 +2711,12 @@ function initApiConfig() {
     toggleBtn.addEventListener('click', () => {
         if (configContent.style.display === 'none') {
             configContent.style.display = 'grid';
-            toggleBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6,9 12,15 18,9"/></svg>';
+            toggleBtn.textContent = '收起内容';
+            toggleBtn.setAttribute('aria-expanded', 'true');
         } else {
             configContent.style.display = 'none';
-            toggleBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18,15 12,9 6,15"/></svg>';
+            toggleBtn.textContent = '展开内容';
+            toggleBtn.setAttribute('aria-expanded', 'false');
         }
     });
     closeBtn?.addEventListener('click', revealWorkspaceInspector);
@@ -2846,6 +2848,11 @@ function revealApiConfigPanel() {
 
     if (content) {
         content.style.display = 'grid';
+    }
+    const toggleBtn = document.getElementById('toggleApiConfig');
+    if (toggleBtn) {
+        toggleBtn.textContent = '收起内容';
+        toggleBtn.setAttribute('aria-expanded', 'true');
     }
 
     if (apiKeyInput) {
