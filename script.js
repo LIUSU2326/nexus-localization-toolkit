@@ -1,4 +1,4 @@
-function escapeHtml(text) {
+﻿function escapeHtml(text) {
     if (!text) return '';
     const div = document.createElement('div');
     div.textContent = text;
@@ -181,7 +181,7 @@ function updateInspectorEstimate(files = []) {
     if (filesEl) filesEl.textContent = String(selectedFiles.length);
     if (sizeEl) sizeEl.textContent = selectedFiles.length ? formatFileSize(totalSize) : '-';
     if (timeEl) timeEl.textContent = getToolEstimateText(getActiveToolKey(), selectedFiles, totalSize);
-    if (badgeEl) badgeEl.textContent = selectedFiles.length ? '已估算' : '待上传';
+    if (badgeEl) badgeEl.textContent = selectedFiles.length ? '已估算' : '待选择';
 }
 
 function renderApiSummary() {
@@ -1831,9 +1831,11 @@ const PLATFORM_CONFIG = {
         { id: 'kimi-k2.6', name: 'Kimi K2.6' },
         { id: 'minimax-m2.7', name: 'MiniMax M2.7' }
     ]},
-    doubao: { name: '字节跳动豆包', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', models: [
+    doubao: { name: '字节跳动豆包', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', allowCustomModel: true, models: [
+        { id: 'doubao-seed-2-0-lite-260428', name: '豆包 Seed 2.0 Lite（260428，推荐）' },
+        { id: 'doubao-seed-2-0-lite', name: '豆包 Seed 2.0 Lite（短 ID，需控制台支持）' },
         { id: 'doubao-seed-2-0-pro-260215', name: '豆包 Seed 2.0 Pro' },
-        { id: 'doubao-seed-2-0-lite-260215', name: '豆包 Seed 2.0 Lite' },
+        { id: 'doubao-seed-2-0-lite-260215', name: '豆包 Seed 2.0 Lite（260215）' },
         { id: 'doubao-seed-2-0-mini-260215', name: '豆包 Seed 2.0 Mini' },
         { id: 'doubao-seed-1-8-251228', name: '豆包 Seed 1.8' },
         { id: 'doubao-seed-1-6-251015', name: '豆包 Seed 1.6' },
@@ -1951,6 +1953,26 @@ function platformAllowsCustomModel(provider) {
     return PLATFORM_CONFIG[provider]?.allowCustomModel === true;
 }
 
+const DOUBAO_MODEL_FALLBACK_ORDER = [
+    'doubao-seed-2-0-lite-260428',
+    'doubao-seed-2-0-lite',
+    'doubao-seed-2-0-pro-260215',
+    'doubao-seed-2-0-lite-260215',
+    'doubao-seed-2-0-mini-260215'
+];
+
+function isDoubaoModelAccessError(error) {
+    const text = `${error?.message || ''} ${error?.rawText || ''} ${JSON.stringify(error?.payload || '')}`;
+    return /has\s+not\s+activated\s+the\s+model|activate\s+the\s+model\s+service|model.*not.*activated|model.*not.*found|invalid.*model|unsupported.*model|not\s+support.*model|does\s+not\s+exist|do\s+not\s+have\s+access|no\s+access|permission|unauthorized\s+model|模型.*未开通|未开通.*模型|模型.*不存在|不支持.*模型/i.test(text);
+}
+
+function getDoubaoFallbackModels(currentModel) {
+    const current = String(currentModel || '').trim();
+    const configuredModels = (PLATFORM_CONFIG.doubao?.models || []).map(model => model.id).filter(Boolean);
+    return [...new Set([...DOUBAO_MODEL_FALLBACK_ORDER, ...configuredModels])]
+        .filter(model => model && model !== current);
+}
+
 function isPlatformDefaultName(name) {
     const normalizedName = String(name || '').trim();
     if (!normalizedName) return false;
@@ -1995,7 +2017,10 @@ function normalizeProviderBaseUrl(provider, baseUrl) {
 function normalizeApiProfile(profile) {
     const provider = PLATFORM_CONFIG[profile?.provider] ? profile.provider : 'deepseek';
     const platformModels = PLATFORM_CONFIG[provider]?.models || [];
-    const rawModel = String(profile?.model || '').trim();
+    let rawModel = String(profile?.model || '').trim();
+    if (provider === 'doubao' && rawModel === 'doubao-seed-2-0-lite') {
+        rawModel = 'doubao-seed-2-0-lite-260428';
+    }
     const model = rawModel && (platformAllowsCustomModel(provider) || platformModels.some(item => item.id === rawModel))
         ? rawModel
         : getDefaultModelForProvider(provider);
@@ -2677,21 +2702,42 @@ function initApiConfig() {
         }
         apiStatus.textContent = `正在测试通道：${profile.name}`;
         apiStatus.className = 'api-status';
+        let doubaoFallbackModel = '';
         try {
             await requestModelContent(profile, {
                 model: profile.model,
                 messages: [{ role: 'user', content: '不要推理，不要解释，请只回复 OK。' }],
                 temperature: 0,
                 max_tokens: getPreflightMaxTokens(profile, profile.model, 0)
-            }, null, API_PREFLIGHT_TIMEOUT_MS, { reasoningEffort: 'minimal' });
-            apiStatus.textContent = `通道测试通过：${profile.name}`;
+            }, null, API_PREFLIGHT_TIMEOUT_MS, {
+                reasoningEffort: 'minimal',
+                onDoubaoModelFallback: ({ toModel }) => {
+                    doubaoFallbackModel = toModel || '';
+                }
+            });
+            apiStatus.textContent = doubaoFallbackModel
+                ? `通道测试通过：${profile.name}（已自动改用可用模型 ${doubaoFallbackModel}，建议保存通道）`
+                : `通道测试通过：${profile.name}`;
             apiStatus.className = 'api-status success';
+            if (doubaoFallbackModel && profile.provider === 'doubao') {
+                profile.model = doubaoFallbackModel;
+                if (globalAiModelSelect && [...globalAiModelSelect.options].some(option => option.value === doubaoFallbackModel)) {
+                    globalAiModelSelect.value = doubaoFallbackModel;
+                    syncModelSelects(doubaoFallbackModel);
+                } else if (globalAiModelSelect && platformAllowsCustomModel('doubao')) {
+                    globalAiModelSelect.value = CUSTOM_MODEL_OPTION;
+                    customModelInput.value = doubaoFallbackModel;
+                    updateCustomModelVisibility();
+                }
+            }
             return true;
         } catch (error) {
             const familyHint = isGatewayProvider(profile.provider)
                 ? '请确认这个 Key 属于当前选择的 AIGoCode 模型族，并支持第三方调用。'
                 : profile.provider === 'xiaomi'
                     ? 'MiMo 使用官方 OpenAI-compatible 入口；如果仍失败，请确认已开通对应模型/插件服务，并检查 Key、模型权限和账户余额。'
+                : profile.provider === 'doubao'
+                    ? '豆包需要 Key + 正确模型 ID；请优先选择 doubao-seed-2-0-lite-260428，或填写火山方舟“API 接入”里显示的 ep-* 接入点 ID，Base URL 保持 https://ark.cn-beijing.volces.com/api/v3。'
                 : '请检查 API Key、Base URL、模型权限或账户余额。';
             apiStatus.textContent = `通道测试失败：${error.message || '接口返回异常'} ${familyHint}`;
             apiStatus.className = 'api-status error';
@@ -3073,6 +3119,20 @@ function createChatCompletionsBody(apiConfig, body) {
     if (Array.isArray(body.messages)) {
         payload.messages = normalizeChatMessagesForOpenAi(body);
     }
+    if (!payload.model) {
+        payload.model = apiConfig?.model || getDefaultModelForProvider(apiConfig?.provider);
+    }
+    if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
+        payload.messages = [{ role: 'user', content: 'OK' }];
+    }
+    if (apiConfig?.provider === 'doubao') {
+        payload.messages = normalizeChatMessagesForOpenAi({ messages: payload.messages });
+        if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
+            payload.messages = [{ role: 'user', content: 'OK' }];
+        }
+        delete payload.reasoning_effort;
+        delete payload.max_output_tokens;
+    }
     if (apiConfig?.provider !== 'openai' || payload.enable_prompt_cache === false) {
         delete payload.prompt_cache_key;
         delete payload.prompt_cache_retention;
@@ -3344,6 +3404,54 @@ function withoutPromptCaching(body = {}) {
     return copy;
 }
 
+async function tryDoubaoModelFallback(apiConfig, tunedBody, currentModel, signal, timeoutMs, responseConfig, originalError, options = {}) {
+    if (apiConfig?.provider !== 'doubao' || options.disableDoubaoModelFallback || !isDoubaoModelAccessError(originalError)) {
+        return null;
+    }
+
+    const fallbackModels = getDoubaoFallbackModels(currentModel);
+    const failedModels = [];
+    for (const fallbackModel of fallbackModels) {
+        try {
+            const fallbackConfig = { ...apiConfig, model: fallbackModel };
+            const fallbackBody = { ...tunedBody, model: fallbackModel };
+            const fallbackRequest = createProviderRequest(fallbackConfig, fallbackBody);
+            const fallbackResponse = await postChatCompletion(
+                fallbackConfig,
+                fallbackRequest.endpoint,
+                fallbackRequest.body,
+                signal,
+                timeoutMs,
+                fallbackRequest.headers
+            );
+            const content = await readModelResponseContent(fallbackResponse, { ...responseConfig, model: fallbackModel });
+            if (typeof options.onDoubaoModelFallback === 'function') {
+                options.onDoubaoModelFallback({
+                    fromModel: currentModel,
+                    toModel: fallbackModel
+                });
+            }
+            return { content, model: fallbackModel };
+        } catch (fallbackError) {
+            failedModels.push(`${fallbackModel}: ${fallbackError?.message || 'failed'}`);
+            if (!isDoubaoModelAccessError(fallbackError)) {
+                throw fallbackError;
+            }
+        }
+    }
+
+    const error = new Error(
+        `豆包当前模型 ${currentModel} 不可用，已尝试 ${fallbackModels.join('、')} 仍失败。` +
+        `请使用火山方舟控制台“API 调用/推理接入点”显示的模型 ID 或 ep-* 接入点 ID。原始错误：${originalError?.message || 'model unavailable'}`
+    );
+    error.status = originalError?.status;
+    error.payload = originalError?.payload;
+    error.rawText = [originalError?.rawText, failedModels.join(' | ')].filter(Boolean).join(' | ');
+    error.retryAfterMs = originalError?.retryAfterMs || 0;
+    error.isRateLimited = originalError?.isRateLimited || false;
+    throw error;
+}
+
 function createApiRequestError(message, status, payload, rawText) {
     const error = new Error(message);
     const code = payload?.error?.code ?? payload?.code;
@@ -3353,6 +3461,11 @@ function createApiRequestError(message, status, payload, rawText) {
     error.rawText = rawText;
     error.retryAfterMs = getApiRetryDelayMs(payload, rawText);
     error.isRateLimited = isApiRateLimitSignal(code, status || payloadStatus, message, rawText);
+    error.isTemporary = status === 500 ||
+        status === 502 ||
+        status === 503 ||
+        payloadStatus === 'UNAVAILABLE' ||
+        /high demand|UNAVAILABLE|overloaded|temporar|try again later/i.test(`${message || ''} ${rawText || ''}`);
     return error;
 }
 
@@ -3606,6 +3719,20 @@ async function requestModelContent(apiConfig, body, signal = null, timeoutMs = A
                 uncachedRequest.headers
             );
             return readModelResponseContent(uncachedResponse, responseConfig);
+        }
+
+        const doubaoFallback = await tryDoubaoModelFallback(
+            apiConfig,
+            tunedBody,
+            model,
+            signal,
+            timeoutMs,
+            responseConfig,
+            error,
+            options
+        );
+        if (doubaoFallback) {
+            return doubaoFallback.content;
         }
 
         const canRetryAsChat = apiConfig?.provider === 'aigocodeOpenai' &&
@@ -7542,6 +7669,16 @@ function initL10nCheckTool() {
     const downloadBtn = document.getElementById('l10nDownloadBtn');
     const downloadGlossaryBtn = document.getElementById('l10nDownloadGlossaryBtn');
     const generateFixesBtn = document.getElementById('l10nGenerateFixesBtn');
+    const exportTermReviewBtn = document.getElementById('l10nExportTermReviewBtn');
+    const importTermReviewInput = document.getElementById('l10nImportTermReviewInput');
+    const generateReviewedGlossaryBtn = document.getElementById('l10nGenerateReviewedGlossaryBtn');
+    const termReviewPanel = document.getElementById('l10nTermReviewPanel');
+    const termReviewCount = document.getElementById('l10nTermReviewCount');
+    const termReviewSummary = document.getElementById('l10nTermReviewSummary');
+    const termReviewBody = document.getElementById('l10nTermReviewBody');
+    const termReviewBulkAction = document.getElementById('l10nTermReviewBulkAction');
+    const applyTermReviewBulkBtn = document.getElementById('l10nApplyTermReviewBulkBtn');
+    const applyTermReviewBulkAllBtn = document.getElementById('l10nApplyTermReviewBulkAllBtn');
     const resetBtn = document.getElementById('l10nResetBtn');
     const confirmColumnBtn = document.getElementById('l10nConfirmColumnBtn');
     const progressSection = document.getElementById('l10nProgressSection');
@@ -7549,6 +7686,8 @@ function initL10nCheckTool() {
     const pauseBtn = document.getElementById('l10nPauseBtn');
     const resumeBtn = document.getElementById('l10nResumeBtn');
     const downloadProgressBtn = document.getElementById('l10nDownloadProgressBtn');
+    const retryFailedBatchesBtn = document.getElementById('l10nRetryFailedBatchesBtn');
+    const retryFailedBatchesResultBtn = document.getElementById('l10nRetryFailedBatchesResultBtn');
     const cancelBtn = document.getElementById('l10nCancelBtn');
     const projectSelect = document.getElementById('l10nProjectSelect');
     const glossaryList = document.getElementById('l10nGlossaryList');
@@ -7560,6 +7699,7 @@ function initL10nCheckTool() {
     const historyImportInput = document.getElementById('l10nHistoryImportInput');
     const historyImportStatus = document.getElementById('l10nHistoryImportStatus');
     const clearHistoryBtn = document.getElementById('l10nClearHistoryBtn');
+    const appendModelsBtn = document.getElementById('l10nAppendModelsBtn');
     const channelStatusPanel = document.getElementById('l10nChannelStatusPanel');
     const channelStatusGrid = document.getElementById('l10nChannelStatusGrid');
     const sheetSelectPanel = document.getElementById('l10nSheetSelectPanel');
@@ -7584,8 +7724,10 @@ function initL10nCheckTool() {
     let activeCheckRunId = null;
     let currentCheckAbortController = null;
     let isGeneratingL10nFixes = false;
+    let isRetryingInterruptedCheck = false;
     let importedHistoryState = createEmptyHistoryImportState();
     let channelProgressState = new Map();
+    let l10nTermReviewState = [];
 
     const L10N_PROGRESS_KEY = 'l10n_check_progress';
     const L10N_AUTO_SAVE_KEY = 'nexus_l10n_auto_save_enabled';
@@ -7639,7 +7781,10 @@ function initL10nCheckTool() {
     pauseBtn.addEventListener('click', pauseCheck);
     resumeBtn.addEventListener('click', resumeCheck);
     downloadProgressBtn.addEventListener('click', downloadCurrentCheckProgress);
+    retryFailedBatchesBtn?.addEventListener('click', retryInterruptedCheck);
+    retryFailedBatchesResultBtn?.addEventListener('click', retryInterruptedCheck);
     cancelBtn.addEventListener('click', cancelCheckTask);
+    appendModelsBtn?.addEventListener('click', startCheck);
     checkModeSelect.addEventListener('change', renderCheckModeExplainer);
     checkModeSelect.addEventListener('change', renderHistoryImportSummary);
     projectSelect.addEventListener('change', renderHistoryImportSummary);
@@ -7742,12 +7887,12 @@ function initL10nCheckTool() {
 
     function makeL10nAutoSaveFileName(kind) {
         const kindLabels = {
-            final: 'final',
-            partial: 'partial',
-            error: 'error',
-            cancelled: 'cancelled'
+            final: '最终报告',
+            partial: '阶段结果',
+            error: '异常中断',
+            cancelled: '取消前结果'
         };
-        return `${getL10nReportBaseName()}_l10n_${kindLabels[kind] || 'partial'}_${getL10nTimestamp()}.csv`;
+        return `${getL10nReportBaseName()}_本地化检测_${kindLabels[kind] || '阶段结果'}_${getL10nTimestamp()}.csv`;
     }
 
     function rowsToCsvContent(rows) {
@@ -7789,9 +7934,10 @@ function initL10nCheckTool() {
                 return savedPath;
             }
 
-            if (fallbackDownload) {
-                downloadCsvRows(rows, fileName);
-                return fileName;
+            if (fallbackDownload || (kind === 'final' && !isDesktopAutoSaveAvailable())) {
+                const xlsxName = fileName.replace(/\.csv$/i, '.xlsx');
+                downloadXlsxRows(rows, xlsxName);
+                return xlsxName;
             }
         } catch (error) {
             console.warn('L10n auto save failed:', error);
@@ -7873,23 +8019,36 @@ function initL10nCheckTool() {
         pauseBtn.style.display = 'inline-flex';
         resumeBtn.style.display = 'none';
         downloadProgressBtn.style.display = 'none';
+        if (retryFailedBatchesBtn) retryFailedBatchesBtn.style.display = 'none';
+        if (retryFailedBatchesResultBtn) retryFailedBatchesResultBtn.style.display = 'none';
         cancelBtn.style.display = 'inline-flex';
     }
 
-    function showL10nStoppedControls(canDownload = false) {
+    function showL10nStoppedControls(canDownload = false, canRetry = false) {
         isPaused = false;
         pauseBtn.style.display = 'none';
         resumeBtn.style.display = 'none';
         downloadProgressBtn.style.display = canDownload ? 'inline-flex' : 'none';
+        if (retryFailedBatchesBtn) {
+            retryFailedBatchesBtn.style.display = canRetry ? 'inline-flex' : 'none';
+            retryFailedBatchesBtn.disabled = !canRetry;
+            retryFailedBatchesBtn.textContent = '继续检测未完成部分';
+        }
+        if (retryFailedBatchesResultBtn) {
+            retryFailedBatchesResultBtn.style.display = canRetry ? 'inline-flex' : 'none';
+            retryFailedBatchesResultBtn.disabled = !canRetry;
+            retryFailedBatchesResultBtn.textContent = '继续检测未完成部分';
+        }
         cancelBtn.style.display = 'inline-flex';
     }
 
-    function showL10nFailurePanel(title, message) {
+    function showL10nFailurePanel(title, message, options = {}) {
+        const { canRetry = false } = options;
         const checkList = document.getElementById('l10nCheckList');
         progressSection.style.display = 'block';
         updateProgress(0, 0, 0);
         document.getElementById('l10nProgressInfo').textContent = message || title;
-        showL10nStoppedControls(checkResults.length > 0 || realtimeCheckResults.length > 0);
+        showL10nStoppedControls(checkResults.length > 0 || realtimeCheckResults.length > 0, canRetry);
 
         if (checkList) {
             checkList.innerHTML = `
@@ -7901,16 +8060,66 @@ function initL10nCheckTool() {
         }
     }
 
+    function promoteRealtimeResultsForRetry() {
+        if (realtimeCheckResults.length === 0) return;
+        const normalizedRealtime = normalizeSavedCheckResults(realtimeCheckResults);
+        if (getSelectedCheckMode() === 'strict') {
+            checkResults = normalizeSavedCheckResults([...checkResults, ...normalizedRealtime]);
+            realtimeCheckResults = [...checkResults];
+            return;
+        }
+        if (checkResults.length === 0) {
+            checkResults = normalizedRealtime;
+        }
+    }
+
+    async function retryInterruptedCheck() {
+        if (isRetryingInterruptedCheck) return;
+        if (activeCheckRunId || currentCheckAbortController) {
+            setStatus('warning', '检测仍在运行', '请等待当前请求结束，或先暂停/取消后再继续。');
+            return;
+        }
+        if (!sheetData || sourceColumn === null || targetColumn === null) {
+            setStatus('error', '无法继续检测', '当前文件或列选择信息不完整，请重新导入文件后再开始。');
+            return;
+        }
+        if (!ensureL10nProfilesConfigured('继续检测未完成部分')) {
+            return;
+        }
+
+        isRetryingInterruptedCheck = true;
+        if (retryFailedBatchesBtn) {
+            retryFailedBatchesBtn.disabled = true;
+            retryFailedBatchesBtn.textContent = '正在继续...';
+        }
+        if (retryFailedBatchesResultBtn) {
+            retryFailedBatchesResultBtn.disabled = true;
+            retryFailedBatchesResultBtn.textContent = '正在继续...';
+        }
+        promoteRealtimeResultsForRetry();
+        progressSection.style.display = 'none';
+        setStatus('processing', '正在继续检测', '会复用已完成结果，只补跑还没有完成的行或模型。');
+        try {
+            await startCheck({ skipSavedProgressPrompt: true });
+        } finally {
+            isRetryingInterruptedCheck = false;
+        }
+    }
+
     function getFriendlyApiErrorMessage(error, profile) {
         const message = String(error?.message || '接口返回异常').replace(/\s+/g, ' ').trim();
+        const profileLabel = profile?.name || (profile?.provider ? getPlatformName(profile.provider) : '模型通道');
+        if (isTemporaryL10nApiError(error)) {
+            return `${profileLabel}临时繁忙或限流：${message}。这通常不是 Key 填错，建议稍后点击“继续检测未完成部分”补跑。`;
+        }
         if (error?.isTimeout || error?.name === 'ApiTimeoutError' || /超时|timeout/i.test(message)) {
-            return `${profile?.name || getPlatformName(profile?.provider)} 响应超时：${message}。建议先降低该通道并发，或稍后重试；已产生的结果可以下载后导入继续。`;
+            return `${profileLabel}响应超时：${message}。建议先降低该通道并发，或稍后重试；已产生的结果可以下载后导入继续。`;
         }
         if (error?.isRateLimited) {
             const retryText = error.retryAfterMs > 0
                 ? `接口建议等待 ${Math.ceil(error.retryAfterMs / 1000)} 秒后重试`
                 : '建议降低并发或稍后重试';
-            return `${profile?.name || getPlatformName(profile?.provider)} 触发额度/频率限制：${message}。${retryText}。`;
+            return `${profileLabel}触发额度/频率限制：${message}。${retryText}。`;
         }
 
         return message;
@@ -8073,6 +8282,18 @@ function initL10nCheckTool() {
             .filter(issue => issue.issue || issue.corrected || issue.reason);
     }
 
+    function normalizeTerminologyReviewItem(item = {}) {
+        const source = String(item.source || item.term || item.sourceTerm || '').trim();
+        const currentTarget = String(item.currentTarget || item.existingTarget || item.glossaryTarget || item.target || '').trim();
+        const suggestedTarget = String(item.suggestedTarget || item.recommendedTarget || item.recommendation || item.corrected || '').trim();
+        const actualTarget = String(item.actualTarget || item.observedTarget || item.translationInText || '').trim();
+        const action = String(item.action || item.decision || '').trim();
+        const reason = String(item.reason || item.note || item.issue || '').trim();
+        const type = String(item.type || item.category || '').trim();
+        if (!source) return null;
+        return { source, currentTarget, suggestedTarget, actualTarget, action, reason, type };
+    }
+
     function summarizeIssues(issues, field) {
         const values = issues
             .map(issue => issue[field])
@@ -8124,6 +8345,25 @@ function initL10nCheckTool() {
             .join('；');
     }
 
+    function mergeTerminologyReviewItems(items = []) {
+        const map = new Map();
+        (items || []).forEach(item => {
+            const normalized = normalizeTerminologyReviewItem(item);
+            if (!normalized) return;
+            const key = `${normalized.source.toLowerCase()}|${normalized.currentTarget.toLowerCase()}|${normalized.suggestedTarget.toLowerCase()}`;
+            if (!map.has(key)) {
+                map.set(key, normalized);
+            } else {
+                const existing = map.get(key);
+                existing.reason = [existing.reason, normalized.reason].filter(Boolean).join('；');
+                existing.type = existing.type || normalized.type;
+                existing.action = existing.action || normalized.action;
+                existing.actualTarget = existing.actualTarget || normalized.actualTarget;
+            }
+        });
+        return [...map.values()];
+    }
+
     function normalizeCheckResultEntry(entry) {
         const issues = Array.isArray(entry?.issues)
             ? entry.issues.map(normalizeIssue)
@@ -8158,6 +8398,7 @@ function initL10nCheckTool() {
             fullFixedStatus: String(entry?.fullFixedStatus || entry?.fixStatus || ''),
             fullFixedError: String(entry?.fullFixedError || ''),
             issues,
+            terminologyReview: mergeTerminologyReviewItems(entry?.terminologyReview || []),
             reviews: Array.isArray(entry?.reviews) ? entry.reviews : [],
             issueVotes: Number(entry?.issueVotes || 0),
             reviewTotal: Number(entry?.reviewTotal || 0),
@@ -8206,7 +8447,8 @@ function initL10nCheckTool() {
             fullFixedConfidence: '',
             fullFixedStatus: '',
             fullFixedError: '',
-            issues
+            issues,
+            terminologyReview: mergeTerminologyReviewItems(normalizedResult.terminologyReview || [])
         };
     }
 
@@ -8246,6 +8488,30 @@ function initL10nCheckTool() {
         };
     }
 
+    function createModelReviewFromEntry(entry) {
+        return {
+            profileId: entry.profileId || '',
+            profileName: entry.profileName || '',
+            provider: entry.provider || '',
+            model: entry.model || '',
+            modelLabel: entry.modelLabel || '',
+            status: entry.status || L10N_STATUS_PASS,
+            issue: entry.issue || '',
+            corrected: entry.corrected || '',
+            reason: entry.reason || (entry.status === L10N_STATUS_PASS ? '通过' : ''),
+            issueType: entry.issueType || '',
+            severity: entry.severity || '',
+            detectionSource: entry.detectionSource || '',
+            evidence: entry.evidence || '',
+            ruleIds: entry.ruleIds || '',
+            issues: Array.isArray(entry.issues) ? entry.issues : [],
+            terminologyReview: mergeTerminologyReviewItems(entry.terminologyReview || []),
+            historyReused: Boolean(entry.historyReused),
+            historyMatchType: entry.historyMatchType || '',
+            historyFileName: entry.historyFileName || ''
+        };
+    }
+
     function summarizeReviewDetails(reviews) {
         return reviews.map(review => {
             const resultText = review.status === L10N_STATUS_ISSUE
@@ -8268,6 +8534,7 @@ function initL10nCheckTool() {
         const reviewReason = summarizeReviewDetails(reviews);
         const corrected = [...new Set(issueReviews.map(review => review.corrected).filter(Boolean))].join('；');
         const issues = issueReviews.flatMap(review => review.issues || []);
+        const terminologyReview = mergeTerminologyReviewItems(reviews.flatMap(review => review.terminologyReview || []));
 
         return {
             rowIndex: task.rowIndex,
@@ -8298,6 +8565,7 @@ function initL10nCheckTool() {
             fullFixedStatus: '',
             fullFixedError: '',
             issues,
+            terminologyReview,
             reviews,
             issueVotes,
             reviewTotal: reviews.length,
@@ -9097,6 +9365,133 @@ function initL10nCheckTool() {
         return tasks;
     }
 
+    function getTaskByRowIndex(rowIndex) {
+        return buildCurrentCheckTasks(new Set()).find(task => task.rowIndex === rowIndex) || null;
+    }
+
+    function normalizeReviewIdentityKey(value) {
+        return String(value || '').trim().toLowerCase();
+    }
+
+    function getProfileReviewKey(profile) {
+        const provider = normalizeReviewIdentityKey(profile?.provider);
+        const model = normalizeReviewIdentityKey(profile?.model);
+        if (provider || model) return `${provider}:${model}`;
+        return normalizeReviewIdentityKey(profile?.id || profile?.name || profile?.modelLabel);
+    }
+
+    function getReviewProfileKey(review) {
+        const provider = normalizeReviewIdentityKey(review?.provider);
+        const model = normalizeReviewIdentityKey(review?.model);
+        if (provider || model) return `${provider}:${model}`;
+        return normalizeReviewIdentityKey(review?.profileId || review?.profileName || review?.modelLabel);
+    }
+
+    function mergeModelReviews(existingReviews = [], newReviews = []) {
+        const merged = [];
+        const indexByKey = new Map();
+        [...existingReviews, ...newReviews].forEach(review => {
+            if (!review) return;
+            const key = getReviewProfileKey(review);
+            if (!key) {
+                merged.push(review);
+                return;
+            }
+            if (indexByKey.has(key)) {
+                merged[indexByKey.get(key)] = review;
+            } else {
+                indexByKey.set(key, merged.length);
+                merged.push(review);
+            }
+        });
+        return merged;
+    }
+
+    function getExistingStrictReviewState(results = checkResults) {
+        const state = new Map();
+        (results || []).forEach(result => {
+            if (!Number.isInteger(result?.rowIndex)) return;
+            const task = getTaskByRowIndex(result.rowIndex);
+            if (!task) return;
+            const existingReviews = Array.isArray(result.reviews) && result.reviews.length > 0
+                ? result.reviews.map(createModelReviewFromStoredReview)
+                : (result.provider === 'local' || result.detectionSource === '本地规则' ? [] : [createModelReviewFromEntry(result)]);
+            const current = state.get(result.rowIndex);
+            state.set(result.rowIndex, {
+                task,
+                reviews: mergeModelReviews(current?.reviews || [], existingReviews),
+                previousResult: current?.previousResult || result
+            });
+        });
+        return state;
+    }
+
+    function hasReusableStrictReviewState(results = checkResults) {
+        return (results || []).some(result => {
+            if (!Number.isInteger(result?.rowIndex)) return false;
+            if (Array.isArray(result.reviews) && result.reviews.length > 0) return true;
+            return Boolean(result.provider && result.model && result.profileId);
+        });
+    }
+
+    function createModelReviewFromStoredReview(review) {
+        return {
+            profileId: review.profileId || '',
+            profileName: review.profileName || '',
+            provider: review.provider || '',
+            model: review.model || '',
+            modelLabel: review.modelLabel || '',
+            status: review.status || L10N_STATUS_PASS,
+            issue: review.issue || '',
+            corrected: review.corrected || '',
+            reason: review.reason || (review.status === L10N_STATUS_PASS ? '通过' : ''),
+            issueType: review.issueType || '',
+            severity: review.severity || '',
+            detectionSource: review.detectionSource || '',
+            evidence: review.evidence || '',
+            ruleIds: review.ruleIds || '',
+            issues: Array.isArray(review.issues) ? review.issues : [],
+            terminologyReview: mergeTerminologyReviewItems(review.terminologyReview || []),
+            historyReused: Boolean(review.historyReused),
+            historyMatchType: review.historyMatchType || '',
+            historyFileName: review.historyFileName || ''
+        };
+    }
+
+    function getMissingStrictProfilesForRow(rowState, profiles) {
+        const completedKeys = new Set((rowState?.reviews || []).map(getReviewProfileKey).filter(Boolean));
+        return profiles.filter(profile => !completedKeys.has(getProfileReviewKey(profile)));
+    }
+
+    function getStrictAppendSummary(rowStates, profiles) {
+        let reusableRows = 0;
+        let missingChecks = 0;
+        const pendingProfileKeys = new Set();
+        rowStates.forEach(rowState => {
+            const missing = getMissingStrictProfilesForRow(rowState, profiles);
+            if (missing.length < profiles.length) reusableRows++;
+            missingChecks += missing.length;
+            missing.forEach(profile => pendingProfileKeys.add(getProfileReviewKey(profile)));
+        });
+        const pendingProfiles = profiles.filter(profile => pendingProfileKeys.has(getProfileReviewKey(profile)));
+        return { reusableRows, missingChecks, pendingProfiles };
+    }
+
+    function carryForwardFullFixIfStillValid(nextResult, previousResult) {
+        if (!previousResult?.fullFixedTranslation) return nextResult;
+        const beforeIssue = previousResult.status === L10N_STATUS_ISSUE;
+        const afterIssue = nextResult.status === L10N_STATUS_ISSUE;
+        if (!beforeIssue || !afterIssue) return nextResult;
+        return {
+            ...nextResult,
+            fullFixedTranslation: previousResult.fullFixedTranslation || '',
+            fullFixedReason: previousResult.fullFixedReason || '',
+            fullFixedConfidence: previousResult.fullFixedConfidence || '',
+            fullFixedStatus: previousResult.fullFixedStatus || '',
+            fullFixedError: previousResult.fullFixedError || ''
+        };
+    }
+
     function renderHistoryImportSummary() {
         if (!historyImportStatus) return;
 
@@ -9551,27 +9946,10 @@ function initL10nCheckTool() {
 
         downloadCsvRows(
             buildWindowReportRows(resultsToDownload),
-            `${originalFileName || 'l10n_check'}_current_check_results.csv`
+            `${getL10nReportBaseName()}_本地化检测_当前结果.csv`
         );
         setStatus('success', '当前检测结果已下载', `已导出 ${resultsToDownload.length} 条实时检测结果`);
     }
-
-    fileInput.addEventListener('click', (e) => e.stopPropagation());
-    uploadArea.addEventListener('click', () => fileInput.click());
-    bindUploadDrop(uploadArea, fileInput, (file, files = []) => handleL10nFiles(files.length > 0 ? files : [file]));
-
-    fileInput.addEventListener('change', (e) => {
-        if (e.target.files.length > 0) {
-            handleL10nFiles([...e.target.files]);
-        }
-    });
-
-    confirmColumnBtn.addEventListener('click', confirmColumnSelection);
-    checkBtn.addEventListener('click', startCheck);
-    downloadBtn.addEventListener('click', downloadReport);
-    downloadGlossaryBtn.addEventListener('click', downloadGlossary);
-    generateFixesBtn?.addEventListener('click', generateFullFixTranslations);
-    resetBtn.addEventListener('click', resetTool);
 
     async function readL10nSourcesFromFile(file, startIndex = 0) {
         const extension = file.name.split('.').pop().toLowerCase();
@@ -10067,7 +10445,8 @@ function initL10nCheckTool() {
         }
     }
 
-    async function startCheck() {
+    async function startCheck(options = {}) {
+        const skipSavedProgressPrompt = Boolean(options?.skipSavedProgressPrompt);
         if (activeCheckRunId && progressSection.style.display !== 'none') {
             setStatus('warning', '已有检测任务正在运行', '请先点击“取消任务”停止当前任务，或点击“暂停”保存当前进度。');
             return;
@@ -10107,13 +10486,20 @@ function initL10nCheckTool() {
 
         const totalRows = sheetData.length - 1;
 
-        checkResults = [];
-        realtimeCheckResults = [];
-        glossaryData = [];
+        const previousStrictResults = getSelectedCheckMode() === 'strict'
+            ? normalizeSavedCheckResults(checkResults)
+            : [];
+        const shouldAppendStrictResults = hasReusableStrictReviewState(previousStrictResults);
+        const previousStrictRowIndexes = new Set(previousStrictResults
+            .filter(result => Number.isInteger(result.rowIndex))
+            .map(result => result.rowIndex));
+        checkResults = shouldAppendStrictResults ? previousStrictResults : [];
+        realtimeCheckResults = shouldAppendStrictResults ? [...previousStrictResults] : [];
+        glossaryData = shouldAppendStrictResults ? [...glossaryData] : [];
         let checkedCount = 0;
 
         const savedProgress = l10nSources.length > 1 ? null : loadL10nProgress();
-        if (savedProgress && savedProgress.fileName === originalFileName) {
+        if (!shouldAppendStrictResults && savedProgress && savedProgress.fileName === originalFileName && !skipSavedProgressPrompt) {
             const shouldResume = confirm(`检测到未完成的任务，已检测 ${savedProgress.checkedCount} 条文本。是否继续？`);
             if (shouldResume) {
                 checkResults = normalizeSavedCheckResults(savedProgress.checkResults || savedProgress.results);
@@ -10130,6 +10516,14 @@ function initL10nCheckTool() {
             } else {
                 clearL10nProgress();
             }
+        } else if (!shouldAppendStrictResults && savedProgress && savedProgress.fileName === originalFileName && skipSavedProgressPrompt) {
+            checkResults = normalizeSavedCheckResults(savedProgress.checkResults || savedProgress.results);
+            realtimeCheckResults = normalizeSavedCheckResults(savedProgress.realtimeCheckResults || savedProgress.liveResults || []);
+            if (realtimeCheckResults.length === 0 && checkResults.length > 0) {
+                realtimeCheckResults = [...checkResults];
+            }
+            glossaryData = savedProgress.glossaryData || glossaryData;
+            checkedCount = checkResults.length || savedProgress.checkedCount;
         }
 
         activeProfiles = getSelectedL10nProfiles();
@@ -10159,20 +10553,26 @@ function initL10nCheckTool() {
         initChannelProgress(activeProfiles);
 
         let keepFailurePanel = false;
+        let keepFailureCanRetry = false;
 
         try {
             const checkCache = loadL10nCheckCache();
-            const completedRows = new Set(checkResults
+            const completedRows = getSelectedCheckMode() === 'strict'
+                ? new Set()
+                : new Set(checkResults
                 .filter(result => Number.isInteger(result.rowIndex))
                 .map(result => result.rowIndex));
-            let completedCount = checkResults.length;
-            checkedCount = checkResults.length;
+            let completedCount = getSelectedCheckMode() === 'strict' ? 0 : checkResults.length;
+            checkedCount = getSelectedCheckMode() === 'strict' ? 0 : checkResults.length;
             let liveIssueCount = getIssueResultCount();
             let checkTasks = buildCurrentCheckTasks(completedRows);
             const aiCheckTasks = [];
             const localResolvedEntries = [];
 
             checkTasks.forEach(task => {
+                if (checkMode === 'strict' && shouldAppendStrictResults && previousStrictRowIndexes.has(task.rowIndex)) {
+                    return;
+                }
                 const localIssues = buildLocalRuleIssues(task, activeGlossaryTerms);
                 task.localRuleIssues = localIssues;
                 if (shouldResolveByLocalRules(localIssues)) {
@@ -10200,11 +10600,13 @@ function initL10nCheckTool() {
                 );
             }
 
-            let totalTasks = checkMode === 'strict'
+            let totalTasks = checkMode === 'strict' && shouldAppendStrictResults
+                ? completedCount
+                : checkMode === 'strict'
                 ? completedCount + (checkTasks.length * activeProfiles.length)
                 : completedCount + checkTasks.length;
 
-            if (totalTasks === 0) {
+            if (totalTasks === 0 && !(checkMode === 'strict' && shouldAppendStrictResults)) {
                 updateProgress(checkedCount, checkedCount, 100);
                 const summary = displayResults(checkedCount, activeGlossaryTerms, activeProfiles);
                 const savedPath = await autoSaveL10nReport('final', checkResults);
@@ -10221,12 +10623,18 @@ function initL10nCheckTool() {
                 return;
             }
 
-            updateProgress(completedCount, totalTasks, Math.round((completedCount / totalTasks) * 100));
+            updateProgress(
+                completedCount,
+                totalTasks,
+                totalTasks > 0 ? Math.round((completedCount / totalTasks) * 100) : 100
+            );
             document.getElementById('l10nProgressInfo').textContent =
                 `${modeConfig.label}已启用：${estimateTokenSaving(modeConfig, checkTasks.length, activeProfiles)}`;
 
-            await preflightL10nProfiles(activeProfiles, runSignal);
-            throwIfCheckCancelled(runId);
+            if (checkMode !== 'strict') {
+                await preflightL10nProfiles(activeProfiles, runSignal);
+                throwIfCheckCancelled(runId);
+            }
             setStatus(
                 'processing',
                 '正在检测文本...',
@@ -10247,29 +10655,6 @@ function initL10nCheckTool() {
                 }
                 realtimeCheckResults.push(normalizeCheckResultEntry(result));
                 addCheckItem(checkList, result);
-            }
-
-            function createModelReviewFromEntry(entry) {
-                return {
-                    profileId: entry.profileId,
-                    profileName: entry.profileName,
-                    provider: entry.provider,
-                    model: entry.model,
-                    modelLabel: entry.modelLabel,
-                    status: entry.status,
-                    issue: entry.issue,
-                    corrected: entry.corrected,
-                    reason: entry.reason || (entry.status === L10N_STATUS_PASS ? '通过' : ''),
-                    issueType: entry.issueType || '',
-                    severity: entry.severity || '',
-                    detectionSource: entry.detectionSource || '',
-                    evidence: entry.evidence || '',
-                    ruleIds: entry.ruleIds || '',
-                    issues: entry.issues || [],
-                    historyReused: Boolean(entry.historyReused),
-                    historyMatchType: entry.historyMatchType || '',
-                    historyFileName: entry.historyFileName || ''
-                };
             }
 
             async function processProfileBatch(batch, profile) {
@@ -10518,28 +10903,68 @@ function initL10nCheckTool() {
                     }
                 });
             } else if (checkMode === 'strict') {
-                const reviewsByRow = new Map(checkTasks.map(task => [task.rowIndex, { task, reviews: [] }]));
+                const strictLocalResults = checkResults.filter(result =>
+                    result?.provider === 'local' || result?.detectionSource === '本地规则'
+                );
+                const strictLocalRowIndexes = new Set(strictLocalResults
+                    .filter(result => Number.isInteger(result.rowIndex))
+                    .map(result => result.rowIndex));
+                const allStrictTasks = buildCurrentCheckTasks(strictLocalRowIndexes);
+                const reviewsByRow = getExistingStrictReviewState(checkResults);
+                strictLocalRowIndexes.forEach(rowIndex => reviewsByRow.delete(rowIndex));
+                allStrictTasks.forEach(task => {
+                    if (!reviewsByRow.has(task.rowIndex)) {
+                        reviewsByRow.set(task.rowIndex, { task, reviews: [] });
+                    }
+                });
                 const jobsByProfile = new Map(activeProfiles.map(profile => [profile.id, []]));
-                checkTasks.forEach(task => {
-                    activeProfiles.forEach(profile => {
-                        jobsByProfile.get(profile.id)?.push(task);
+                reviewsByRow.forEach(rowState => {
+                    getMissingStrictProfilesForRow(rowState, activeProfiles).forEach(profile => {
+                        rowState.task.profile = profile;
+                        jobsByProfile.get(profile.id)?.push(rowState.task);
                     });
                 });
+                const appendSummary = getStrictAppendSummary(reviewsByRow, activeProfiles);
+                totalTasks = completedCount + appendSummary.missingChecks;
+                if (appendSummary.reusableRows > 0) {
+                    document.getElementById('l10nProgressInfo').textContent =
+                        `严格模式追加检测：已复用 ${appendSummary.reusableRows} 行已有模型结果，待补齐 ${appendSummary.missingChecks} 次模型检测。`;
+                }
+                updateProgress(completedCount, totalTasks, totalTasks > 0 ? Math.round((completedCount / totalTasks) * 100) : 100);
 
-                await runProfileBatchQueues(jobsByProfile, async (entries, batch, profile) => {
-                    entries.forEach(entry => {
-                        reviewsByRow.get(entry.rowIndex)?.reviews.push(createModelReviewFromEntry(entry));
-                        addRealtimeCheckItem(entry, true);
-                        completedCount++;
+                if (appendSummary.missingChecks > 0) {
+                    await preflightL10nProfiles(appendSummary.pendingProfiles, runSignal);
+                    throwIfCheckCancelled(runId);
+                    await runProfileBatchQueues(jobsByProfile, async (entries, batch, profile) => {
+                        entries.forEach(entry => {
+                            const rowState = reviewsByRow.get(entry.rowIndex);
+                            if (rowState) {
+                                rowState.reviews = mergeModelReviews(rowState.reviews, [createModelReviewFromEntry(entry)]);
+                            }
+                            addRealtimeCheckItem(entry, true);
+                            completedCount++;
+                        });
+                        updateCheckProgress(profile);
                     });
-                    updateCheckProgress(profile);
-                });
+                }
 
                 throwIfCheckCancelled(runId);
+                checkResults = [];
+                checkedCount = 0;
+                strictLocalResults
+                    .sort((a, b) => a.rowIndex - b.rowIndex)
+                    .forEach(result => {
+                        checkResults.push(result);
+                        addToGlossary(result.source, result.target);
+                        checkedCount++;
+                        addCheckItem(checkList, result);
+                    });
                 [...reviewsByRow.values()]
                     .sort((a, b) => a.task.rowIndex - b.task.rowIndex)
-                    .forEach(({ task, reviews }) => {
-                        const checkEntry = createReviewedCheckResultEntry(task, reviews, 'review', activeProfiles);
+                    .forEach(({ task, reviews, previousResult }) => {
+                        if (!reviews.length) return;
+                        let checkEntry = createReviewedCheckResultEntry(task, reviews, 'review', activeProfiles);
+                        checkEntry = carryForwardFullFixIfStillValid(checkEntry, previousResult);
                         checkResults.push(checkEntry);
                         addToGlossary(task.sourceText, task.targetText);
                         checkedCount++;
@@ -10658,19 +11083,30 @@ function initL10nCheckTool() {
                     });
                     savedPath = await autoSaveL10nReport('error', progressResults);
                 }
+                const isTemporaryChannelError = isTemporaryL10nApiError(error) || error?.isTimeout || /超时|timeout/i.test(error?.message || '');
+                if (isTemporaryChannelError) {
+                    promoteRealtimeResultsForRetry();
+                }
+                const hasRetryableProgress = isTemporaryChannelError && (checkResults.length > 0 || realtimeCheckResults.length > 0);
                 const isChannelError = error.message &&
                     (error.message.includes('检测通道不可用') || error.message.includes('API 请求失败') || error.message.includes('超时'));
-                keepFailurePanel = isChannelError;
+                const shouldShowRecoverableFailure = isChannelError || hasRetryableProgress;
+                keepFailurePanel = shouldShowRecoverableFailure;
+                keepFailureCanRetry = hasRetryableProgress;
                 const savedText = savedPath ? `；已自动保存当前结果：${savedPath}` : '';
+                const userErrorTitle = isTemporaryChannelError ? '模型临时繁忙，任务已保留' : (isChannelError ? '检测通道不可用' : '检测失败');
+                const userErrorDetail = isTemporaryChannelError
+                    ? `${getFriendlyApiErrorMessage(error, null)}${savedText}`
+                    : `${error.message || '请检查 API Key、Base URL、模型权限或账户余额'}${savedText}`;
                 setStatus(
-                    'error',
-                    isChannelError ? '检测通道不可用' : '检测失败',
-                    `${error.message || '请检查 API Key、Base URL、模型权限或账户余额'}${savedText}`,
-                    isChannelError ? revealApiConfigPanel : null,
-                    '去检查 API 配置'
+                    isTemporaryChannelError ? 'warning' : 'error',
+                    userErrorTitle,
+                    userErrorDetail,
+                    isChannelError && !isTemporaryChannelError ? revealApiConfigPanel : null,
+                    isChannelError && !isTemporaryChannelError ? '去检查 API 配置' : ''
                 );
-                if (isChannelError) {
-                    showL10nFailurePanel('检测通道不可用', `${error.message || '请检查 API Key、Base URL、模型权限或账户余额'}${savedText}`);
+                if (shouldShowRecoverableFailure) {
+                    showL10nFailurePanel(userErrorTitle, userErrorDetail, { canRetry: hasRetryableProgress });
                 }
             }
             if (!keepFailurePanel) {
@@ -10684,7 +11120,8 @@ function initL10nCheckTool() {
                 activeCheckRunId = null;
                 isCheckCancelled = false;
                 if (keepFailurePanel) {
-                    showL10nStoppedControls(checkResults.length > 0 || realtimeCheckResults.length > 0);
+                    const canDownload = checkResults.length > 0 || realtimeCheckResults.length > 0;
+                    showL10nStoppedControls(canDownload, keepFailureCanRetry);
                 } else {
                     resetL10nProgressControls();
                 }
@@ -10874,13 +11311,30 @@ ${projectRules}
 - 只有明确质量问题才判异常，不要为了风格偏好强行报错
 - 通过的行必须极简返回，不要输出 reason、category、corrected、explanation 等字段，避免浪费 token
 
-只返回 JSON，不要解释。通过行只返回 {"id": 行id, "ok": true}；异常行才返回 issues。格式：
+术语表复核候选：
+- 检测时除了判定译文是否异常，还要顺手观察“术语表本身是否需要人工确认”。
+- 如果原文中出现明显应固定的游戏术语，但当前术语表没有收录，可以在 terminologyReview 里提出 add-term 候选。
+- 如果术语表已有译法，但实际译文看起来比术语表译法更自然/更符合上下文，或术语表译法疑似过时/错误，可以在 terminologyReview 里提出 update-translation 候选。
+- terminologyReview 只写短术语或专名，不要写整句；如果只是普通句子问题，放到 issues，不要放到 terminologyReview。
+
+只返回 JSON，不要解释。通过行只返回 {"id": 行id, "ok": true}；异常行才返回 issues；有术语表候选时可额外返回 terminologyReview。格式：
 {
   "results": [
     { "id": 1, "ok": true },
     {
       "id": 2,
       "ok": false,
+      "terminologyReview": [
+        {
+          "source": "中文术语",
+          "currentTarget": "术语表当前译法；缺失则空",
+          "suggestedTarget": "建议译法",
+          "actualTarget": "本句实际译法",
+          "action": "update-translation|add-term|keep-existing|sentence-exception|pending",
+          "reason": "为什么需要人工确认",
+          "type": "角色/NPC|道具|系统/UI|玩法|活动|其他"
+        }
+      ],
       "issues": [
         {
           "category": "术语表限制|游戏项目翻译要求|游戏翻译基本规范|病句/拼写错误|其他",
@@ -10895,7 +11349,7 @@ ${projectRules}
   ]
 }
 
-没有问题的行不要写原因，只能返回 {"id": 行id, "ok": true}。`;
+没有问题且没有术语候选的行不要写原因，只能返回 {"id": 行id, "ok": true}。`;
         const userPrompt = `相关术语表（方向固定为：中文原文术语 -> 英文指定译法）：
 ${buildBatchGlossaryPromptSection(relevantTerms)}
 
@@ -10927,7 +11381,8 @@ ${JSON.stringify(rows)}
             const id = Number(row?.id ?? row?.row ?? row?.rowIndex);
             if (!Number.isFinite(id)) return;
             resultMap.set(id, {
-                issues: normalizeIssues(row)
+                issues: normalizeIssues(row),
+                terminologyReview: mergeTerminologyReviewItems(row?.terminologyReview || row?.termsReview || row?.termReview || [])
             });
         });
 
@@ -10946,6 +11401,7 @@ ${JSON.stringify(rows)}
             error?.status === 500 ||
             error?.status === 502 ||
             error?.status === 503 ||
+            error?.isTemporary ||
             error?.isRateLimited ||
             error?.isEmptyEndTurn ||
             /接口返回为空|empty response|finish_reason:\s*end_turn|stop_reason:\s*end_turn/i.test(text) ||
@@ -11162,7 +11618,20 @@ ${JSON.stringify(compactTasks)}
                 }
                 if (attempt === maxRetries - 1) {
                     const profileName = apiConfig.name || getPlatformName(apiConfig.provider);
-                    throw new Error(`${profileName} API 请求失败：${error.message || '接口返回异常'}`);
+                    const wrappedError = new Error(`${profileName} API 请求失败：${error.message || '接口返回异常'}`);
+                    Object.assign(wrappedError, {
+                        status: error.status,
+                        payload: error.payload,
+                        rawText: error.rawText,
+                        retryAfterMs: error.retryAfterMs,
+                        isRateLimited: error.isRateLimited,
+                        isTemporary: error.isTemporary,
+                        isTimeout: error.isTimeout,
+                        isOutputTruncated: error.isOutputTruncated,
+                        isEmptyEndTurn: error.isEmptyEndTurn,
+                        cause: error
+                    });
+                    throw wrappedError;
                 }
                 const retryDelay = error.retryAfterMs > 0
                     ? Math.min(error.retryAfterMs, 60000)
@@ -11286,15 +11755,6 @@ ${JSON.stringify(compactTasks)}
             }
 
             displayResults(checkResults.length, activeGlossaryTerms, activeProfiles);
-            saveL10nProgress({
-                fileName: originalFileName,
-                currentRow: Math.max(1, ...checkResults.map(result => Number.isInteger(result.rowIndex) ? result.rowIndex : 1)),
-                checkResults,
-                realtimeCheckResults,
-                glossaryData,
-                checkedCount: checkResults.length,
-                selectedProfileIds: [...selectedProfileIds]
-            });
             if (failedBatches.length > 0) {
                 setStatus(
                     generatedCount > 0 ? 'warning' : 'error',
@@ -11462,7 +11922,7 @@ ${projectRules}
 1. 译文准确性：检查译文是否准确传达原文含义，没有漏译、误译
 2. 译文语法：检查译文中的语法错误、拼写错误、单复数、时态、介词搭配、句式语病
 3. 译文流畅度：检查译文是否符合目标语言表达习惯，避免生硬直译
-4. 术语一致性：检查是否符合已勾选术语表；未勾选术语表时，只检查明显的术语前后不一致
+4. 术语一致性：检查是否符合已勾选术语表；同时观察术语表是否可能缺少关键术语，或已有译法是否疑似不如实际译文合理
 5. 风格一致性：检查译文风格是否符合项目翻译标准
 6. 统一规范：英文大小写、标点、空格标准化
 7. 避免中式英语、直译感、歧义句
@@ -11484,6 +11944,15 @@ ${target}
 - corrected: 建议修改成什么；如果不需要提供改写，填空字符串
 - reason: 为什么判定异常，必须明确说明是不符合术语表限制、项目翻译要求、游戏翻译基本规范，还是存在病句/拼写错误等
 - evidence: 触发判断的原文或译文片段；没有则填空字符串
+
+如果发现术语表需要人工确认，可额外输出 terminologyReview 数组。它用于生成“术语确认表”，不是普通译文问题列表。每项包含：
+- source: 中文原文术语，只能是短术语/专名，不要写整句
+- currentTarget: 术语表当前译法；如果术语表缺失则空
+- suggestedTarget: 建议采用的译法
+- actualTarget: 当前句子里的实际译法
+- action: update-translation|add-term|keep-existing|sentence-exception|pending
+- reason: 为什么需要人工确认
+- type: 术语类型
 
 如果没有问题，请输出：{"issues": []}`;
     }
@@ -11542,19 +12011,23 @@ ${target}
             tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 20px;">暂无检测结果</td></tr>';
         } else {
             const fragment = document.createDocumentFragment();
+            const truncateCell = (value, max = 220) => {
+                const text = String(value || '');
+                return text.length > max ? `${text.slice(0, max)}...` : text;
+            };
             getSortedCheckResults().forEach((result) => {
                 const hasIssues = result.status === L10N_STATUS_ISSUE;
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
-                    <td>${escapeHtml(result.source)}</td>
-                    <td>${escapeHtml(result.target)}</td>
-                    <td>${escapeHtml(result.modelLabel || result.profileName || result.model || '未记录')}</td>
+                    <td>${escapeHtml(truncateCell(result.source))}</td>
+                    <td>${escapeHtml(truncateCell(result.target))}</td>
+                    <td>${escapeHtml(truncateCell(result.modelLabel || result.profileName || result.model || '未记录', 160))}</td>
                     <td><span class="status-tag ${getCheckStatusClass(result.status)}">${escapeHtml(result.status)}</span></td>
-                    <td>${escapeHtml(result.issueType || (hasIssues ? classifyIssueCategory(`${result.issue} ${result.reason}`) : '-'))}</td>
+                    <td>${escapeHtml(truncateCell(result.issueType || (hasIssues ? classifyIssueCategory(`${result.issue} ${result.reason}`) : '-'), 120))}</td>
                     <td><span class="severity-tag ${getSeverityClass(result.severity || (hasIssues ? '一般' : '-'))}">${escapeHtml(result.severity || (hasIssues ? '一般' : '-'))}</span></td>
-                    <td>${escapeHtml(result.corrected || '无需修改')}</td>
-                    <td>${escapeHtml(result.fullFixedTranslation || (result.fullFixedError ? `生成失败：${result.fullFixedError}` : ''))}</td>
-                    <td>${escapeHtml(result.reason || (result.status === L10N_STATUS_PASS ? '通过' : ''))}</td>
+                    <td>${escapeHtml(truncateCell(result.corrected || '无需修改'))}</td>
+                    <td>${escapeHtml(truncateCell(result.fullFixedTranslation || (result.fullFixedError ? `生成失败：${result.fullFixedError}` : '')))}</td>
+                    <td>${escapeHtml(truncateCell(result.reason || (result.status === L10N_STATUS_PASS ? '通过' : ''), 260))}</td>
                 `;
                 fragment.appendChild(tr);
             });
@@ -11760,6 +12233,11 @@ ${target}
         ];
     }
 
+    function buildReportMetadataCellsCompact(result, project, glossaryTerms) {
+        return buildReportMetadataCells(result, project, glossaryTerms)
+            .map((value, index) => index === L10N_REPORT_META_HEADERS.length - 1 ? '' : value);
+    }
+
     function getReportEntryForRow(rowIndex, row, resultByRow) {
         const existing = resultByRow.get(rowIndex);
         if (existing) return existing;
@@ -11806,7 +12284,7 @@ ${target}
                 result.reason || (result.status === L10N_STATUS_PASS ? '通过' : ''),
                 result.detectionSource || (result.status === L10N_STATUS_PASS ? '' : 'AI'),
                 ...buildReportCompletenessCells(result, rowGroups.get(result.rowIndex) || []),
-                ...buildReportMetadataCells(result, activeProject, activeGlossaryTerms)
+                ...buildReportMetadataCellsCompact(result, activeProject, activeGlossaryTerms)
             ])
         ];
     }
@@ -11866,7 +12344,7 @@ ${target}
                 result.reason || (result.status === L10N_STATUS_PASS ? '通过' : ''),
                 result.detectionSource || (result.status === L10N_STATUS_PASS ? '' : 'AI'),
                 ...buildReportCompletenessCells(result, [result]),
-                ...buildReportMetadataCells(result, activeProject, activeGlossaryTerms)
+                ...buildReportMetadataCellsCompact(result, activeProject, activeGlossaryTerms)
             ];
         });
     }
@@ -11885,8 +12363,15 @@ ${target}
         URL.revokeObjectURL(url);
     }
 
+    function downloadXlsxRows(rows, fileName, sheetName = '检测报告') {
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(rows), sheetName);
+        downloadWorkbookFile(workbook, fileName);
+    }
+
     function downloadL10nReport(fileName) {
-        downloadCsvRows(buildOriginalFileReportRows(), fileName);
+        const baseName = fileName.replace(/\.(csv|xlsx)$/i, '');
+        downloadXlsxRows(buildOriginalFileReportRows(), `${baseName}.xlsx`);
     }
 
     function downloadReport() {
@@ -11895,7 +12380,7 @@ ${target}
             return;
         }
 
-        downloadL10nReport(`${originalFileName}_l10n_report.csv`);
+        downloadL10nReport(`${getL10nReportBaseName()}_本地化检测_完整报告.xlsx`);
     }
 
     function downloadGlossary() {
@@ -11931,11 +12416,340 @@ ${target}
         URL.revokeObjectURL(url);
     }
 
+    function isTerminologyIssueText(text) {
+        return /术语|术语表|term|terminology|glossary/i.test(String(text || ''));
+    }
+
+    function isLikelySentenceText(text) {
+        const value = String(text || '').trim();
+        if (!value) return false;
+        return value.length > 24 || /[。！？.!?；;]/.test(value) || /\s+\S+\s+\S+/.test(value);
+    }
+
+    function findGlossaryTermForIssue(result, issue) {
+        const evidence = String(issue?.evidence || '').trim();
+        const corrected = String(issue?.corrected || '').trim();
+        const issueText = `${issue?.issue || ''} ${issue?.reason || ''} ${evidence}`;
+        const arrowMatch = evidence.match(/(.+?)\s*(?:->|=>|→|译为|应译为)\s*(.+)/);
+        if (arrowMatch) {
+            return {
+                source: arrowMatch[1].replace(/[“”"']/g, '').trim(),
+                target: arrowMatch[2].replace(/[“”"']/g, '').trim() || corrected
+            };
+        }
+
+        const quotedSource = issueText.match(/术语[“"「『]?([^”"」』]+)[”"」』]?/);
+        if (quotedSource) {
+            return {
+                source: quotedSource[1].trim(),
+                target: corrected
+            };
+        }
+
+        const activeTerms = getSelectedGlossaryTerms();
+        const matched = activeTerms.find(term => {
+            const source = String(term.source || '').trim();
+            if (!source) return false;
+            return String(result?.source || '').includes(source) || issueText.includes(source);
+        });
+        if (matched) {
+            return {
+                source: matched.source,
+                target: getGlossaryEffectiveTarget(matched) || corrected
+            };
+        }
+
+        return null;
+    }
+
+    function getTermReviewItemsFromResult(result) {
+        const explicitItems = mergeTerminologyReviewItems(result?.terminologyReview || [])
+            .filter(item => item.source && !isLikelySentenceText(item.source))
+            .map(item => ({
+                result,
+                issue: {
+                    category: item.type || '术语表复核',
+                    severity: '提示',
+                    reason: item.reason || '检测模型建议人工确认该术语',
+                    issue: item.reason || '术语表候选',
+                    corrected: item.suggestedTarget || item.currentTarget || ''
+                },
+                termSource: item.source,
+                termTarget: item.currentTarget || item.suggestedTarget || '',
+                suggestedTarget: item.suggestedTarget || item.currentTarget || '',
+                actualTarget: item.actualTarget || result.target || '',
+                action: item.action || 'pending'
+            }));
+        const issues = Array.isArray(result?.issues) && result.issues.length > 0
+            ? result.issues
+            : normalizeIssues(result);
+        const issueItems = issues
+            .filter(issue => isTerminologyIssueText(`${issue.category} ${issue.issue} ${issue.reason} ${issue.evidence}`))
+            .map(issue => {
+                const term = findGlossaryTermForIssue(result, issue);
+                if (!term?.source || isLikelySentenceText(term.source)) return null;
+                const target = term.target || issue.corrected || '';
+                return {
+                    result,
+                    issue,
+                    termSource: term.source,
+                    termTarget: target,
+                    suggestedTarget: target,
+                    actualTarget: result.target || '',
+                    action: 'update-translation'
+                };
+            })
+            .filter(Boolean);
+        return [...explicitItems, ...issueItems];
+    }
+
+    function createTermReviewRowsFromResults() {
+        const rows = [];
+        const seen = new Set();
+        getSortedCheckResults().forEach(result => {
+            getTermReviewItemsFromResult(result).forEach((item, index) => {
+                const key = `${item.termSource.toLowerCase()}|${String(item.suggestedTarget || item.termTarget || '').toLowerCase()}|${result.rowIndex}`;
+                if (seen.has(key)) return;
+                seen.add(key);
+                rows.push({
+                    id: `term_review_${result.rowIndex}_${index}_${makeStableId(item.termSource)}`,
+                    rowIndex: result.rowIndex,
+                    source: item.termSource,
+                    currentTarget: item.termTarget || '',
+                    suggestedTarget: item.suggestedTarget || item.termTarget || item.issue.corrected || '',
+                    actualTarget: item.actualTarget || result.target || '',
+                    issueType: item.issue.category || result.issueType || '术语表限制',
+                    severity: item.issue.severity || result.severity || '',
+                    reason: item.issue.reason || result.reason || item.issue.issue || '',
+                    modelLabel: result.modelLabel || result.profileName || result.model || '',
+                    decision: item.action || 'pending',
+                    finalTarget: item.suggestedTarget || item.termTarget || item.issue.corrected || '',
+                    note: ''
+                });
+            });
+        });
+        return rows;
+    }
+
+    function getTermReviewDecisionLabel(decision) {
+        const labels = {
+            'keep-existing': '保留原译文',
+            'update-translation': '采用修正译文',
+            'add-term': '新增为术语',
+            'sentence-exception': '仅本句例外',
+            ignore: '不处理',
+            pending: '待确认'
+        };
+        return labels[decision] || '待确认';
+    }
+
+    function renderL10nTermReviewPanel() {
+        if (!termReviewPanel || !termReviewBody) return;
+        if (l10nTermReviewState.length === 0) {
+            termReviewPanel.style.display = 'none';
+            return;
+        }
+
+        termReviewPanel.style.display = 'block';
+        if (termReviewCount) termReviewCount.textContent = String(l10nTermReviewState.length);
+        if (termReviewSummary) {
+            const pendingCount = l10nTermReviewState.filter(item => item.decision === 'pending').length;
+            termReviewSummary.textContent = `共 ${l10nTermReviewState.length} 条需复核，待确认 ${pendingCount} 条。`;
+        }
+
+        termReviewBody.innerHTML = l10nTermReviewState.map(item => `
+            <tr data-id="${escapeAttribute(item.id)}">
+                <td>${escapeHtml(item.issueType || '检测问题')}</td>
+                <td>${escapeHtml(item.source)}</td>
+                <td>${escapeHtml(item.currentTarget)}</td>
+                <td>${escapeHtml(item.actualTarget || item.suggestedTarget)}</td>
+                <td>${Number.isInteger(item.rowIndex) ? item.rowIndex + 1 : ''}</td>
+                <td>${escapeHtml(item.reason)}</td>
+                <td>
+                    <select data-field="decision">
+                        ${['keep-existing', 'update-translation', 'add-term', 'sentence-exception', 'ignore', 'pending'].map(value =>
+                            `<option value="${value}" ${item.decision === value ? 'selected' : ''}>${getTermReviewDecisionLabel(value)}</option>`
+                        ).join('')}
+                    </select>
+                </td>
+                <td><input type="text" data-field="finalTarget" value="${escapeAttribute(item.finalTarget || '')}"></td>
+                <td><input type="text" data-field="note" value="${escapeAttribute(item.note || '')}"></td>
+            </tr>
+        `).join('');
+    }
+
+    function syncTermReviewStateFromPanel() {
+        if (!termReviewBody) return;
+        termReviewBody.querySelectorAll('tr[data-id]').forEach(row => {
+            const item = l10nTermReviewState.find(entry => entry.id === row.dataset.id);
+            if (!item) return;
+            row.querySelectorAll('[data-field]').forEach(input => {
+                item[input.dataset.field] = input.value;
+            });
+        });
+    }
+
+    function exportTermReviewTable() {
+        if (checkResults.length === 0) {
+            alert('请先完成检测，再导出术语确认表');
+            return;
+        }
+
+        l10nTermReviewState = createTermReviewRowsFromResults();
+        if (l10nTermReviewState.length === 0) {
+            setStatus('success', '无需术语复核', '当前检测结果没有异常或分歧行。');
+            return;
+        }
+        renderL10nTermReviewPanel();
+
+        const rows = [[
+            '定位行号',
+            '原文术语',
+            '术语表译法',
+            '实际译文',
+            '问题类型',
+            '严重程度',
+            '检测说明',
+            '检测模型',
+            '最终处理',
+            '指定译文',
+            '确认备注'
+        ], ...l10nTermReviewState.map(item => [
+            Number.isInteger(item.rowIndex) ? item.rowIndex + 1 : '',
+            item.source,
+            item.currentTarget,
+            item.actualTarget || '',
+            item.issueType,
+            item.severity,
+            item.reason,
+            item.modelLabel,
+            getTermReviewDecisionLabel(item.decision),
+            item.finalTarget,
+            item.note
+        ])];
+        downloadXlsxRows(rows, `${getL10nReportBaseName()}_术语复核确认表.xlsx`, '术语复核');
+        setStatus('success', '术语确认表已导出', `已导出 ${l10nTermReviewState.length} 条待确认项。`);
+    }
+
+    async function importTermReviewTable(file) {
+        if (!file) return;
+        try {
+            const { rows } = await readSpreadsheetRows(file);
+            if (!rows || rows.length < 2) {
+                throw new Error('确认表为空');
+            }
+            const headers = (rows[0] || []).map(header => normalizeHeaderText(header));
+            const find = names => headers.findIndex(header => names.some(name => header.includes(normalizeHeaderText(name))));
+            const indexes = {
+                rowNumber: find(['定位行号', '行号', 'row']),
+                source: find(['原文术语', '原文', 'source']),
+                currentTarget: find(['术语表译法', '当前译文', '原译文', 'target']),
+                suggestedTarget: find(['实际译文', '建议译文', '修正译文']),
+                issueType: find(['问题类型']),
+                severity: find(['严重程度']),
+                reason: find(['检测说明', '问题原因']),
+                modelLabel: find(['检测模型']),
+                decision: find(['最终处理', '人工处理状态', '状态']),
+                finalTarget: find(['指定译文', '最终译文']),
+                note: find(['确认备注', '备注'])
+            };
+            l10nTermReviewState = rows.slice(1).map((row, index) => {
+                const rowNumber = Number(row[indexes.rowNumber]);
+                const decisionText = indexes.decision >= 0 ? String(row[indexes.decision] || '') : '';
+                const decision = /保留/.test(decisionText)
+                    ? 'keep-existing'
+                    : (/新增/.test(decisionText) ? 'add-term'
+                        : (/例外/.test(decisionText) ? 'sentence-exception'
+                            : (/不处理|不采用|忽略/.test(decisionText) ? 'ignore'
+                                : (/待/.test(decisionText) ? 'pending' : 'update-translation'))));
+                return {
+                    id: `term_review_import_${index}`,
+                    rowIndex: Number.isFinite(rowNumber) ? rowNumber - 1 : index + 1,
+                    source: indexes.source >= 0 ? String(row[indexes.source] || '') : '',
+                    currentTarget: indexes.currentTarget >= 0 ? String(row[indexes.currentTarget] || '') : '',
+                    suggestedTarget: indexes.suggestedTarget >= 0 ? String(row[indexes.suggestedTarget] || '') : '',
+                    actualTarget: indexes.suggestedTarget >= 0 ? String(row[indexes.suggestedTarget] || '') : '',
+                    issueType: indexes.issueType >= 0 ? String(row[indexes.issueType] || '') : '',
+                    severity: indexes.severity >= 0 ? String(row[indexes.severity] || '') : '',
+                    reason: indexes.reason >= 0 ? String(row[indexes.reason] || '') : '',
+                    modelLabel: indexes.modelLabel >= 0 ? String(row[indexes.modelLabel] || '') : '',
+                    decision,
+                    finalTarget: indexes.finalTarget >= 0 ? String(row[indexes.finalTarget] || '') : '',
+                    note: indexes.note >= 0 ? String(row[indexes.note] || '') : ''
+                };
+            }).filter(item => item.source || item.currentTarget || item.finalTarget);
+            renderL10nTermReviewPanel();
+            setStatus('success', '确认结果已导入', `已导入 ${l10nTermReviewState.length} 条术语复核结果。`);
+        } catch (error) {
+            setStatus('error', '确认结果导入失败', error.message || '无法读取确认表');
+        } finally {
+            if (importTermReviewInput) importTermReviewInput.value = '';
+        }
+    }
+
+    function applyTermReviewBulk(all = false) {
+        if (!termReviewBulkAction?.value) {
+            alert('请先选择批量处理方式');
+            return;
+        }
+        syncTermReviewStateFromPanel();
+        l10nTermReviewState.forEach(item => {
+            if (all || item.decision === 'pending') {
+                item.decision = termReviewBulkAction.value;
+                if (!item.finalTarget && item.suggestedTarget) item.finalTarget = item.suggestedTarget;
+            }
+        });
+        renderL10nTermReviewPanel();
+    }
+
+    function generateReviewedGlossary() {
+        syncTermReviewStateFromPanel();
+        if (l10nTermReviewState.length === 0) {
+            l10nTermReviewState = createTermReviewRowsFromResults();
+        }
+        const finalTerms = l10nTermReviewState
+            .filter(item => ['update-translation', 'add-term'].includes(item.decision))
+            .map(item => ({
+                source: item.source,
+                target: item.finalTarget || item.suggestedTarget || item.currentTarget,
+                type: item.issueType || '本地化复核',
+                note: item.note || item.reason || '',
+                referenceRows: Number.isInteger(item.rowIndex) ? String(item.rowIndex + 1) : ''
+            }))
+            .filter(term => term.source && term.target);
+        if (finalTerms.length === 0) {
+            alert('没有可生成的新术语，请先在术语复核表中选择“采用修正译文”或“新增为术语”。');
+            return;
+        }
+        const entry = saveGlossaryEntry({
+            name: `${getL10nReportBaseName()}_检测复核术语表`,
+            sourceFileName: originalFileName,
+            terms: finalTerms,
+            origin: 'reviewed'
+        });
+        if (!entry) {
+            alert('新版术语表生成失败，请检查术语内容');
+            return;
+        }
+        downloadXlsxRows(buildReviewGlossaryRows(entry.terms), `${getL10nReportBaseName()}_术语复核_新版术语表.xlsx`, '新版术语表');
+        document.dispatchEvent(new CustomEvent('nexus:glossary-library-updated'));
+        setStatus('success', '新版术语表已生成', `已保存 ${entry.terms.length} 条到术语库，并已下载备份。`);
+    }
+
     function saveL10nProgress(data) {
-        localStorage.setItem(L10N_PROGRESS_KEY, JSON.stringify({
-            ...data,
-            timestamp: Date.now()
-        }));
+        try {
+            localStorage.setItem(L10N_PROGRESS_KEY, JSON.stringify({
+                ...data,
+                timestamp: Date.now()
+            }));
+        } catch (error) {
+            console.warn('L10n progress save skipped:', error);
+            setStatus(
+                'warning',
+                '本地缓存空间不足',
+                '当前结果仍在页面中，请直接下载检测报告；工具已跳过缓存保存，避免页面继续卡死。'
+            );
+        }
     }
 
     function loadL10nProgress() {
@@ -11989,6 +12803,36 @@ ${target}
         hideStatus();
         clearL10nProgress();
     }
+
+    function bindL10nResultActions() {
+        fileInput?.addEventListener('click', (e) => e.stopPropagation());
+        uploadArea?.addEventListener('click', () => fileInput?.click());
+        bindUploadDrop(uploadArea, fileInput, (file, files = []) => handleL10nFiles(files.length > 0 ? files : [file]));
+
+        fileInput?.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleL10nFiles([...e.target.files]);
+            }
+        });
+
+        confirmColumnBtn?.addEventListener('click', confirmColumnSelection);
+        checkBtn?.addEventListener('click', startCheck);
+        downloadBtn?.addEventListener('click', downloadReport);
+        downloadGlossaryBtn?.addEventListener('click', downloadGlossary);
+        generateFixesBtn?.addEventListener('click', generateFullFixTranslations);
+        exportTermReviewBtn?.addEventListener('click', exportTermReviewTable);
+        importTermReviewInput?.addEventListener('change', (event) => {
+            if (event.target.files.length > 0) {
+                void importTermReviewTable(event.target.files[0]);
+            }
+        });
+        generateReviewedGlossaryBtn?.addEventListener('click', generateReviewedGlossary);
+        applyTermReviewBulkBtn?.addEventListener('click', () => applyTermReviewBulk(false));
+        applyTermReviewBulkAllBtn?.addEventListener('click', () => applyTermReviewBulk(true));
+        resetBtn?.addEventListener('click', resetTool);
+    }
+
+    bindL10nResultActions();
 }
 
 function initGlossaryTool() {
