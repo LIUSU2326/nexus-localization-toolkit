@@ -359,6 +359,31 @@ function downloadWorkbookFile(workbook, fileName) {
     URL.revokeObjectURL(url);
 }
 
+async function saveWorkbookFile(workbook, fileName) {
+    const arrayBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+    const invoke = window.__TAURI__?.core?.invoke;
+    if (invoke) {
+        const response = await invoke('save_binary_report_to_downloads', {
+            filename: fileName,
+            bytes: Array.from(new Uint8Array(arrayBuffer))
+        });
+        return String(response?.path || fileName);
+    }
+
+    const blob = new Blob([arrayBuffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    return fileName;
+}
+
 const TRANSLATION_PROJECTS_KEY = 'translationProjects';
 const DEFAULT_TRANSLATION_PROJECT_KEY = 'nexus_default_translation_project';
 const GLOSSARY_LIBRARY_KEY = 'nexus_glossary_library';
@@ -12363,10 +12388,18 @@ ${target}
         URL.revokeObjectURL(url);
     }
 
-    function downloadXlsxRows(rows, fileName, sheetName = '检测报告') {
+    function buildXlsxWorkbook(rows, sheetName = '检测报告') {
         const workbook = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(rows), sheetName);
-        downloadWorkbookFile(workbook, fileName);
+        return workbook;
+    }
+
+    function downloadXlsxRows(rows, fileName, sheetName = '检测报告') {
+        downloadWorkbookFile(buildXlsxWorkbook(rows, sheetName), fileName);
+    }
+
+    async function saveXlsxRows(rows, fileName, sheetName = '检测报告') {
+        return saveWorkbookFile(buildXlsxWorkbook(rows, sheetName), fileName);
     }
 
     function downloadL10nReport(fileName) {
@@ -12374,13 +12407,37 @@ ${target}
         downloadXlsxRows(buildOriginalFileReportRows(), `${baseName}.xlsx`);
     }
 
-    function downloadReport() {
+    async function downloadReport() {
         if (checkResults.length === 0) {
             alert('没有检测结果可下载');
             return;
         }
 
-        downloadL10nReport(`${getL10nReportBaseName()}_本地化检测_完整报告.xlsx`);
+        const fileName = `${getL10nReportBaseName()}_本地化检测_完整报告.xlsx`;
+        const originalText = downloadBtn?.textContent || '';
+        try {
+            if (downloadBtn) {
+                downloadBtn.disabled = true;
+                downloadBtn.textContent = '正在生成报告...';
+            }
+            setStatus('processing', '正在生成检测报告', '正在整理原始表格、检测结果和模型明细，请稍候。');
+            const savedPath = await saveXlsxRows(buildOriginalFileReportRows(), fileName);
+            setStatus('success', '检测报告已保存', `文件：${savedPath}`);
+        } catch (error) {
+            console.error('Download l10n report failed:', error);
+            try {
+                downloadL10nReport(fileName);
+                setStatus('warning', '已使用浏览器下载兜底', '桌面保存失败，但已尝试通过浏览器下载检测报告。');
+            } catch (fallbackError) {
+                console.error('Fallback l10n report download failed:', fallbackError);
+                setStatus('error', '下载检测报告失败', fallbackError?.message || error?.message || '请稍后重试，或先下载当前结果。');
+            }
+        } finally {
+            if (downloadBtn) {
+                downloadBtn.disabled = false;
+                downloadBtn.textContent = originalText || '下载检测报告';
+            }
+        }
     }
 
     function downloadGlossary() {

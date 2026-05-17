@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, path::PathBuf, time::Duration};
+﻿use std::{collections::HashMap, env, path::PathBuf, time::Duration};
 
 #[derive(serde::Serialize)]
 struct DroppedFile {
@@ -20,15 +20,16 @@ struct SavedReport {
 #[tauri::command]
 fn read_dropped_file(path: String) -> Result<DroppedFile, String> {
     let path = PathBuf::from(path);
-    let metadata = std::fs::metadata(&path).map_err(|error| format!("无法读取文件信息：{error}"))?;
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| format!("Failed to read file metadata: {error}"))?;
 
     if !metadata.is_file() {
-        return Err("只能拖入文件，不能拖入文件夹".to_string());
+        return Err("Only files can be dropped, not folders.".to_string());
     }
 
     const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
     if metadata.len() > MAX_FILE_SIZE {
-        return Err("文件超过 100MB，请拆分后再上传".to_string());
+        return Err("File is larger than 100MB. Please split it before uploading.".to_string());
     }
 
     let extension = path
@@ -38,7 +39,7 @@ fn read_dropped_file(path: String) -> Result<DroppedFile, String> {
         .to_ascii_lowercase();
 
     if !matches!(extension.as_str(), "csv" | "xlsx" | "xls") {
-        return Err("仅支持 .csv、.xlsx、.xls 文件".to_string());
+        return Err("Only .csv, .xlsx, and .xls files are supported.".to_string());
     }
 
     let name = path
@@ -47,7 +48,8 @@ fn read_dropped_file(path: String) -> Result<DroppedFile, String> {
         .unwrap_or("uploaded-file")
         .to_string();
 
-    let bytes = std::fs::read(&path).map_err(|error| format!("无法读取文件内容：{error}"))?;
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("Failed to read file content: {error}"))?;
 
     Ok(DroppedFile { name, bytes })
 }
@@ -60,9 +62,10 @@ async fn post_chat_completion(
     timeout_ms: Option<u64>,
     headers: Option<HashMap<String, String>>,
 ) -> Result<ChatCompletionResponse, String> {
-    let parsed_url = reqwest::Url::parse(&url).map_err(|error| format!("接口地址无效：{error}"))?;
+    let parsed_url = reqwest::Url::parse(&url)
+        .map_err(|error| format!("Invalid API URL: {error}"))?;
     if !matches!(parsed_url.scheme(), "https" | "http") {
-        return Err("接口地址必须是 http 或 https".to_string());
+        return Err("API URL must start with http or https.".to_string());
     }
 
     let timeout_ms = timeout_ms.unwrap_or(240_000).clamp(5_000, 600_000);
@@ -70,7 +73,7 @@ async fn post_chat_completion(
         .timeout(Duration::from_millis(timeout_ms))
         .connect_timeout(Duration::from_secs(20))
         .build()
-        .map_err(|error| format!("初始化接口客户端失败：{error}"))?;
+        .map_err(|error| format!("Failed to initialize API client: {error}"))?;
 
     let mut request = client.post(parsed_url).json(&body);
     if let Some(headers) = headers {
@@ -83,17 +86,19 @@ async fn post_chat_completion(
         request = request.bearer_auth(api_key);
     }
 
-    let response = request.send().await
+    let response = request
+        .send()
+        .await
         .map_err(|error| {
             if error.is_timeout() {
                 format!(
-                    "请求接口超时（超过 {} 秒），可能是接口繁忙、网络不稳定或通道并发过高",
+                    "API request timed out after {} seconds. The provider may be busy, the network may be unstable, or concurrency may be too high.",
                     (timeout_ms + 999) / 1000
                 )
             } else if error.is_connect() {
-                format!("无法连接接口，请检查 Base URL 或网络状态：{error}")
+                format!("Failed to connect to API. Check Base URL or network status: {error}")
             } else {
-                format!("请求接口失败：{error}")
+                format!("API request failed: {error}")
             }
         })?;
 
@@ -101,7 +106,7 @@ async fn post_chat_completion(
     let body = response
         .text()
         .await
-        .map_err(|error| format!("读取接口返回失败：{error}"))?;
+        .map_err(|error| format!("Failed to read API response: {error}"))?;
 
     Ok(ChatCompletionResponse { status, body })
 }
@@ -126,10 +131,10 @@ fn downloads_dir() -> Result<PathBuf, String> {
         }
     }
 
-    Err("无法定位系统下载目录".to_string())
+    Err("Failed to locate the system Downloads directory.".to_string())
 }
 
-fn sanitize_filename(filename: &str) -> String {
+fn sanitize_filename_with_default(filename: &str, default_extension: &str) -> String {
     let cleaned: String = filename
         .chars()
         .map(|ch| {
@@ -142,12 +147,16 @@ fn sanitize_filename(filename: &str) -> String {
         .collect();
     let cleaned = cleaned.trim().trim_matches('.').to_string();
     if cleaned.is_empty() {
-        "nexus_l10n_report.csv".to_string()
-    } else if cleaned.to_ascii_lowercase().ends_with(".csv") {
+        format!("nexus_l10n_report.{default_extension}")
+    } else if PathBuf::from(&cleaned).extension().is_some() {
         cleaned
     } else {
-        format!("{cleaned}.csv")
+        format!("{cleaned}.{default_extension}")
     }
+}
+
+fn sanitize_filename(filename: &str) -> String {
+    sanitize_filename_with_default(filename, "csv")
 }
 
 fn unique_report_path(directory: PathBuf, filename: String) -> PathBuf {
@@ -186,11 +195,34 @@ fn unique_report_path(directory: PathBuf, filename: String) -> PathBuf {
 #[tauri::command]
 fn save_report_to_downloads(filename: String, content: String) -> Result<SavedReport, String> {
     let directory = downloads_dir()?;
-    std::fs::create_dir_all(&directory).map_err(|error| format!("无法创建下载目录：{error}"))?;
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Failed to create downloads directory: {error}"))?;
 
     let safe_filename = sanitize_filename(&filename);
     let path = unique_report_path(directory, safe_filename);
-    std::fs::write(&path, content.as_bytes()).map_err(|error| format!("无法保存结果文件：{error}"))?;
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|error| format!("Failed to save report file: {error}"))?;
+
+    Ok(SavedReport {
+        path: path.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+fn save_binary_report_to_downloads(filename: String, bytes: Vec<u8>) -> Result<SavedReport, String> {
+    let directory = downloads_dir()?;
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Failed to create downloads directory: {error}"))?;
+
+    let extension = PathBuf::from(&filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("xlsx")
+        .to_ascii_lowercase();
+    let safe_filename = sanitize_filename_with_default(&filename, &extension);
+    let path = unique_report_path(directory, safe_filename);
+    std::fs::write(&path, bytes)
+        .map_err(|error| format!("Failed to save report file: {error}"))?;
 
     Ok(SavedReport {
         path: path.to_string_lossy().to_string(),
@@ -203,7 +235,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_dropped_file,
             post_chat_completion,
-            save_report_to_downloads
+            save_report_to_downloads,
+            save_binary_report_to_downloads
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
