@@ -1,0 +1,22 @@
+{
+  "name": "nexus-localization-toolkit",
+  "version": "1.0.0",
+  "description": "NEXUS local desktop toolkit for game localization workflows.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:web": "node scripts/dev-server.js",
+    "build:web": "node scripts/build-web.js",
+    "tauri": "tauri",
+    "desktop": "tauri dev",
+    "desktop:build:app": "tauri build --bundles app",
+    "desktop:build": "tauri build",
+    "desktop:build:windows": "tauri build --bundles nsis"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

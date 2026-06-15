@@ -1,0 +1,2211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEXUS Localize - Desktop</title>
+    <link rel="icon" href="data:,">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <script src="vendor/xlsx.full.min.js"></script>
+    <script src="vendor/jszip.min.js"></script>
+</head>
+<body>
+    <div class="main-container">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1 class="logo">NEXUS</h1>
+                <p class="tagline">本地化工具集</p>
+            </div>
+            
+            <nav class="nav-menu">
+                <button class="nav-item active" data-tool="split">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M16 3h5v5"/>
+                        <path d="M8 21H3v-5"/>
+                        <path d="M21 3l-9 9"/>
+                        <path d="M3 21l9-9"/>
+                    </svg>
+                    <span>文件拆分</span>
+                </button>
+                
+                <button class="nav-item" data-tool="translate">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M5 8l6 6"/>
+                        <path d="M4 14l6-6 2-2"/>
+                        <path d="M2 5h12"/>
+                        <path d="M7 2v3"/>
+                        <path d="M22 22l-5-10-5 10"/>
+                        <path d="M14 18h6"/>
+                    </svg>
+                    <span>文本翻译</span>
+                </button>
+                
+                <button class="nav-item" data-tool="convert">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 20V10"/>
+                        <path d="M18 20V4"/>
+                        <path d="M6 20v-6"/>
+                    </svg>
+                    <span>格式转换</span>
+                </button>
+
+                <button class="nav-item" data-tool="precision-replace">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M4 7h10"/>
+                        <path d="M4 17h10"/>
+                        <path d="M15 4l4 3-4 3"/>
+                        <path d="M15 14l4 3-4 3"/>
+                    </svg>
+                    <span>精准替换</span>
+                </button>
+
+                <button class="nav-item" data-tool="lite-check">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 11l2 2 4-4"/>
+                        <path d="M21 12a9 9 0 1 1-3-6.7"/>
+                        <path d="M21 3v6h-6"/>
+                    </svg>
+                    <span>轻量质检</span>
+                </button>
+                
+                <button class="nav-item" data-tool="l10n-check">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 12l2 2 4-4"/>
+                    </svg>
+                    <span>本地化检测</span>
+                </button>
+                
+                <button class="nav-item" data-tool="glossary">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 20H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v3"/>
+                        <path d="M16 20V7L6 13"/>
+                    </svg>
+                    <span>术语表</span>
+                </button>
+
+                <button class="nav-item" data-tool="glossary-organize">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M4 5h16"/>
+                        <path d="M4 12h10"/>
+                        <path d="M4 19h7"/>
+                        <path d="M17 14l3 3-3 3"/>
+                        <path d="M14 17h6"/>
+                    </svg>
+                    <span>术语整理</span>
+                </button>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <p class="version">v1.0.0</p>
+            </div>
+        </aside>
+        <div class="sidebar-resize-handle" id="sidebarResizeHandle" aria-hidden="true"></div>
+
+        <main class="main-content">
+            <div class="app-topbar">
+                <div class="breadcrumbs">
+                    <span>NEXUS</span>
+                    <span>/</span>
+                    <strong id="currentToolLabel">文件拆分</strong>
+                </div>
+                <div class="topbar-actions">
+                    <button class="command-search" id="commandSearchTrigger" type="button" aria-label="打开命令搜索">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="7"/>
+                            <path d="M20 20l-3.5-3.5"/>
+                        </svg>
+                        <span>搜索项目、文件、术语</span>
+                        <kbd>Ctrl K</kbd>
+                    </button>
+                    <button class="topbar-chip ai-status-chip" type="button" id="topbarApiStatus">
+                        <span class="status-dot"></span>
+                        AI 通道待配置
+                    </button>
+                    <button class="topbar-icon-btn" type="button" id="openApiConfigBtn" title="API 配置">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5z"/>
+                            <path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.04.04a2 2 0 0 1-2.83 2.83l-.04-.04a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.08 1.65V21a2 2 0 0 1-4 0v-.1a1.8 1.8 0 0 0-1.08-1.65 1.8 1.8 0 0 0-1.98.36l-.04.04a2 2 0 1 1-2.83-2.83l.04-.04A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-1.65-1.08H3a2 2 0 0 1 0-4h.1A1.8 1.8 0 0 0 4.75 8.8a1.8 1.8 0 0 0-.36-1.98l-.04-.04a2 2 0 1 1 2.83-2.83l.04.04A1.8 1.8 0 0 0 9.2 4.6 1.8 1.8 0 0 0 10.28 3H10a2 2 0 0 1 4 0v.1a1.8 1.8 0 0 0 1.08 1.65 1.8 1.8 0 0 0 1.98-.36l.04-.04a2 2 0 1 1 2.83 2.83l-.04.04a1.8 1.8 0 0 0-.36 1.98 1.8 1.8 0 0 0 1.65 1.08H21a2 2 0 0 1 0 4h-.1A1.8 1.8 0 0 0 19.4 15z"/>
+                        </svg>
+                    </button>
+                    <span class="runtime-chip">本地运行</span>
+                </div>
+            </div>
+
+            <div class="status-bar" id="statusBar" style="display: none;">
+                <div class="status-icon" id="statusIcon"></div>
+                <div class="status-content">
+                    <span class="status-text" id="statusText"></span>
+                    <span class="status-subtext" id="statusSubtext"></span>
+                </div>
+                <button class="status-action" id="statusAction" style="display: none;">查看</button>
+            </div>
+            <div class="panel-resize-handle" id="panelResizeHandle" aria-hidden="true"></div>
+
+            <div class="api-config-panel" id="apiConfigPanel" style="display: none;">
+                <div class="api-config-header">
+                    <h3>⚙️ API 配置</h3>
+                    <div class="api-config-header-actions">
+                        <button class="api-config-action-btn" id="toggleApiConfig" type="button" title="收起或展开 API 配置内容" aria-expanded="true">
+                            收起内容
+                        </button>
+                        <button class="api-config-action-btn primary" id="closeApiConfig" type="button" title="返回右侧摘要">
+                            返回摘要
+                        </button>
+                    </div>
+                </div>
+                <div class="api-config-content" id="apiConfigContent">
+                    <div class="setting-row api-profile-name-row">
+                        <label for="apiProfileName">通道名称</label>
+                        <input type="text" id="apiProfileName" placeholder="例如：DeepSeek 主账号">
+                    </div>
+                    <div class="setting-row api-provider-row choice-setting">
+                        <label for="apiProvider">API 平台 <span class="field-affordance">点击选择</span></label>
+                        <select id="apiProvider">
+                            <optgroup label="官方 / 直连平台">
+                                <option value="deepseek" selected>DeepSeek</option>
+                                <option value="openai">OpenAI 官方</option>
+                                <option value="agnes">Agnes AI</option>
+                                <option value="gemini">Google Gemini</option>
+                                <option value="xiaomi">小米 MiMo</option>
+                                <option value="aliyun">阿里云通义千问</option>
+                                <option value="tencent">腾讯云 TokenHub</option>
+                                <option value="doubao">字节跳动豆包</option>
+                                <option value="youdao">有道智云大模型网关</option>
+                                <option value="youdaoTranslate">有道智云大模型翻译（仅文本翻译）</option>
+                            </optgroup>
+                            <optgroup label="中转网关（第三方）">
+                                <option value="aigocodeOpenai">AIGoCode GPT / Codex 网关</option>
+                                <option value="aigocodeClaude">AIGoCode Claude 网关</option>
+                                <option value="aigocodeGemini">AIGoCode Gemini 网关</option>
+                                <option value="openaiProxy">OpenAI 中转站</option>
+                            </optgroup>
+                            <optgroup label="自定义">
+                                <option value="custom">自定义平台</option>
+                            </optgroup>
+                        </select>
+                    </div>
+                    <div class="setting-row model-select-row api-model-row choice-setting">
+                        <label for="globalAiModel">默认AI模型 <span class="field-affordance">点击选择</span></label>
+                        <select id="globalAiModel">
+                            <option value="deepseek-v4-flash" selected>DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                            <option value="deepseek-v4-pro">DeepSeek V4 Pro (deepseek-v4-pro)</option>
+                            <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
+                            <option value="deepseek-reasoner">DeepSeek Reasoner (deepseek-reasoner)</option>
+                        </select>
+                    </div>
+                    <div class="setting-row api-custom-model-row" id="apiCustomModelRow" style="display: none;">
+                        <label for="apiCustomModel">自定义模型 ID</label>
+                        <input type="text" id="apiCustomModel" placeholder="例如：glm-5、kimi-k2.6">
+                    </div>
+                    <div class="setting-row api-profile-concurrency-row">
+                        <label for="apiProfileConcurrency">通道并发</label>
+                        <input type="number" id="apiProfileConcurrency" min="1" max="10" value="3">
+                    </div>
+                    <div class="setting-row api-base-url-row" id="baseUrlRow">
+                        <label for="baseUrl">Base URL</label>
+                        <input type="text" id="baseUrl" placeholder="https://api.deepseek.com">
+                    </div>
+                    <div class="setting-row api-key-row">
+                        <label for="apiKey" id="apiKeyLabel">API Key</label>
+                        <div class="secret-input-wrap">
+                            <input type="password" id="apiKey" placeholder="必须填写您自己的 API Key">
+                            <button class="secret-toggle" type="button" data-target="apiKey" aria-label="按住显示 API Key" title="按住显示">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="setting-row api-secret-row" id="apiSecretRow" style="display: none;">
+                        <label for="apiSecret" id="apiSecretLabel">API Secret</label>
+                        <div class="secret-input-wrap">
+                            <input type="password" id="apiSecret" placeholder="有道应用密钥">
+                            <button class="secret-toggle" type="button" data-target="apiSecret" aria-label="按住显示 API Secret" title="按住显示">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="api-key-actions">
+                        <button class="action-btn secondary" id="testApiProfileBtn">测试通道</button>
+                        <button class="action-btn secondary" id="saveApiKeyBtn">保存通道</button>
+                        <button class="action-btn secondary" id="clearApiKeyBtn">清空表单</button>
+                    </div>
+                    <div class="api-status" id="apiStatus"></div>
+                    <div class="api-profile-manager">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>已保存 API 通道</h3>
+                                <p class="panel-subtitle">本地化检测和文本翻译都可以勾选多个通道；翻译专用通道只会在文本翻译中使用</p>
+                            </div>
+                            <span class="panel-count" id="apiProfileCount">0 个</span>
+                        </div>
+                        <div class="api-profile-list" id="apiProfileList"></div>
+                    </div>
+                    <div class="api-help">
+                        <details>
+                            <summary>API 配置说明</summary>
+                            <div class="api-help-body">
+                                <p><strong>Key 来源：</strong>本工具只调用你填写的 API，不提供免费 AI 服务。</p>
+                                <p><strong>多通道：</strong>本地化检测可勾选多个已保存通道，每个通道使用自己的 Key、模型和并发设置。</p>
+                                <p><strong>Base URL：</strong>可以直接修改；保存后优先使用你填写的地址。</p>
+                                <p><strong>中转网关：</strong>AIGoCode 的 GPT、Claude、Gemini 已分开保存，避免模型族不匹配。</p>
+                            </div>
+                        </details>
+                    </div>
+                </div>
+            </div>
+
+            <aside class="workspace-inspector task-console" id="workspaceInspector">
+                <div class="task-console-title">
+                    <div>
+                        <span>AI action timeline</span>
+                        <strong>运行时间线</strong>
+                    </div>
+                    <em>Live</em>
+                </div>
+                <div class="agent-timeline-strip" aria-label="AI action stages">
+                    <span class="timeline-pill thinking">Thinking</span>
+                    <span class="timeline-pill read">Reading</span>
+                    <span class="timeline-pill grep">Grepping</span>
+                    <span class="timeline-pill edit">Editing</span>
+                </div>
+                <div class="inspector-card task-console-card task-console-tool">
+                    <div class="inspector-card-header">
+                        <h3>当前工具</h3>
+                        <span id="inspectorToolBadge">本地处理</span>
+                    </div>
+                    <strong id="inspectorToolName">文件拆分</strong>
+                    <p id="inspectorToolDesc">上传 CSV 或 Excel 文件，按行数拆分并打包下载。</p>
+                </div>
+                <div class="inspector-card task-console-card task-console-summary">
+                    <div class="inspector-card-header">
+                        <h3>任务概览</h3>
+                        <span id="inspectorTaskBadge">就绪</span>
+                    </div>
+                    <div class="inspector-list">
+                        <div><span>输入</span><strong id="inspectorInputState">等待文件</strong></div>
+                        <div><span>输出</span><strong id="inspectorOutputState">本地生成</strong></div>
+                        <div><span>阶段</span><strong id="inspectorTaskPhase">等待开始</strong></div>
+                        <div><span>数据</span><strong id="inspectorDataState">仅在浏览器内处理</strong></div>
+                    </div>
+                </div>
+                <div class="inspector-card task-console-card task-console-metrics">
+                    <div class="inspector-card-header">
+                        <h3>处理状态</h3>
+                        <span id="inspectorEstimateBadge">待选择</span>
+                    </div>
+                    <div class="estimate-grid">
+                        <div><span>文件</span><strong id="inspectorEstimateFiles">-</strong></div>
+                        <div><span>体量</span><strong id="inspectorEstimateSize">-</strong></div>
+                        <div><span>用时</span><strong id="inspectorEstimateTime">等待文件</strong></div>
+                    </div>
+                    <div class="inspector-list compact task-monitor-list">
+                        <div><span>批次/进度</span><strong id="inspectorTaskBatches">按任务生成</strong></div>
+                        <div><span>异常/重试</span><strong id="inspectorTaskFailures">运行中显示</strong></div>
+                    </div>
+                </div>
+                <div class="inspector-card task-console-card api-summary-card task-console-api" id="inspectorApiSummary">
+                    <div class="inspector-card-header">
+                        <h3>API / AI 通道</h3>
+                        <button class="link-btn" type="button" data-open-api-config>管理</button>
+                    </div>
+                    <div class="api-summary-main">
+                        <span class="api-summary-icon">✦</span>
+                        <div>
+                            <strong id="inspectorApiName">未配置通道</strong>
+                            <p id="inspectorApiModel">需要 AI 的工具会在这里显示当前模型</p>
+                        </div>
+                    </div>
+                    <div class="inspector-list compact">
+                        <div><span>状态</span><strong id="inspectorApiHealth">待配置</strong></div>
+                        <div><span>并发</span><strong id="inspectorApiConcurrency">-</strong></div>
+                    </div>
+                </div>
+                <div class="inspector-card task-console-card task-console-recent">
+                    <div class="inspector-card-header">
+                        <h3>最近任务 / 文件</h3>
+                        <button class="link-btn" type="button" id="clearRecentTasksBtn">清空</button>
+                    </div>
+                    <div class="recent-task-list" id="recentTaskList">
+                        <div class="recent-task-empty">选择文件或完成任务后会显示在这里</div>
+                    </div>
+                </div>
+                <div class="inspector-card task-console-card task-console-actions">
+                    <div class="inspector-card-header">
+                        <h3>快捷操作</h3>
+                    </div>
+                    <div class="quick-action-grid">
+                        <button type="button" data-quick-tool="translate">批量翻译</button>
+                        <button type="button" data-quick-tool="l10n-check">质量检测</button>
+                        <button type="button" data-quick-tool="glossary">术语表</button>
+                        <button type="button" data-open-api-config>API 设置</button>
+                    </div>
+                </div>
+            </aside>
+
+            <div class="tool-content" id="split-tool">
+                <div class="tool-header">
+                    <h2>文件拆分</h2>
+                    <p>将大型 CSV/XLSX 文件按行数拆分成多个小文件</p>
+                </div>
+                
+                <div class="tool-body">
+                    <div class="upload-area-large" id="splitUploadArea">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="upload-text">拖拽文件到此处或点击上传</p>
+                        <p class="upload-hint">支持 .csv 和 .xlsx 格式</p>
+                        <input type="file" id="splitFileInput" class="file-input-overlay" accept=".csv,.xlsx,.xls">
+                    </div>
+
+                    <div class="settings-panel">
+                        <div class="setting-row">
+                            <label for="rowsPerFile">每个文件行数</label>
+                            <input type="number" id="rowsPerFile" min="1" value="5000" placeholder="输入每个文件的行数">
+                        </div>
+                        <div class="setting-row">
+                            <label for="splitOutputFormat">输出格式</label>
+                            <select id="splitOutputFormat">
+                                <option value="original" selected>与源文件一致</option>
+                                <option value="csv">CSV</option>
+                                <option value="xlsx">XLSX</option>
+                            </select>
+                        </div>
+                        <div class="setting-row">
+                            <label for="splitEncoding">输出编码</label>
+                            <select id="splitEncoding">
+                                <option value="utf-8" selected>UTF-8</option>
+                                <option value="gbk">GBK (简体中文)</option>
+                                <option value="gb2312">GB2312 (简体中文)</option>
+                                <option value="big5">Big5 (繁体中文)</option>
+                                <option value="utf-16">UTF-16</option>
+                            </select>
+                        </div>
+                        <button class="action-btn primary" id="splitBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M16 3h5v5"/>
+                                <path d="M8 21H3v-5"/>
+                                <path d="M21 3l-9 9"/>
+                                <path d="M3 21l9-9"/>
+                            </svg>
+                            开始拆分
+                        </button>
+                    </div>
+
+                    <div class="info-panel" id="splitFileInfo" style="display: none;">
+                        <h3>文件信息</h3>
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">文件名</span>
+                                <span class="info-value" id="splitFileName">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">文件大小</span>
+                                <span class="info-value" id="splitFileSize">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">检测编码</span>
+                                <span class="info-value" id="splitFileEncoding">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总行数</span>
+                                <span class="info-value highlight" id="splitTotalRows">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总列数</span>
+                                <span class="info-value" id="splitTotalCols">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">预估文件数</span>
+                                <span class="info-value" id="splitEstimatedFiles">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="progress-panel" id="splitProgressSection" style="display: none;">
+                        <h3>拆分进度</h3>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="splitProgressFill"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="splitProgressText">0 / 0</span>
+                            <span id="splitProgressPercent">0%</span>
+                        </div>
+                    </div>
+
+                    <div class="download-panel" id="splitDownloadSection" style="display: none;">
+                        <h3>拆分完成</h3>
+                        <div class="download-actions">
+                            <button class="action-btn primary" id="splitDownloadAllBtn">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                    <polyline points="7,10 12,15 17,10"/>
+                                    <line x1="12" y1="15" x2="12" y2="3"/>
+                                </svg>
+                                打包下载全部 (ZIP)
+                            </button>
+                        </div>
+                        <div class="download-list" id="splitDownloadList"></div>
+                        <div class="download-actions">
+                            <button class="action-btn secondary" id="splitResetBtn">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                    <path d="M3 3v5h5"/>
+                                </svg>
+                                处理新文件
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-content translate-tool-content" id="translate-tool" style="display: none;">
+                <div class="tool-header">
+                    <h2>文本翻译</h2>
+                    <p>AI 驱动的游戏文本翻译，支持多语言</p>
+                </div>
+                
+                <div class="tool-body translate-workflow-grid">
+                    <div class="project-selector translate-project-panel">
+                        <h3>游戏项目</h3>
+                        <div class="project-list" id="projectList"></div>
+                        <button class="icon-btn" id="addProjectBtn" title="添加项目">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"/>
+                                <line x1="5" y1="12" x2="19" y2="12"/>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <div class="upload-area-large translate-upload-panel" id="translateUploadArea">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="upload-text">拖拽文件到此处或点击上传</p>
+                        <p class="upload-hint">支持 .csv 和 .xlsx 格式</p>
+                        <input type="file" id="translateFileInput" class="file-input-overlay" accept=".csv,.xlsx,.xls" multiple>
+                    </div>
+
+                    <div class="info-panel translate-file-info-panel" id="translateFileInfo" style="display: none;">
+                        <h3>文件信息</h3>
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">文件名</span>
+                                <span class="info-value" id="translateFileName">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">检测编码</span>
+                                <span class="info-value" id="translateFileEncoding">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总行数</span>
+                                <span class="info-value" id="translateTotalRows">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总列数</span>
+                                <span class="info-value" id="translateTotalCols">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="column-select-panel" id="translateColumnSelect" style="display: none;">
+                        <div class="sheet-select-panel" id="translateSheetSelectPanel" style="display: none;">
+                            <div class="panel-header-row">
+                                <div>
+                                    <h3>选择要翻译的文件/工作表</h3>
+                                    <p class="panel-subtitle">多文件或多标签页会统一按同一套列结构翻译；请确认要翻译的列位置一致。</p>
+                                </div>
+                                <span class="panel-count" id="translateSheetSelectCount">0 个</span>
+                            </div>
+                            <div class="resource-check-list" id="translateSheetSelectList"></div>
+                        </div>
+                        <h3>选择要翻译的列</h3>
+                        <div class="column-list" id="translateColumnList"></div>
+                        <div class="translation-context-panel">
+                            <div class="setting-row">
+                                <label for="translateStrategy">翻译策略</label>
+                                <select id="translateStrategy">
+                                    <option value="source-reference" selected>主源列 + 参考列（推荐）</option>
+                                    <option value="source-only">仅主源列</option>
+                                </select>
+                                <p class="setting-hint" id="translateStrategyHint">建议选择中文列作为主源列，确认英文列作为参考列；目标译文会以中文理解原意，并参考英文的术语、语气和 UI 简短表达。</p>
+                            </div>
+                            <div class="setting-row" id="translateReferenceColumnRow">
+                                <label for="translateReferenceColumn">参考列（可选，常用确认英文）</label>
+                                <select id="translateReferenceColumn">
+                                    <option value="">不使用参考列</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="settings-panel translate-settings-panel">
+                        <div class="setting-row">
+                            <label for="sourceLang">源语言</label>
+                            <select id="sourceLang">
+                                <option value="zh-CN">中文（简体）</option>
+                            </select>
+                        </div>
+                        <div class="setting-row">
+                            <label for="targetLang">目标语言</label>
+                            <select id="targetLang">
+                                <option value="en">英语</option>
+                                <option value="ja">日语</option>
+                                <option value="ko">韩语</option>
+                                <option value="zh-TW">中文（繁体）</option>
+                                <option value="fr">法语</option>
+                                <option value="de">德语</option>
+                                <option value="es">西班牙语</option>
+                                <option value="pt">葡萄牙语</option>
+                                <option value="ru">俄语</option>
+                                <option value="th">泰语</option>
+                                <option value="vi">越南语</option>
+                                <option value="id">印尼语</option>
+                                <option value="it">意大利语</option>
+                                <option value="ar">阿拉伯语</option>
+                                <option value="tr">土耳其语</option>
+                                <option value="hi">印地语</option>
+                                <option value="fil">菲律宾语</option>
+                                <option value="ms">马来语</option>
+                                <option value="nl">荷兰语</option>
+                                <option value="pl">波兰语</option>
+                                <option value="uk">乌克兰语</option>
+                                <option value="fa">波斯语</option>
+                                <option value="ur">乌尔都语</option>
+                                <option value="bn">孟加拉语</option>
+                                <option value="my">缅甸语</option>
+                                <option value="km">高棉语</option>
+                                <option value="lo">老挝语</option>
+                            </select>
+                        </div>
+                        <details class="setting-row translate-collapsible-setting translate-target-batch-row">
+                            <summary class="translate-collapsible-summary">
+                                <span>批量目标语言</span>
+                                <small id="translateTargetSummary">当前单语言</small>
+                            </summary>
+                            <div class="translate-collapsible-body">
+                                <div class="translate-setting-head">
+                                    <label>多语言队列</label>
+                                    <div class="translate-inline-actions">
+                                        <button class="action-btn tiny secondary" id="translateCommonLangBtn" type="button">常用多语</button>
+                                        <button class="action-btn tiny secondary" id="translateSelectAllLangBtn" type="button">全选</button>
+                                        <button class="action-btn tiny secondary" id="translateClearLangBtn" type="button">清空</button>
+                                    </div>
+                                </div>
+                                <div class="translate-language-grid" id="translateTargetLangList"></div>
+                                <p class="setting-hint" id="translateLanguageRunHint">只勾选当前目标语言时按单语言翻译；勾选多个语言时会按语言逐个运行并分别自动保存。</p>
+                            </div>
+                        </details>
+                        <details class="setting-row translate-collapsible-setting">
+                            <summary class="translate-collapsible-summary">
+                                <span>翻译模型通道</span>
+                                <small id="translateProfileSummary">默认通道</small>
+                            </summary>
+                            <div class="translate-collapsible-body">
+                                <div class="resource-check-list" id="translateProfileList"></div>
+                                <p class="setting-hint">勾选多个 API 通道后，同一条原文会生成多个模型译文列，便于对照质量。</p>
+                            </div>
+                        </details>
+                        <div class="translate-submit-plan" id="translateSubmitPlanHint"></div>
+                        <div class="setting-row">
+                            <div class="translate-import-panel">
+                                <input type="file" id="translateProgressImportInput" accept=".xlsx,.xls,.csv" multiple hidden>
+                                <label class="action-btn secondary" for="translateProgressImportInput">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="17 8 12 3 7 8"/>
+                                        <line x1="12" y1="3" x2="12" y2="15"/>
+                                    </svg>
+                                    导入翻译报告继续
+                                </label>
+                                <button class="action-btn secondary" id="translateReviewImportedProgressBtn" type="button">复查已完成译文</button>
+                                <button class="action-btn secondary" id="translateRetrySuspiciousBtn" type="button" style="display: none;">只补译可疑行</button>
+                                <button class="action-btn secondary" id="translateCompactLongImportedBtn" type="button" style="display: none;">精简超长译文</button>
+                                <button class="action-btn secondary" id="translateClearImportedProgressBtn" type="button" style="display: none;">清除导入</button>
+                            </div>
+                            <div class="translate-import-status" id="translateProgressImportStatus">可导入之前下载的 translation_report.xlsx，或带“翻译报告”分页的 translated.xlsx；成功项会复用，失败/缺失项会继续翻译。</div>
+                        </div>
+                        <div class="setting-row">
+                            <label>术语表约束</label>
+                            <div class="resource-check-list" id="translateGlossaryList"></div>
+                            <p class="setting-hint">翻译时只发送当前批次命中的术语；优先使用整理后译文，多语言目标会优先匹配对应语言术语列。</p>
+                            <p class="setting-hint">不勾选术语表时，工具只会复用完全相同原文的译文；同一词出现在不同句子里不会被强制统一。</p>
+                        </div>
+                        <details class="setting-row translate-collapsible-setting translate-quality-setting">
+                            <summary class="translate-collapsible-summary">
+                                <span>质量与续跑策略</span>
+                                <small id="translateQualitySummary">推荐策略已启用</small>
+                            </summary>
+                            <div class="translate-collapsible-body translate-quality-grid">
+                                <label class="checkbox-setting" for="translateConsistencyMemory">
+                                    <input type="checkbox" id="translateConsistencyMemory" checked>
+                                    <span>
+                                        <strong>自动一致性记忆</strong>
+                                        <small>默认开启。用本文件高频短语提醒 AI 减少同词多译。</small>
+                                    </span>
+                                </label>
+                                <label class="checkbox-setting" for="translatePostCheck">
+                                    <input type="checkbox" id="translatePostCheck" checked>
+                                    <span>
+                                        <strong>翻译后自动轻量检测</strong>
+                                        <small>默认开启。检查术语、数字、占位符和标签，并写入结果表。</small>
+                                    </span>
+                                </label>
+                                <label class="checkbox-setting" for="translateFastBatchMode">
+                                    <input type="checkbox" id="translateFastBatchMode" checked>
+                                    <span>
+                                        <strong>快速批量翻译模式</strong>
+                                        <small>默认开启。第一轮不逐条 AI 修复，完成后再补跑硬问题。</small>
+                                    </span>
+                                </label>
+                                <label class="checkbox-setting" for="translateCompletenessCheck">
+                                    <input type="checkbox" id="translateCompletenessCheck" checked>
+                                    <span>
+                                        <strong>检查内容是否漏译</strong>
+                                        <small>默认开启。本地标记异常过短、分句缺失和繁简转换不完整。</small>
+                                    </span>
+                                </label>
+                                <label class="checkbox-setting" for="translateAutoCompactLong">
+                                    <input type="checkbox" id="translateAutoCompactLong">
+                                    <span>
+                                        <strong>超长译文二次精简</strong>
+                                        <small>默认关闭。会额外调用 AI，只对超长译文尝试压缩。</small>
+                                    </span>
+                                </label>
+                                <label class="checkbox-setting" for="translateAutoRetryMultiTarget">
+                                    <input type="checkbox" id="translateAutoRetryMultiTarget">
+                                    <span>
+                                        <strong>多语言自动补跑失败项</strong>
+                                        <small>默认关闭。每种语言完成后若有真实失败/硬问题，会先补跑一次再进入下一语言。</small>
+                                    </span>
+                                </label>
+                            </div>
+                        </details>
+                        <div class="setting-row">
+                            <label for="translateConcurrency">并发数量</label>
+                            <select id="translateConcurrency">
+                                <option value="1">1 (最稳定)</option>
+                                <option value="3" selected>3 (推荐)</option>
+                                <option value="5">5 (较快)</option>
+                                <option value="10">10 (最快)</option>
+                            </select>
+                        </div>
+                        <p class="model-hint">默认使用已选通道和推荐质量策略；需要多语言、多模型或额外精简时再展开对应区域。</p>
+                        <button class="action-btn primary" id="translateBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M5 8l6 6"/>
+                                <path d="M4 14l6-6 2-2"/>
+                                <path d="M2 5h12"/>
+                                <path d="M7 2v3"/>
+                                <path d="M22 22l-5-10-5 10"/>
+                                <path d="M14 18h6"/>
+                            </svg>
+                            <span id="translateBtnLabel">开始翻译</span>
+                        </button>
+                    </div>
+
+                    <div class="progress-panel" id="translateProgressSection" style="display: none;">
+                        <div class="progress-header">
+                            <h3>翻译进度</h3>
+                            <div class="progress-actions">
+                                <button class="action-btn secondary" id="translatePauseBtn">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="6" y="4" width="4" height="16"/>
+                                        <rect x="14" y="4" width="4" height="16"/>
+                                    </svg>
+                                    暂停
+                                </button>
+                                <button class="action-btn primary" id="translateResumeBtn" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    继续
+                                </button>
+                                <button class="action-btn secondary" id="translateDownloadProgressBtn" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="7 10 12 15 17 10"/>
+                                        <line x1="12" y1="15" x2="12" y2="3"/>
+                                    </svg>
+                                    下载当前进度
+                                </button>
+                                <button class="action-btn secondary" id="translateDownloadReportBtn" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                        <polyline points="14 2 14 8 20 8"/>
+                                        <line x1="8" y1="13" x2="16" y2="13"/>
+                                        <line x1="8" y1="17" x2="16" y2="17"/>
+                                    </svg>
+                                    下载翻译报告
+                                </button>
+                                <button class="action-btn danger" id="translateCancelBtn">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="6" y="6" width="12" height="12" rx="2"/>
+                                    </svg>
+                                    取消任务
+                                </button>
+                            </div>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="translateProgressFill"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="translateProgressText">0 / 0</span>
+                            <span id="translateProgressPercent">0%</span>
+                        </div>
+                        <div class="progress-info" id="translateProgressInfo"></div>
+                        <div class="translate-language-run-panel" id="translateLanguageRunPanel" style="display: none;">
+                            <div>
+                                <span class="translate-language-run-label">当前语言</span>
+                                <strong id="translateCurrentLanguageLabel">-</strong>
+                                <p id="translateLanguageRunMeta">等待开始</p>
+                            </div>
+                            <div class="translate-language-run-chips" id="translateLanguageRunChips"></div>
+                        </div>
+                        <div class="channel-status-panel" id="translateChannelStatusPanel" style="display: none;">
+                            <div class="channel-status-header">
+                                <h4>通道状态</h4>
+                                <span>实时显示每个模型的进度、耗时、失败和补跑状态</span>
+                            </div>
+                            <div class="channel-status-grid" id="translateChannelStatusGrid"></div>
+                        </div>
+                        
+                        <div class="translation-preview">
+                            <h4>实时翻译内容</h4>
+                            <div class="translation-list" id="translationList"></div>
+                        </div>
+                    </div>
+
+                    <div class="download-panel" id="translateDownloadSection" style="display: none;">
+                        <h3>翻译完成</h3>
+                        <div class="download-info">
+                            <span id="translatedCount">0</span> 条文本已翻译
+                        </div>
+                        <p class="translate-download-language-summary" id="translateDownloadLanguageSummary"></p>
+                        <button class="action-btn primary" id="translateDownloadBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            下载翻译文件
+                        </button>
+                        <button class="action-btn secondary" id="translateRetryFailedBtn" style="display: none;">
+                            补跑失败翻译
+                        </button>
+                        <label class="action-btn secondary" id="translateRetryImportShortcutBtn" for="translateProgressImportInput" style="display: none;">
+                            导入报告补跑
+                        </label>
+                        <button class="action-btn secondary" id="translateDownloadFinalReportBtn" style="display: none;">
+                            下载翻译报告
+                        </button>
+                        <button class="action-btn secondary" id="translateResetBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                <path d="M3 3v5h5"/>
+                            </svg>
+                            处理新文件
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-content" id="convert-tool" style="display: none;">
+                <div class="tool-header">
+                    <h2>格式转换</h2>
+                    <p>转换 CSV / TSV / XLSX 文件格式、文本编码和换行规则</p>
+                </div>
+                
+                <div class="tool-body">
+                    <div class="upload-area-large" id="convertUploadArea">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="upload-text">拖拽文件到此处或点击上传</p>
+                        <p class="upload-hint">支持 .csv、.tsv、.xlsx、.xls 格式</p>
+                        <input type="file" id="convertFileInput" class="file-input-overlay" accept=".csv,.tsv,.xlsx,.xls">
+                    </div>
+
+                    <div class="info-panel" id="convertFileInfo" style="display: none;">
+                        <h3>文件信息</h3>
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">文件名</span>
+                                <span class="info-value" id="convertFileName">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">文件大小</span>
+                                <span class="info-value" id="convertFileSize">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">检测编码</span>
+                                <span class="info-value highlight" id="convertFileEncoding">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总行数</span>
+                                <span class="info-value" id="convertTotalRows">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总列数</span>
+                                <span class="info-value" id="convertTotalCols">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="settings-panel">
+                        <div class="setting-row">
+                            <label for="convertOutputType">输出文件格式</label>
+                            <select id="convertOutputType">
+                                <option value="csv" selected>CSV (.csv)</option>
+                                <option value="tsv">TSV (.tsv)</option>
+                                <option value="xlsx">Excel 工作簿 (.xlsx)</option>
+                            </select>
+                        </div>
+                        <div class="setting-row">
+                            <label for="convertEncoding">文本编码</label>
+                            <select id="convertEncoding">
+                                <option value="utf-8" selected>UTF-8（无 BOM）</option>
+                                <option value="utf8-bom">UTF-8（带 BOM）</option>
+                                <option value="gbk">GBK</option>
+                                <option value="gb2312">GB2312</option>
+                                <option value="big5">Big5</option>
+                                <option value="utf-16">UTF-16 LE</option>
+                            </select>
+                        </div>
+                        <div class="setting-row">
+                            <label for="delimiter">分隔符</label>
+                            <select id="delimiter">
+                                <option value=",">逗号 (,)</option>
+                                <option value=";">分号 (;)</option>
+                                <option value="\t">制表符 (Tab)</option>
+                                <option value="|">竖线 (|)</option>
+                            </select>
+                        </div>
+                        <div class="setting-row">
+                            <label for="newline">换行符</label>
+                            <select id="newline">
+                                <option value="\n">Unix (LF)</option>
+                                <option value="\r\n">Windows (CRLF)</option>
+                                <option value="\r">Mac (CR)</option>
+                            </select>
+                        </div>
+                        <button class="action-btn primary" id="convertBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 20V10"/>
+                                <path d="M18 20V4"/>
+                                <path d="M6 20v-6"/>
+                            </svg>
+                            开始转换
+                        </button>
+                    </div>
+
+                    <div class="download-panel" id="convertDownloadSection" style="display: none;">
+                        <h3>转换完成</h3>
+                        <div class="download-info">
+                            <span>已转换为 </span>
+                            <span id="convertOutputFormat" class="highlight">CSV · UTF-8（无 BOM）</span>
+                        </div>
+                        <button class="action-btn primary" id="convertDownloadBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            下载转换文件
+                        </button>
+                        <button class="action-btn secondary" id="convertResetBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                <path d="M3 3v5h5"/>
+                            </svg>
+                            转换新文件
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-content precision-replace-tool-content" id="precision-replace-tool" style="display: none;">
+                <div class="tool-header">
+                    <h2>精准替换</h2>
+                    <p>按中文语境安全替换英文词，保留 XLSX 原有样式，并用可选颜色标注修改位置</p>
+                </div>
+
+                <div class="tool-body precision-replace-grid">
+                    <div class="upload-area-large precision-replace-upload" id="precisionReplaceUploadArea">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="upload-text">拖拽 XLSX 到此处或点击上传</p>
+                        <p class="upload-hint">仅支持 .xlsx；导出时会保留原工作簿样式</p>
+                        <input type="file" id="precisionReplaceFileInput" class="file-input-overlay" accept=".xlsx">
+                    </div>
+
+                    <div class="settings-panel precision-replace-settings">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>列与标注设置</h3>
+                                <p class="panel-subtitle">建议选择 id / 中文 / 英文三列；输出会追加“替换后英文”列用于对照。</p>
+                            </div>
+                        </div>
+                        <div class="precision-replace-settings-grid">
+                            <div class="setting-row">
+                                <label for="precisionReplaceSheet">工作表</label>
+                                <select id="precisionReplaceSheet"></select>
+                            </div>
+                            <div class="setting-row precision-replace-header-row">
+                                <label class="checkbox-setting compact" for="precisionReplaceHasHeader">
+                                    <input type="checkbox" id="precisionReplaceHasHeader" checked>
+                                    <span><strong>首行为表头</strong></span>
+                                </label>
+                            </div>
+                            <div class="setting-row">
+                                <label for="precisionReplaceIdColumn">ID 列（可选）</label>
+                                <select id="precisionReplaceIdColumn"></select>
+                            </div>
+                            <div class="setting-row">
+                                <label for="precisionReplaceSourceColumn">中文源列</label>
+                                <select id="precisionReplaceSourceColumn"></select>
+                            </div>
+                            <div class="setting-row">
+                                <label for="precisionReplaceTargetColumn">英文列</label>
+                                <select id="precisionReplaceTargetColumn"></select>
+                            </div>
+                            <div class="setting-row">
+                                <label class="checkbox-setting compact" for="precisionReplaceWholeWord">
+                                    <input type="checkbox" id="precisionReplaceWholeWord" checked>
+                                    <span><strong>英文整词匹配</strong><small>避免 bar 误伤 barbarian、toolbar 等单词</small></span>
+                                </label>
+                            </div>
+                            <div class="setting-row">
+                                <label class="checkbox-setting compact" for="precisionReplaceCaseSensitive">
+                                    <input type="checkbox" id="precisionReplaceCaseSensitive">
+                                    <span><strong>区分大小写</strong><small>默认不区分，更适合批量清洗</small></span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="settings-panel precision-replace-rules-panel">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>替换规则</h3>
+                                <p class="panel-subtitle">只有“中文源列命中触发词”且“英文列命中当前英文”时才会替换，避免全局粗暴替换。</p>
+                            </div>
+                            <button class="action-btn mini secondary" id="precisionReplaceAddRuleBtn" type="button">添加规则</button>
+                        </div>
+                        <div class="precision-replace-mark-choice">
+                            <div>
+                                <strong>导出标色</strong>
+                                <small>不标色时只追加“替换后英文”列，不修改原表单元格底色。</small>
+                            </div>
+                            <select id="precisionReplaceMarkScope" aria-label="导出标色方式">
+                                <option value="none" selected>不标色，只追加替换后英文列</option>
+                                <option value="replacement">仅标色替换后英文列</option>
+                                <option value="target-and-replacement">标色英文列 + 替换后英文列</option>
+                                <option value="row">标色整行</option>
+                            </select>
+                        </div>
+                        <div class="precision-replace-rules-head">
+                            <span>中文触发词</span>
+                            <span>当前英文</span>
+                            <span>替换为英文</span>
+                            <span>颜色（标色时）</span>
+                            <span></span>
+                        </div>
+                        <div class="precision-replace-rules" id="precisionReplaceRules"></div>
+                        <div class="precision-replace-actions">
+                            <button class="action-btn secondary" id="precisionReplacePreviewBtn" type="button">预览命中</button>
+                            <button class="action-btn primary" id="precisionReplaceRunBtn" type="button">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                    <polyline points="7 10 12 15 17 10"/>
+                                    <line x1="12" y1="15" x2="12" y2="3"/>
+                                </svg>
+                                导出替换文件
+                            </button>
+                            <button class="action-btn secondary" id="precisionReplaceResetBtn" type="button">重置</button>
+                        </div>
+                        <div class="precision-replace-export-status" id="precisionReplaceExportStatus" style="display: none;"></div>
+                    </div>
+
+                    <div class="results-panel precision-replace-results" id="precisionReplaceResults" style="display: none;">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>命中预览</h3>
+                                <p class="panel-subtitle" id="precisionReplaceSummary">尚未生成预览</p>
+                            </div>
+                        </div>
+                        <div class="results-table-container precision-replace-table-wrap">
+                            <table class="results-table precision-replace-table">
+                                <thead>
+                                    <tr>
+                                        <th>行号</th>
+                                        <th>ID</th>
+                                        <th>中文</th>
+                                        <th>原英文</th>
+                                        <th>替换后英文</th>
+                                        <th>规则</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="precisionReplacePreviewBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-content lite-check-tool-content" id="lite-check-tool" style="display: none;">
+                <div class="tool-header">
+                    <h2>轻量质检</h2>
+                    <p>本地快速扫描拼写疑点、占位符、换行符、标签和混入中文，不消耗 AI token</p>
+                </div>
+
+                <div class="tool-body lite-check-grid">
+                    <div class="upload-area-large lite-check-upload" id="liteCheckUploadArea">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="upload-text">拖拽文件到此处或点击上传</p>
+                        <p class="upload-hint">支持 .csv、.xlsx、.xls，可一次选择多个文件</p>
+                        <input type="file" id="liteCheckFileInput" class="file-input-overlay" accept=".csv,.xlsx,.xls" multiple>
+                    </div>
+
+                    <div class="settings-panel lite-check-settings" id="liteCheckSettings" style="display: none;">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>文件与列设置</h3>
+                                <p class="panel-subtitle">只做本地规则扫描，适合在完整 AI 检测前先排查基础错误。</p>
+                            </div>
+                        </div>
+                        <div class="lite-check-file-summary" id="liteCheckFileSummary">尚未加载文件</div>
+                        <div class="lite-check-sheet-list" id="liteCheckSheetList"></div>
+                        <div class="lite-check-settings-grid">
+                            <div class="setting-row">
+                                <label class="checkbox-setting compact" for="liteCheckHasHeader">
+                                    <input type="checkbox" id="liteCheckHasHeader" checked>
+                                    <span><strong>首行为表头</strong><small>关闭后按列 A、列 B 识别</small></span>
+                                </label>
+                            </div>
+                            <div class="setting-row">
+                                <label for="liteCheckSourceColumn">原文列（可选）</label>
+                                <select id="liteCheckSourceColumn"></select>
+                            </div>
+                            <div class="setting-row">
+                                <label for="liteCheckTargetColumn">检测列</label>
+                                <select id="liteCheckTargetColumn"></select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="settings-panel lite-check-rules" id="liteCheckRules" style="display: none;">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>检测规则</h3>
+                                <p class="panel-subtitle">格式类问题会对照原文列；默认拼写检查会抓明确错词和高置信近似拼错，宽松候选需手动开启。</p>
+                            </div>
+                        </div>
+                        <div class="lite-check-rule-grid">
+                            <label class="checkbox-setting compact" for="liteCheckRuleSpelling">
+                                <input type="checkbox" id="liteCheckRuleSpelling" checked>
+                                <span><strong>英文错词（高精度）</strong><small>明确错词 + 高置信拼写近似</small></span>
+                            </label>
+                            <label class="checkbox-setting compact" for="liteCheckRuleLooseSpelling">
+                                <input type="checkbox" id="liteCheckRuleLooseSpelling">
+                                <span><strong>宽松拼写候选</strong><small>默认关闭；显示疑似非词和语义候选</small></span>
+                            </label>
+                            <label class="checkbox-setting compact" for="liteCheckRulePlaceholders">
+                                <input type="checkbox" id="liteCheckRulePlaceholders" checked>
+                                <span><strong>占位符一致性</strong><small>%s、%d、{0}、{{name}}</small></span>
+                            </label>
+                            <label class="checkbox-setting compact" for="liteCheckRuleEscapes">
+                                <input type="checkbox" id="liteCheckRuleEscapes" checked>
+                                <span><strong>换行与转义符</strong><small>\n、\t、\\ 等数量对照</small></span>
+                            </label>
+                            <label class="checkbox-setting compact" for="liteCheckRuleTags">
+                                <input type="checkbox" id="liteCheckRuleTags" checked>
+                                <span><strong>标签结构</strong><small>HTML / 富文本标签闭合</small></span>
+                            </label>
+                            <label class="checkbox-setting compact" for="liteCheckRuleChinese">
+                                <input type="checkbox" id="liteCheckRuleChinese" checked>
+                                <span><strong>译文混入中文</strong><small>检测列出现 CJK 字符</small></span>
+                            </label>
+                            <label class="checkbox-setting compact" for="liteCheckRuleEmptyRepeat">
+                                <input type="checkbox" id="liteCheckRuleEmptyRepeat" checked>
+                                <span><strong>空译文 / 原文重复</strong><small>发现漏翻和直接复制</small></span>
+                            </label>
+                        </div>
+                        <div class="lite-check-actions">
+                            <button class="action-btn primary" id="liteCheckRunBtn" type="button">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M9 11l2 2 4-4"/>
+                                    <path d="M21 12a9 9 0 1 1-3-6.7"/>
+                                    <path d="M21 3v6h-6"/>
+                                </svg>
+                                开始质检
+                            </button>
+                            <button class="action-btn secondary" id="liteCheckDownloadBtn" type="button" disabled>下载质检报告</button>
+                            <button class="action-btn secondary" id="liteCheckResetBtn" type="button">重置</button>
+                        </div>
+                        <div class="lite-check-progress" id="liteCheckProgress" style="display: none;"></div>
+                    </div>
+
+                    <div class="results-panel lite-check-results" id="liteCheckResults" style="display: none;">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>质检结果</h3>
+                                <p class="panel-subtitle" id="liteCheckSummary">尚未开始质检</p>
+                            </div>
+                        </div>
+                        <div class="lite-check-summary-grid" id="liteCheckSummaryGrid"></div>
+                        <div class="lite-check-type-summary" id="liteCheckTypeSummary"></div>
+                        <div class="lite-check-filterbar" id="liteCheckFilterBar">
+                            <div class="setting-row compact">
+                                <label for="liteCheckSeverityFilter">严重度</label>
+                                <select id="liteCheckSeverityFilter">
+                                    <option value="all">全部严重度</option>
+                                    <option value="阻断">阻断</option>
+                                    <option value="严重">严重</option>
+                                    <option value="提示">提示</option>
+                                </select>
+                            </div>
+                            <div class="setting-row compact">
+                                <label for="liteCheckTypeFilter">问题类型</label>
+                                <select id="liteCheckTypeFilter">
+                                    <option value="all">全部类型</option>
+                                </select>
+                            </div>
+                            <div class="setting-row compact lite-check-search-field">
+                                <label for="liteCheckSearchInput">搜索</label>
+                                <input type="search" id="liteCheckSearchInput" placeholder="来源、行号、原中文、英文、建议">
+                            </div>
+                            <button class="action-btn secondary lite-check-clear-filter" id="liteCheckClearFiltersBtn" type="button">清除筛选</button>
+                        </div>
+                        <div class="results-table-container lite-check-table-wrap">
+                            <table class="results-table lite-check-table">
+                                <thead>
+                                    <tr>
+                                        <th>严重度</th>
+                                        <th>问题类型</th>
+                                        <th>来源</th>
+                                        <th>行号</th>
+                                        <th>原中文</th>
+                                        <th>检测英文</th>
+                                        <th>建议</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="liteCheckResultBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-content" id="l10n-check-tool" style="display: none;">
+                <div class="tool-header">
+                    <h2>本地化检测</h2>
+                    <p>检测英文文本的本地化质量</p>
+                </div>
+                
+                <div class="tool-body l10n-workflow-grid">
+                    <div class="upload-area-large l10n-upload-panel" id="l10nUploadArea">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="upload-text">拖拽文件到此处或点击上传</p>
+                        <p class="upload-hint">支持 .csv 和 .xlsx 格式，可一次选择多个文件</p>
+                        <input type="file" id="l10nFileInput" class="file-input-overlay" accept=".csv,.xlsx,.xls" multiple>
+                    </div>
+
+                    <div class="info-panel l10n-file-info-panel" id="l10nFileInfo" style="display: none;">
+                        <h3>文件信息</h3>
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">文件名</span>
+                                <span class="info-value" id="l10nFileName">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总行数</span>
+                                <span class="info-value" id="l10nTotalRows">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">总列数</span>
+                                <span class="info-value" id="l10nTotalCols">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="column-select-panel l10n-column-panel" id="l10nColumnSelect" style="display: none;">
+                        <div class="sheet-select-panel" id="l10nSheetSelectPanel" style="display: none;">
+                            <div class="panel-header-row">
+                                <div>
+                                    <h3>选择要检测的文件/工作表</h3>
+                                    <p class="panel-subtitle">多文件或多标签页会合并为一个检测队列；请确认列结构一致。</p>
+                                </div>
+                                <span class="panel-count" id="l10nSheetSelectCount">0 个</span>
+                            </div>
+                            <div class="resource-check-list" id="l10nSheetSelectList"></div>
+                        </div>
+                        <h3>选择原文列和译文列</h3>
+                        <div class="column-select-row">
+                            <div class="column-select-group">
+                                <label>选择原文列</label>
+                                <div class="column-list" id="l10nSourceColumnList"></div>
+                            </div>
+                            <div class="column-select-group">
+                                <label>选择译文列</label>
+                                <div class="column-list" id="l10nTargetColumnList"></div>
+                            </div>
+                        </div>
+                        <div class="column-validation-message" id="l10nColumnValidation" style="display: none;"></div>
+                        <button class="action-btn primary" id="l10nConfirmColumnBtn">确认选择</button>
+                    </div>
+
+                    <div class="settings-panel l10n-settings-panel">
+                        <div class="setting-row">
+                            <label for="l10nProjectSelect">游戏项目</label>
+                            <select id="l10nProjectSelect"></select>
+                            <p class="setting-hint">检测会按照所选项目的翻译标准和规范执行</p>
+                        </div>
+                        <div class="setting-row">
+                            <label>术语表</label>
+                            <div class="resource-check-list" id="l10nGlossaryList"></div>
+                            <p class="setting-hint">可勾选术语表工具中上传或提取出的术语表；不勾选则不按术语表检测</p>
+                        </div>
+                        <div class="setting-row l10n-profile-section">
+                            <div class="section-label-row">
+                                <label>检测模型通道</label>
+                                <span class="panel-count" id="l10nProfileSelectedCount">0 / 0</span>
+                            </div>
+                            <div class="l10n-profile-actions">
+                                <button class="action-btn tiny secondary" id="l10nSelectDefaultProfileBtn" type="button">只选默认</button>
+                                <button class="action-btn tiny secondary" id="l10nSelectAllProfilesBtn" type="button">全选可用</button>
+                                <button class="action-btn tiny secondary" id="l10nClearProfilesBtn" type="button">清空</button>
+                            </div>
+                            <div class="resource-check-list" id="l10nProfileList"></div>
+                            <p class="setting-hint">勾选多个已保存 API 通道后，会按检测模式进行批量检测或复核；每个通道使用自己的 Key、模型和并发设置</p>
+                        </div>
+                        <div class="setting-row">
+                            <label for="l10nCheckMode">检测模式</label>
+                            <select id="l10nCheckMode">
+                                <option value="balanced" selected>均衡模式（推荐：批量检测 + 异常复核）</option>
+                                <option value="economy">省钱模式（批量检测 + 单模型）</option>
+                                <option value="strict">严格模式（批量多模型全量复核）</option>
+                            </select>
+                        </div>
+                        <div class="mode-explainer" id="l10nModeExplainer"></div>
+                        <div class="setting-row">
+                            <label class="checkbox-setting" for="l10nAutoSave">
+                                    <input type="checkbox" id="l10nAutoSave" checked>
+                                    <span>
+                                        <strong>自动保存检测结果</strong>
+                                        <small>桌面端完成时保存 XLSX 完整报告；暂停或异常时保存 CSV 阶段结果</small>
+                                    </span>
+                                </label>
+                        </div>
+                        <div class="setting-row">
+                            <label>历史检测结果</label>
+                            <div class="history-import-panel">
+                                <div class="history-import-actions">
+                                    <label class="history-import-button" id="l10nHistoryImportArea" for="l10nHistoryImportInput">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                            <polyline points="17 8 12 3 7 8"/>
+                                            <line x1="12" y1="3" x2="12" y2="15"/>
+                                        </svg>
+                                        导入历史检测结果
+                                        <input type="file" id="l10nHistoryImportInput" accept=".csv,.xlsx,.xls" data-telemetry-skip="true" hidden>
+                                    </label>
+                                    <button class="action-btn secondary" id="l10nClearHistoryBtn" type="button" style="display: none;">清除导入</button>
+                                </div>
+                                <div class="history-import-status" id="l10nHistoryImportStatus">未导入历史检测结果；导入后会优先复用已检测过的模型结果，减少重复 token 消耗。</div>
+                            </div>
+                            <p class="setting-hint">新版报告使用指纹强匹配；旧版报告会按原文、译文和模型弱匹配，并在状态中提示风险</p>
+                        </div>
+                        <button class="action-btn primary" id="l10nCheckBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M9 12l2 2 4-4"/>
+                            </svg>
+                            开始检测
+                        </button>
+                    </div>
+
+                    <div class="progress-panel l10n-progress-panel" id="l10nProgressSection" style="display: none;">
+                        <div class="progress-header">
+                            <h3>检测进度</h3>
+                            <div class="progress-actions">
+                                <button class="action-btn secondary" id="l10nPauseBtn" type="button">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="6" y="4" width="4" height="16"/>
+                                        <rect x="14" y="4" width="4" height="16"/>
+                                    </svg>
+                                    暂停
+                                </button>
+                                <button class="action-btn primary" id="l10nResumeBtn" type="button" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    继续
+                                </button>
+                                <button class="action-btn secondary" id="l10nDownloadProgressBtn" type="button" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="7 10 12 15 17 10"/>
+                                        <line x1="12" y1="15" x2="12" y2="3"/>
+                                    </svg>
+                                    下载当前结果
+                                </button>
+                                <button class="action-btn secondary" id="l10nRetryFailedBatchesBtn" type="button" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                                        <polyline points="21 3 21 9 15 9"/>
+                                    </svg>
+                                    补跑失败批次
+                                </button>
+                                <button class="action-btn danger" id="l10nCancelBtn" type="button">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                    取消任务
+                                </button>
+                            </div>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="l10nProgressFill"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="l10nProgressText">0 / 0</span>
+                            <span id="l10nProgressPercent">0%</span>
+                        </div>
+                        <div class="progress-info" id="l10nProgressInfo"></div>
+                        <div class="channel-status-panel" id="l10nChannelStatusPanel" style="display: none;">
+                            <div class="channel-status-header">
+                                <h4>通道进度</h4>
+                                <span>每个模型独立排队检测，异常会在这里标出</span>
+                            </div>
+                            <div class="channel-status-grid" id="l10nChannelStatusGrid"></div>
+                        </div>
+                        
+                        <div class="check-preview">
+                            <h4>实时检测结果</h4>
+                            <div class="check-list" id="l10nCheckList"></div>
+                        </div>
+                    </div>
+
+                    <div class="results-panel l10n-results-panel" id="l10nResults" style="display: none;">
+                        <h3>检测结果</h3>
+                        <div class="results-summary">
+                            <div class="summary-item">
+                                <span class="summary-label">检测文本数</span>
+                                <span class="summary-value" id="l10nTotalChecked">0</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">异常行数</span>
+                                <span class="summary-value error" id="l10nTotalIssues">0</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">通过率</span>
+                                <span class="summary-value success" id="l10nPassRate">0%</span>
+                            </div>
+                        </div>
+                        <div class="l10n-report-style-panel">
+                            <div>
+                                <strong>报告样式</strong>
+                                <span>单个 XLSX 源文件会保留原表已有的单元格颜色和文字颜色；标色只作用于下载的检测报告。</span>
+                            </div>
+                            <select id="l10nReportMarkScope" aria-label="检测报告标色方式">
+                                <option value="none" selected>不额外标色，仅保留原文件样式</option>
+                                <option value="target">仅标色检测译文列</option>
+                                <option value="source-target">标色检测原文 + 检测译文列</option>
+                                <option value="row">标色整行</option>
+                            </select>
+                            <label class="l10n-report-color-picker">
+                                <input id="l10nReportMarkColor" type="color" value="#fff2a8">
+                                <span>不标色</span>
+                            </label>
+                        </div>
+                        <div class="results-table-container">
+                            <div class="table-toolbar" id="l10nResultsToolbar" style="display: none;">
+                                <span id="l10nResultsRange">0 / 0</span>
+                                <div class="table-toolbar-actions">
+                                    <button class="action-btn mini secondary" id="l10nPrevPageBtn" type="button">上一页</button>
+                                    <select id="l10nPageSizeSelect" aria-label="每页显示数量">
+                                        <option value="100">每页 100</option>
+                                        <option value="250" selected>每页 250</option>
+                                        <option value="500">每页 500</option>
+                                    </select>
+                                    <button class="action-btn mini secondary" id="l10nNextPageBtn" type="button">下一页</button>
+                                </div>
+                            </div>
+                            <table class="results-table" id="l10nResultsTable">
+                                <thead>
+                                    <tr>
+                                        <th>检测原文</th>
+                                        <th>检测译文</th>
+                                        <th>检测模型</th>
+                                        <th>检测结果</th>
+                                        <th>问题类型</th>
+                                        <th>严重程度</th>
+                                        <th>修改为</th>
+                                        <th>完整修正译文</th>
+                                        <th>问题原因</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="l10nResultsBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="download-buttons">
+                            <button class="action-btn secondary" id="l10nRetryFailedBatchesResultBtn" type="button" style="display: none;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                                    <polyline points="21 3 21 9 15 9"/>
+                                </svg>
+                                补跑失败批次
+                            </button>
+                            <button class="action-btn secondary" id="l10nAppendModelsBtn" type="button">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 5v14"/>
+                                    <path d="M5 12h14"/>
+                                </svg>
+                                追加模型检测
+                            </button>
+                            <button class="action-btn secondary" id="l10nGenerateFixesBtn" type="button">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2L12 3z"/>
+                                    <path d="M5 3v4"/>
+                                    <path d="M3 5h4"/>
+                                </svg>
+                                生成完整修正译文
+                            </button>
+                            <button class="action-btn primary" id="l10nDownloadBtn">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                    <polyline points="7 10 12 15 17 10"/>
+                                    <line x1="12" y1="15" x2="12" y2="3"/>
+                                </svg>
+                                下载检测报告
+                            </button>
+                            <span class="report-build-status" id="l10nReportBuildStatus" aria-live="polite"></span>
+                            <button class="action-btn secondary" id="l10nExportTermReviewBtn">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                    <polyline points="14 2 14 8 20 8"/>
+                                    <line x1="8" y1="13" x2="16" y2="13"/>
+                                    <line x1="8" y1="17" x2="14" y2="17"/>
+                                </svg>
+                                1. 导出术语确认表
+                            </button>
+                            <label class="action-btn secondary" for="l10nImportTermReviewInput">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                    <polyline points="17 8 12 3 7 8"/>
+                                    <line x1="12" y1="3" x2="12" y2="15"/>
+                                </svg>
+                                2. 导入确认结果
+                            </label>
+                            <input type="file" id="l10nImportTermReviewInput" accept=".xlsx,.xls,.csv" hidden>
+                            <button class="action-btn secondary" id="l10nGenerateReviewedGlossaryBtn" type="button">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 20H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v3"/>
+                                    <path d="M16 20V7L6 13"/>
+                                    <path d="M15 18l2 2 4-4"/>
+                                </svg>
+                                3. 生成新版术语表
+                            </button>
+                        </div>
+                        <div class="term-review-panel" id="l10nTermReviewPanel" style="display: none;">
+                            <div class="panel-header-row">
+                                <div>
+                                    <h3>术语复核</h3>
+                                    <p class="panel-subtitle">先在下方表格直接处理，或导出确认表给策划填写；导入确认结果后，点击“生成新版术语表”保存到术语表库。</p>
+                                </div>
+                                <span class="panel-count" id="l10nTermReviewCount">0</span>
+                            </div>
+                            <div class="term-review-summary" id="l10nTermReviewSummary"></div>
+                            <div class="inline-review-table-wrap">
+                                <div class="inline-review-bulkbar">
+                                    <span>批量设置</span>
+                                    <select id="l10nTermReviewBulkAction">
+                                        <option value="">选择处理方式</option>
+                                        <option value="keep-existing">保留术语表原译法</option>
+                                        <option value="update-translation">修改术语表译法</option>
+                                        <option value="add-term">新增为术语</option>
+                                        <option value="sentence-exception">仅本句例外</option>
+                                        <option value="ignore">不加入/不修改</option>
+                                        <option value="pending">继续待确认</option>
+                                    </select>
+                                    <button class="action-btn mini secondary" id="l10nApplyTermReviewBulkBtn" type="button">应用到未选择</button>
+                                    <button class="action-btn mini secondary" id="l10nApplyTermReviewBulkAllBtn" type="button">应用到全部</button>
+                                </div>
+                                <table class="inline-review-table term-review-table">
+                                    <thead>
+                                        <tr>
+                                            <th>类型</th>
+                                            <th>原文术语</th>
+                                            <th>术语表译法</th>
+                                            <th>实际译文</th>
+                                            <th>出现位置</th>
+                                            <th>AI/规则判断</th>
+                                            <th>最终处理</th>
+                                            <th>指定译文</th>
+                                            <th>确认备注</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="l10nTermReviewBody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <button class="action-btn secondary" id="l10nResetBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                <path d="M3 3v5h5"/>
+                            </svg>
+                            检测新文件
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-content" id="glossary-tool" style="display: none;">
+                <div class="tool-header">
+                    <h2>术语表</h2>
+                    <p>提取和管理游戏术语</p>
+                </div>
+                
+                <div class="tool-body">
+                    <div class="settings-panel glossary-extract-settings">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>提取设置</h3>
+                                <p class="panel-subtitle">先选提取方式，再上传文件。大项目建议用 AI 模式，小样本或预筛选可用本地规则。</p>
+                            </div>
+                        </div>
+                        <div class="glossary-settings-grid">
+                            <div class="glossary-settings-main">
+                                <div class="setting-row">
+                                    <label for="glossaryMode">提取模式</label>
+                                    <select id="glossaryMode">
+                                        <option value="ai" selected>AI 专业提取 V2（推荐）</option>
+                                        <option value="rule">规则提取 V2（本地快速）</option>
+                                    </select>
+                                </div>
+                                <div class="setting-row model-select-row" id="glossaryModelRow">
+                                    <label for="glossaryModel">AI模型</label>
+                                    <select id="glossaryModel">
+                                        <option value="deepseek-v4-flash" selected>DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                                        <option value="deepseek-v4-pro">DeepSeek V4 Pro (deepseek-v4-pro)</option>
+                                        <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
+                                        <option value="deepseek-reasoner">DeepSeek Reasoner (deepseek-reasoner)</option>
+                                    </select>
+                                </div>
+                                <div class="setting-row" id="glossarySpeedRow">
+                                    <label for="glossarySpeedMode">术语提取速度</label>
+                                    <select id="glossarySpeedMode">
+                                        <option value="auto" selected>自动推荐（按模型智能选择）</option>
+                                        <option value="stable">稳定档（慢一些，失败率最低）</option>
+                                        <option value="balanced">均衡档（推荐通用模型）</option>
+                                        <option value="fast">快速档（推荐 Flash / Lite 模型）</option>
+                                        <option value="turbo">极速档（推荐 Gemini Flash-Lite）</option>
+                                    </select>
+                                    <p class="setting-hint" id="glossarySpeedHint">Gemini Flash-Lite 建议用快速或极速；Claude、Pro、Reasoner 模型建议用稳定或均衡。</p>
+                                </div>
+                            </div>
+                            <div class="mode-description compact" id="modeDescription">
+                                <div class="mode-info glossary-mode-card active" data-glossary-mode="ai" role="button" tabindex="0" aria-pressed="true">
+                                    <h4>AI 专业提取 V2</h4>
+                                    <p>推荐用于正式项目。AI 会结合原文、译文和上下文提炼术语，并输出译法、分类、置信度和质量提示。</p>
+                                    <small>需要 API Key；长文件会分批消耗额度。</small>
+                                </div>
+                                <div class="mode-info glossary-mode-card" data-glossary-mode="rule" role="button" tabindex="0" aria-pressed="false">
+                                    <h4>规则提取 V2</h4>
+                                    <p>适合快速预筛选，不调用 API。会提取短专名、括号名词、UI/道具/角色等候选。</p>
+                                    <small>速度快，但结果需要人工筛选更多。</small>
+                                </div>
+                                <div class="glossary-output-summary">
+                                    <strong>输出会包含</strong>
+                                    <span>原文术语、指定译文、类型、定位ID/行号、出现次数、置信度、质量提示、提取依据。</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="glossary-help-row">
+                            <div class="collapsible-section">
+                                <button class="collapsible-header" id="rulesHeader">
+                                    <span>规则模式会怎么筛选</span>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="collapse-icon">
+                                        <polyline points="6 9 12 15 18 9"/>
+                                    </svg>
+                                </button>
+                                <div class="collapsible-content" id="rulesContent" style="display: none;">
+                                    <div class="extraction-rules">
+                                        <ul>
+                                            <li><strong>优先保留：</strong>短中文专名、括号内名称、角色/NPC、道具、技能、UI 功能名。</li>
+                                            <li><strong>自动过滤：</strong>完整句子、纯数字、ID、普通按钮提示和临时状态描述。</li>
+                                            <li><strong>方向固定：</strong>按中文原文术语匹配英文译法，不反向用英文命中中文。</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="collapsible-section">
+                                <button class="collapsible-header" id="formatHeader">
+                                    <span>下载表格里有哪些列</span>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="collapse-icon">
+                                        <polyline points="6 9 12 15 18 9"/>
+                                    </svg>
+                                </button>
+                                <div class="collapsible-content" id="formatContent" style="display: none;">
+                                    <div class="csv-format">
+                                        <ul class="format-fields compact">
+                                            <li><strong>术语与译法：</strong>原文术语、原译文、指定译文、整理后译文。</li>
+                                            <li><strong>回查定位：</strong>定位 ID/Key、定位行号、提取依据。</li>
+                                            <li><strong>审核辅助：</strong>类型、出现次数、置信度、术语质量状态、问题和建议。</li>
+                                            <li><strong>来源记录：</strong>提取来源会标明 AI 全文提炼或本地规则提取。</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="upload-section-double">
+                        <div class="upload-card">
+                            <h3>提取术语表</h3>
+                            <p class="upload-hint">从文件中自动提取术语</p>
+                            <div class="upload-area-wrapper">
+                                <label class="upload-area-small" id="glossaryExtractArea" for="glossaryExtractInput">
+                                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="17 8 12 3 7 8"/>
+                                        <line x1="12" y1="3" x2="12" y2="15"/>
+                                    </svg>
+                                    <p>拖拽或点击上传</p>
+                                    <input type="file" id="glossaryExtractInput" accept=".csv,.xlsx,.xls" hidden>
+                                </label>
+                                <div class="upload-status" id="extractUploadStatus"></div>
+                            </div>
+                            <button class="action-btn primary" id="extractTermsBtn" style="display: none; margin-top: 16px;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M9 12l2 2 4-4"/>
+                                    <path d="M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 0 1-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                                </svg>
+                                开始提取术语
+                            </button>
+                        </div>
+                        
+                        <div class="upload-card">
+                            <h3>上传已有术语表</h3>
+                            <p class="upload-hint">上传已有的术语表文件</p>
+                            <div class="upload-area-wrapper">
+                                <label class="upload-area-small" id="glossaryUploadArea" for="glossaryUploadInput">
+                                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="17 8 12 3 7 8"/>
+                                        <line x1="12" y1="3" x2="12" y2="15"/>
+                                    </svg>
+                                    <p>拖拽或点击上传</p>
+                                    <input type="file" id="glossaryUploadInput" accept=".csv,.xlsx,.xls" hidden>
+                                </label>
+                                <div class="upload-status" id="uploadGlossaryStatus"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="glossary-restore-panel" id="glossaryRestorePanel">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>恢复上次失败补跑</h3>
+                                <p class="panel-subtitle">用于软件关闭后继续：上传旧术语表、运行报告和同一份原文件，再补跑失败批次并自动合并结果。</p>
+                            </div>
+                            <span class="panel-count" id="glossaryRestoreCount">0 / 3</span>
+                        </div>
+                        <div class="glossary-restore-grid">
+                            <label class="glossary-restore-item" for="glossaryRestoreTermsInput">
+                                <span class="restore-label">旧术语表</span>
+                                <strong id="glossaryRestoreTermsName">未选择</strong>
+                                <small>上传之前导出的 *_glossary.csv / xlsx</small>
+                                <input type="file" id="glossaryRestoreTermsInput" accept=".csv,.xlsx,.xls" hidden>
+                            </label>
+                            <label class="glossary-restore-item" for="glossaryRestoreReportInput">
+                                <span class="restore-label">运行报告</span>
+                                <strong id="glossaryRestoreReportName">未选择</strong>
+                                <small>上传之前导出的 *_run_report.csv</small>
+                                <input type="file" id="glossaryRestoreReportInput" accept=".csv,.xlsx,.xls" hidden>
+                            </label>
+                            <label class="glossary-restore-item" for="glossaryRestoreSourceInput">
+                                <span class="restore-label">原文件</span>
+                                <strong id="glossaryRestoreSourceName">未选择</strong>
+                                <small>上传当时提取术语的同一份源文件</small>
+                                <input type="file" id="glossaryRestoreSourceInput" accept=".csv,.xlsx,.xls" hidden>
+                            </label>
+                        </div>
+                        <div class="glossary-restore-actions">
+                            <button class="action-btn secondary" id="restoreGlossaryRunBtn" type="button" disabled>载入并恢复补跑任务</button>
+                            <button class="action-btn secondary" id="restorePolishRunBtn" type="button" disabled>载入AI润色续跑</button>
+                            <button class="action-btn secondary" id="clearGlossaryRestoreBtn" type="button">清空恢复文件</button>
+                        </div>
+                        <div class="upload-status info" id="glossaryRestoreStatus">术语补跑请上传旧术语表、运行报告和原文件；AI润色续跑请上传旧术语表、AI润色报告和原文件。</div>
+                    </div>
+
+                    <div class="glossary-library-panel" id="glossaryLibraryPanel">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>已保存术语表</h3>
+                                <p class="panel-subtitle">这里会显示上传和提取后保存的术语表，本地化检测勾选的也是同一批数据</p>
+                            </div>
+                            <span class="panel-count" id="glossaryLibraryCount">0 个</span>
+                        </div>
+                        <div class="glossary-library-list" id="glossaryLibraryList"></div>
+                    </div>
+
+                    <div class="info-panel" id="glossaryInfo" style="display: none;">
+                        <h3>当前术语表</h3>
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">术语数量</span>
+                                <span class="info-value highlight" id="glossaryTermCount">-</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">来源文件</span>
+                                <span class="info-value" id="glossarySourceFile">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="terms-panel" id="glossaryTerms" style="display: none;">
+                        <h3>术语列表</h3>
+                        <div class="terms-table-container">
+                            <table class="terms-table" id="glossaryTermsTable">
+                                <thead>
+                                    <tr>
+                                        <th>定位ID/Key</th>
+                                        <th>原文术语（中文）</th>
+                                        <th>类型</th>
+                                        <th>出现次数</th>
+                                        <th>置信度</th>
+                                        <th>指定译文（英文）</th>
+                                        <th>整理后译文</th>
+                                        <th>术语质量</th>
+                                        <th>提取依据</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="glossaryTermsBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="glossary-export-guide" aria-label="术语表导出说明">
+                            <div>
+                                <strong>导出本地修正版</strong>
+                                <span>不调用 AI。按当前术语表在原文件结构里追加“AI修正译文 / AI修正说明”列，原文数据不被覆盖。</span>
+                            </div>
+                            <div>
+                                <strong>AI 润色命中行</strong>
+                                <span>会调用当前 API。只处理命中术语问题的行，生成更自然的整句译文；完成后再导出 AI 润色版。</span>
+                            </div>
+                        </div>
+                        <div class="glossary-export-actions">
+                        <button class="action-btn primary" id="glossaryDownloadBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            下载术语表
+                        </button>
+                        <button class="action-btn secondary" id="downloadPatchedSourceBtn" type="button" title="不调用 AI，按当前术语表生成修正版原文件；会追加修正译文和说明列，不覆盖原文件。">
+                            导出本地修正版
+                        </button>
+                        <button class="action-btn secondary" id="aiPolishMatchedRowsBtn" type="button" title="调用当前 API，只润色命中术语问题的行；完成后可导出 AI 润色修正版。">
+                            AI润色命中行
+                        </button>
+                        <button class="action-btn secondary" id="downloadPolishReportBtn" type="button" style="display: none;">
+                            下载AI润色报告
+                        </button>
+                        <button class="action-btn secondary" id="retryFailedGlossaryBatchesBtn" type="button" style="display: none;">
+                            补跑失败批次
+                        </button>
+                        <button class="action-btn secondary" id="glossaryResetBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                <path d="M3 3v5h5"/>
+                            </svg>
+                            重置
+                        </button>
+                        </div>
+                    </div>
+
+                    <div class="progress-panel" id="glossaryProgressSection" style="display: none;">
+                        <div class="progress-header">
+                            <h3>提取进度</h3>
+                            <div class="progress-actions">
+                                <button class="action-btn secondary" id="glossaryPauseBtn" type="button">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="6" y="4" width="4" height="16"/>
+                                        <rect x="14" y="4" width="4" height="16"/>
+                                    </svg>
+                                    暂停
+                                </button>
+                                <button class="action-btn primary" id="glossaryResumeBtn" type="button" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    继续
+                                </button>
+                                <button class="action-btn danger" id="glossaryCancelBtn" type="button">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                    取消任务
+                                </button>
+                            </div>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="glossaryProgressFill"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="glossaryProgressText">0 / 0</span>
+                            <span id="glossaryProgressPercent">0%</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-content" id="glossary-organize-tool" style="display: none;">
+                <div class="tool-header">
+                    <h2>术语整理</h2>
+                    <p>整理已有术语表，统一分类、合并重复项，并检测术语质量</p>
+                </div>
+
+                <div class="tool-body">
+                    <div class="settings-panel">
+                        <div class="setting-row model-select-row">
+                            <label for="organizeGlossaryModel">AI模型</label>
+                            <select id="organizeGlossaryModel">
+                                <option value="deepseek-v4-flash" selected>DeepSeek V4 Flash (deepseek-v4-flash)</option>
+                                <option value="deepseek-v4-pro">DeepSeek V4 Pro (deepseek-v4-pro)</option>
+                                <option value="deepseek-chat">DeepSeek Chat (deepseek-chat)</option>
+                                <option value="deepseek-reasoner">DeepSeek Reasoner (deepseek-reasoner)</option>
+                            </select>
+                        </div>
+                        <div class="setting-row">
+                            <label for="organizeGlossaryStandard">整理标准</label>
+                            <select id="organizeGlossaryStandard">
+                                <option value="standard" selected>标准模式（推荐：正式术语 + 待确认 + 短语分层）</option>
+                                <option value="broad">宽松模式（接近当前逻辑，尽量保留）</option>
+                                <option value="strict">严格模式（只保留高价值固定术语）</option>
+                                <option value="ai-constraint">翻译约束精简版（只保留强术语）</option>
+                            </select>
+                            <p class="setting-hint">标准越严格，“整理后术语表/保存到术语库”越精简；会优先保留完整词组边界，泛功能短语会分流到待确认/参考。翻译约束精简版只保存高价值固定术语，AI 只给建议译文，不自动覆盖指定译文。</p>
+                        </div>
+                        <div class="setting-row">
+                            <label for="organizeGlossaryCategories">分类体系</label>
+                            <textarea id="organizeGlossaryCategories" rows="6">角色/NPC
+技能/战斗
+道具/装备
+建筑/地点
+任务/剧情
+系统/UI
+数值/属性
+货币/资源
+状态效果/Buff
+活动/成就
+商店/付费
+教程/提示
+玩法制度
+其他/待确认</textarea>
+                            <p class="setting-hint">每行一个分类；AI 会优先按这里的分类整理，并可输出二级类型。</p>
+                        </div>
+                        <div class="setting-row">
+                            <label for="organizeGlossarySynonyms">同义类别合并</label>
+                            <textarea id="organizeGlossarySynonyms" rows="4">装备/道具/物品 => 道具/装备
+地点/建筑/场景 => 建筑/地点
+界面/UI/系统 => 系统/UI
+属性/数值/数值属性 => 数值/属性</textarea>
+                            <p class="setting-hint">用于把上传文件里的粗分类、旧分类归并成统一分类。</p>
+                        </div>
+                        <div class="setting-row">
+                            <label>参考已有术语库</label>
+                            <div class="resource-check-list" id="organizeGlossaryReferenceList"></div>
+                            <p class="setting-hint">可选。勾选后，AI 会优先参考已有术语库里的整理后译文、标准分类和历史译法，避免重复项目越整理越乱。</p>
+                        </div>
+                    </div>
+
+                    <div class="upload-card">
+                        <h3>上传待整理术语表</h3>
+                        <p class="upload-hint">支持 CSV/XLSX/XLS，可多文件、多工作表合并整理。</p>
+                        <div class="upload-area-wrapper">
+                            <label class="upload-area-small" id="organizeGlossaryUploadArea" for="organizeGlossaryInput">
+                                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                    <polyline points="17 8 12 3 7 8"/>
+                                    <line x1="12" y1="3" x2="12" y2="15"/>
+                                </svg>
+                                <p>拖拽或点击上传</p>
+                                <input type="file" id="organizeGlossaryInput" accept=".csv,.xlsx,.xls" multiple hidden>
+                            </label>
+                            <div class="upload-status" id="organizeGlossaryUploadStatus"></div>
+                            <div class="upload-actions-inline">
+                                <button class="action-btn secondary" id="organizeGlossaryChangeFileBtn" type="button" style="display: none;">更换文件</button>
+                                <button class="action-btn secondary" id="organizeGlossaryClearFileBtn" type="button" style="display: none;">清空已选</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="glossary-restore-panel glossary-review-panel compact-review-panel" id="glossaryReviewPanel">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>导入人工审核返稿</h3>
+                                <p class="panel-subtitle">上传策划审核后的 Excel，工具会识别单元格背景色、文字颜色、备注或状态列，生成可直接使用的最终术语表。</p>
+                            </div>
+                            <span class="panel-count" id="glossaryReviewCount">0 / 0</span>
+                        </div>
+                        <div class="glossary-restore-grid">
+                            <label class="glossary-restore-item" for="glossaryReviewInput">
+                                <span class="restore-label">审核返稿</span>
+                                <strong id="glossaryReviewName">未选择</strong>
+                                <small>建议上传带有“修正后数据 / 术语表”的 xlsx 文件</small>
+                                <input type="file" id="glossaryReviewInput" accept=".xlsx,.xls" hidden>
+                            </label>
+                            <label class="glossary-restore-item" for="glossaryReviewMode">
+                                <span class="restore-label">颜色标记怎么处理</span>
+                                <select id="glossaryReviewMode" class="review-mode-select">
+                                    <option value="planner" selected>策划标色：绿色采用建议，红色理解备注</option>
+                                    <option value="ignore">所有颜色标记 = 不采用这条修改</option>
+                                    <option value="keep">所有颜色标记 = 采用这条术语</option>
+                                </select>
+                                <small>适合在术语表里用文字标色返稿：绿色会直接采用，红色优先读取备注/状态说明。</small>
+                            </label>
+                            <label class="glossary-restore-item checkbox-setting compact" for="glossaryReviewAiAssist">
+                                <input type="checkbox" id="glossaryReviewAiAssist" checked>
+                                <span>
+                                    <strong>红色复杂备注使用 AI 小批量理解</strong>
+                                    <small>只把红色且规则看不懂的备注送给当前 API，不会通读整份表；没有 API Key 时会保留为待人工确认。</small>
+                                </span>
+                            </label>
+                            <label class="glossary-restore-item">
+                                <span class="restore-label">识别结果</span>
+                                <strong id="glossaryReviewSummary">等待上传返稿</strong>
+                                <small>会输出最终术语表、忽略清单和识别报告</small>
+                            </label>
+                        </div>
+                        <div class="glossary-restore-actions">
+                            <button class="action-btn secondary" id="glossaryReviewReportBtn" type="button" disabled>下载识别报告</button>
+                            <label class="action-btn secondary" for="glossaryReviewConfirmationInput">导入确认回填</label>
+                            <input type="file" id="glossaryReviewConfirmationInput" accept=".xlsx,.xls" hidden>
+                            <button class="action-btn primary" id="glossaryReviewDownloadBtn" type="button" disabled>生成最终术语表</button>
+                            <button class="action-btn secondary" id="clearGlossaryReviewBtn" type="button">清空审核文件</button>
+                        </div>
+                        <div class="upload-status info" id="glossaryReviewStatus">上传策划返稿后，工具会识别背景色、文字颜色、备注或状态列，并生成审核后的最终术语表。</div>
+                        <div class="inline-review-panel" id="glossaryInlineConfirmPanel" style="display: none;">
+                            <div class="panel-header-row">
+                                <div>
+                                    <h3>待人工确认</h3>
+                                    <p class="panel-subtitle">直接在这里选择处理方式；也可以继续下载报告交给策划回填。</p>
+                                </div>
+                                <span class="panel-count" id="glossaryInlineConfirmCount">0</span>
+                            </div>
+                            <div class="inline-review-table-wrap">
+                                <div class="inline-review-bulkbar">
+                                    <span>批量设置</span>
+                                    <select id="glossaryInlineBulkAction">
+                                        <option value="">选择处理方式</option>
+                                        <option value="accepted-suggestion">采纳AI建议</option>
+                                        <option value="kept-original">保留原译</option>
+                                        <option value="pending-review">继续待确认</option>
+                                    </select>
+                                    <button class="action-btn mini secondary" id="applyGlossaryInlineBulkBtn" type="button">应用到未选择</button>
+                                    <button class="action-btn mini secondary" id="applyGlossaryInlineBulkAllBtn" type="button">应用到全部</button>
+                                </div>
+                                <table class="inline-review-table">
+                                    <thead>
+                                        <tr>
+                                            <th>原文术语</th>
+                                            <th>原译文</th>
+                                            <th>AI建议/当前最终译文</th>
+                                            <th>疑问原因</th>
+                                            <th>最终处理</th>
+                                            <th>策划指定译文</th>
+                                            <th>确认备注</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="glossaryInlineConfirmBody"></tbody>
+                                </table>
+                            </div>
+                            <div class="glossary-restore-actions">
+                                <button class="action-btn primary" id="applyGlossaryInlineConfirmBtn" type="button">应用界面确认</button>
+                                <button class="action-btn secondary" id="clearGlossaryInlineConfirmBtn" type="button">清空本次选择</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="column-select-panel" id="organizeGlossaryColumnPanel" style="display: none;">
+                        <div class="sheet-select-panel" id="organizeGlossarySheetPanel" style="display: none;">
+                            <div class="panel-header-row">
+                                <div>
+                                    <h3>选择要整理的文件/工作表</h3>
+                                    <p class="panel-subtitle">多工作表会合并为统一术语列表，输出时保留来源文件、工作表和原始行号。</p>
+                                </div>
+                                <span class="panel-count" id="organizeGlossarySheetCount">0 个</span>
+                            </div>
+                            <div class="resource-check-list" id="organizeGlossarySheetList"></div>
+                        </div>
+                        <h3>确认识别列</h3>
+                        <label class="checkbox-setting compact" for="organizeGlossaryHasHeader">
+                            <input type="checkbox" id="organizeGlossaryHasHeader" checked>
+                            <span>
+                                <strong>首行为表头</strong>
+                                <small>如果上传的是“术语 / 译文 / 类型”这种无表头表格，请取消勾选，工具会按列内容自动推断。</small>
+                            </span>
+                        </label>
+                        <div class="organize-column-grid">
+                            <label>原文术语<select id="organizeSourceColumn"></select></label>
+                            <label>译文/指定译法<select id="organizeTargetColumn"></select></label>
+                            <label>原始类型<select id="organizeTypeColumn"></select></label>
+                            <label>ID/Key<select id="organizeIdColumn"></select></label>
+                        </div>
+                        <button class="action-btn primary" id="organizeGlossaryBtn" type="button">开始整理术语</button>
+                    </div>
+
+                    <div class="progress-panel" id="organizeGlossaryProgress" style="display: none;">
+                        <div class="progress-header">
+                            <h3>整理进度</h3>
+                            <div class="progress-actions">
+                                <button class="action-btn secondary" id="organizeGlossaryPauseBtn" type="button">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="6" y="4" width="4" height="16"/>
+                                        <rect x="14" y="4" width="4" height="16"/>
+                                    </svg>
+                                    暂停
+                                </button>
+                                <button class="action-btn primary" id="organizeGlossaryResumeBtn" type="button" style="display: none;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    继续
+                                </button>
+                                <button class="action-btn danger" id="organizeGlossaryCancelBtn" type="button">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                    取消任务
+                                </button>
+                            </div>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="organizeGlossaryProgressFill"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="organizeGlossaryProgressText">0 / 0</span>
+                            <span id="organizeGlossaryProgressPercent">0%</span>
+                        </div>
+                        <div class="progress-info" id="organizeGlossaryProgressInfo"></div>
+                    </div>
+
+                    <div class="terms-panel" id="organizeGlossaryResults" style="display: none;">
+                        <div class="panel-header-row">
+                            <div>
+                                <h3>整理结果</h3>
+                                <p class="panel-subtitle" id="organizeGlossarySummary">等待整理完成</p>
+                            </div>
+                        </div>
+                        <div class="terms-table-container">
+                            <table class="terms-table">
+                                <thead>
+                                    <tr>
+                                        <th>ID/Key</th>
+                                        <th>原文术语</th>
+                                        <th>指定译文</th>
+                                        <th>AI建议译文</th>
+                                        <th>入库层级</th>
+                                        <th>适用范围/语境</th>
+                                        <th>原始类型</th>
+                                        <th>整理后类型</th>
+                                        <th>二级类型</th>
+                                        <th>质量状态</th>
+                                        <th>分类理由</th>
+                                        <th>处理建议</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="organizeGlossaryBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="download-actions">
+                            <button class="action-btn primary" id="organizeGlossaryDownloadBtn" type="button">下载整理结果</button>
+                            <button class="action-btn secondary" id="organizeGlossarySaveBtn" type="button">保存到术语库</button>
+                            <button class="action-btn secondary" id="organizeGlossaryResetBtn" type="button">重新整理</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <div class="command-palette" id="commandPalette" style="display: none;" aria-hidden="true">
+        <div class="command-palette-card" role="dialog" aria-modal="true" aria-labelledby="commandPaletteTitle">
+            <div class="command-palette-input-row">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="7"/>
+                    <path d="M20 20l-3.5-3.5"/>
+                </svg>
+                <input type="text" id="commandPaletteInput" autocomplete="off" spellcheck="false" placeholder="搜索工具、项目、API、术语..." aria-label="命令搜索">
+                <button type="button" id="commandPaletteClose" aria-label="关闭命令搜索">Esc</button>
+            </div>
+            <div class="command-palette-body">
+                <div class="command-palette-title" id="commandPaletteTitle">命令搜索</div>
+                <div class="command-palette-results" id="commandPaletteResults"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="projectModal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">添加项目</h3>
+                <button class="icon-btn close-btn" id="closeModalBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="projectName">项目名称</label>
+                    <input type="text" id="projectName" placeholder="例如：佣兵小镇">
+                </div>
+                <div class="form-group">
+                    <label for="projectRules">翻译标准</label>
+                    <textarea id="projectRules" placeholder="输入项目的翻译标准和规范..." rows="10"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="action-btn secondary" id="cancelProjectBtn">取消</button>
+                <button class="action-btn secondary" id="viewProjectBtn" style="display: none;">查看模式</button>
+                <button class="action-btn secondary" id="editProjectBtn" style="display: none;">编辑模式</button>
+                <button class="action-btn primary" id="saveProjectBtn">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
