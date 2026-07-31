@@ -1,6 +1,8 @@
-# NEXUS - 本地化工具集
+# TransMate · AI 游戏本地化助手
 
-一款专为游戏本地化工作流设计的强大工具集，支持文件拆分、文本翻译、格式转换、本地化检测和术语表管理。
+![TransMate](assets/transmate-logo.svg)
+
+TransMate 是一款专为游戏本地化工作流设计的 AI 桌面助手，支持文件拆分、文本翻译、格式转换、本地化检测和术语表管理。
 
 ## ✨ 功能特性
 
@@ -88,7 +90,7 @@ npm run desktop:build
 - 双击 `build-windows-installer.bat`：生成 Windows `.exe` 安装包。
 - 安装包输出目录：`src-tauri\target\release\bundle\nsis\`。
 
-如果没有 Windows 电脑，也可以把代码推送到 GitHub 的 `master` 分支，然后在 GitHub Actions 里手动运行 `Build Windows Desktop App`，下载生成的 `nexus-windows-installer`，里面就是 Windows `.exe` 安装包。
+如果没有 Windows 电脑，也可以把代码推送到 GitHub 的 `master` 分支，然后在 GitHub Actions 里手动运行 `Build Windows Desktop App`，下载生成的 `TransMate-Windows-Installer`，里面就是 Windows `.exe` 安装包。
 
 ### 3. 配置 API Key
 

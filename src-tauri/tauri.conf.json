@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "NEXUS Localization Toolkit",
+  "productName": "TransMate",
   "version": "1.0.0",
   "identifier": "com.liusu.nexus.localization",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "NEXUS 本地化工具集",
+        "title": "TransMate · AI 游戏本地化助手",
         "width": 1280,
         "height": 820,
         "minWidth": 1024,

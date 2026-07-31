@@ -1,4 +1,4 @@
-# NEXUS UI 重构预览
+# TransMate UI 重构预览
 
 这是一个与现有业务页面隔离的 HTML/CSS/JS 预览，不会替换原来的 `index.html`，也不会触碰 `script.js` 的固定 DOM 依赖。
 

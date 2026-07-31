@@ -1,7 +1,7 @@
 {
-  "name": "nexus-localization-toolkit",
+  "name": "transmate-localization-toolkit",
   "version": "1.0.0",
-  "description": "NEXUS local desktop toolkit for game localization workflows.",
+  "description": "TransMate AI desktop assistant for game localization workflows.",
   "private": true,
   "type": "module",
   "scripts": {

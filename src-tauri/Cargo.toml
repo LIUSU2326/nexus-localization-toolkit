@@ -1,7 +1,7 @@
 [package]
 name = "nexus-localization-toolkit"
 version = "1.0.0"
-description = "NEXUS local desktop toolkit for game localization workflows."
+description = "TransMate AI desktop assistant for game localization workflows."
 authors = ["LIUSU2326"]
 edition = "2021"
 rust-version = "1.77.2"

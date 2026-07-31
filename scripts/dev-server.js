@@ -35,14 +35,14 @@ function probeExistingDevServer() {
       response.setEncoding('utf8');
       response.on('data', chunk => {
         body += chunk;
-        if (/NEXUS|nexus-localization-toolkit/i.test(body)) {
+        if (/TransMate|nexus-localization-toolkit/i.test(body)) {
           finish(response.statusCode === 200);
         } else if (body.length > 16384) {
           finish(false);
         }
       });
       response.on('end', () => {
-        finish(response.statusCode === 200 && /NEXUS|nexus-localization-toolkit/i.test(body));
+        finish(response.statusCode === 200 && /TransMate|nexus-localization-toolkit/i.test(body));
       });
     });
 
@@ -86,11 +86,11 @@ server.on('error', async error => {
   if (error?.code === 'EADDRINUSE') {
     const existingServerLooksValid = await probeExistingDevServer();
     if (existingServerLooksValid) {
-      console.log(`NEXUS web dev server is already running at http://127.0.0.1:${port}`);
+      console.log(`TransMate web dev server is already running at http://127.0.0.1:${port}`);
       process.exit(0);
     }
 
-    console.error(`Port ${port} is already in use, but it does not look like a NEXUS dev server.`);
+    console.error(`Port ${port} is already in use, but it does not look like a TransMate dev server.`);
     console.error('Close the process using that port, or run with another PORT value.');
     process.exit(1);
   }
@@ -100,7 +100,7 @@ server.on('error', async error => {
 });
 
 server.listen(port, '127.0.0.1', () => {
-  console.log(`NEXUS web dev server running at http://127.0.0.1:${port}`);
+  console.log(`TransMate web dev server running at http://127.0.0.1:${port}`);
 });
 
 process.on('SIGTERM', () => server.close(() => process.exit(0)));

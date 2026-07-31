@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 116" role="img" aria-labelledby="title desc">
+  <title id="title">TransMate</title>
+  <desc id="desc">TransMate，AI 游戏本地化助手。</desc>
+  <defs>
+    <linearGradient id="brand-gradient" x1="8" y1="14" x2="88" y2="31" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff812c"/><stop offset=".36" stop-color="#f04f87"/><stop offset=".7" stop-color="#9856f6"/><stop offset="1" stop-color="#4767ff"/>
+    </linearGradient>
+    <linearGradient id="brand-ink" x1="33" y1="31" x2="55" y2="86" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#202a42"/><stop offset="1" stop-color="#121a2d"/>
+    </linearGradient>
+    <linearGradient id="brand-spark" x1="67" y1="60" x2="83" y2="80" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4269ff"/><stop offset=".5" stop-color="#9357f7"/><stop offset="1" stop-color="#ff6a76"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(4 6)">
+    <path fill="url(#brand-ink)" d="M38 29h23l-7.2 41.3C52 81.1 46.3 87 36.3 87H24.7l8.1-47.4C34 32.6 35.3 29 38 29Z"/>
+    <path fill="url(#brand-gradient)" d="M8 29c1.2-11.4 8.1-18 19.4-18H87c.9 0 1.6.8 1.4 1.8C86.8 23.5 78.7 29 67.7 29H39.8c-4.2 0-7 1.8-9.4 5.6L31.3 29H8Z"/>
+    <path fill="url(#brand-spark)" d="M75.2 57.5c1.1 5.1 3.8 7.7 8.9 8.8-5.1 1.1-7.8 3.8-8.9 8.9-1.1-5.1-3.8-7.8-8.9-8.9 5.1-1.1 7.8-3.7 8.9-8.8Z"/>
+  </g>
+  <text x="108" y="58" fill="#172137" font-family="Montserrat, 'Avenir Next', 'Trebuchet MS', sans-serif" font-size="48" font-style="italic" font-weight="800" letter-spacing="-2">TransMate</text>
+  <text x="112" y="88" fill="#70798c" font-family="'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="500">AI 游戏本地化助手</text>
+</svg>

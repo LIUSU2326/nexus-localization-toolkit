@@ -39,17 +39,17 @@ if not exist "node_modules" (
   if errorlevel 1 goto failed
 )
 
-echo Starting NEXUS Localization Toolkit for Windows...
+echo Starting TransMate for Windows...
 call npm run desktop
 if errorlevel 1 goto failed
 
 echo.
-echo NEXUS has stopped. You can close this window.
+echo TransMate has stopped. You can close this window.
 pause
 exit /b 0
 
 :failed
 echo.
-echo [ERROR] NEXUS failed to start.
+echo [ERROR] TransMate failed to start.
 pause
 exit /b 1

@@ -210,6 +210,46 @@ function fillCircle(buffer, width, height, cx, cy, radius, color) {
   }
 }
 
+function pointInPolygon(x, y, points) {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i, i += 1) {
+    const [xi, yi] = points[i];
+    const [xj, yj] = points[j];
+    const intersects = ((yi > y) !== (yj > y))
+      && (x < ((xj - xi) * (y - yi)) / (yj - yi || Number.EPSILON) + xi);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function fillPolygon(buffer, width, height, points, colorAt) {
+  const xs = points.map(([x]) => x);
+  const ys = points.map(([, y]) => y);
+  const minX = Math.max(0, Math.floor(Math.min(...xs)));
+  const maxX = Math.min(width - 1, Math.ceil(Math.max(...xs)));
+  const minY = Math.max(0, Math.floor(Math.min(...ys)));
+  const maxY = Math.min(height - 1, Math.ceil(Math.max(...ys)));
+
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (pointInPolygon(x + 0.5, y + 0.5, points)) {
+        const color = typeof colorAt === 'function' ? colorAt(x + 0.5, y + 0.5) : colorAt;
+        blendPixel(buffer, width, height, x, y, color);
+      }
+    }
+  }
+}
+
+function drawFourPointStar(buffer, width, height, cx, cy, outerRadius, innerRadius, colorAt) {
+  const points = [];
+  for (let i = 0; i < 8; i += 1) {
+    const angle = -Math.PI / 2 + (Math.PI / 4) * i;
+    const radius = i % 2 === 0 ? outerRadius : innerRadius;
+    points.push([cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius]);
+  }
+  fillPolygon(buffer, width, height, points, colorAt);
+}
+
 function drawArrow(buffer, width, height, ax, ay, bx, by, lineWidth, color, direction = 1) {
   drawLine(buffer, width, height, ax, ay, bx, by, lineWidth, color);
   const angle = Math.atan2(by - ay, bx - ax) + (direction < 0 ? Math.PI : 0);
@@ -240,47 +280,40 @@ function createIcon(size) {
   const scale = size / sourceSize;
   const s = (value) => value * scale;
 
-  drawSoftShadow(buffer, size, size, s(108), s(102), s(808), s(808), s(186));
-  fillRoundedRect(buffer, size, size, s(108), s(92), s(808), s(808), s(188), (x, y) => {
-    const tx = x / size;
-    const ty = y / size;
-    const diagonal = clamp((tx * 0.72 + ty * 0.52), 0, 1);
-    const base = colorMix([10, 22, 44], [31, 63, 155], diagonal, 255);
-    const teal = Math.max(0, 1 - Math.hypot(tx - 0.25, ty - 0.18) * 2.7);
-    const purple = Math.max(0, 1 - Math.hypot(tx - 0.82, ty - 0.78) * 2.3);
-
-    base[0] = clamp(base[0] + teal * 8 + purple * 32, 0, 255);
-    base[1] = clamp(base[1] + teal * 56 + purple * 6, 0, 255);
-    base[2] = clamp(base[2] + teal * 44 + purple * 42, 0, 255);
-    return base;
+  drawSoftShadow(buffer, size, size, s(96), s(86), s(832), s(832), s(194));
+  fillRoundedRect(buffer, size, size, s(96), s(76), s(832), s(832), s(194), [229, 232, 241, 255]);
+  fillRoundedRect(buffer, size, size, s(100), s(80), s(824), s(824), s(190), (x, y) => {
+    const light = clamp((x + y) / (size * 1.7), 0, 1);
+    return colorMix([255, 255, 255], [247, 248, 252], light, 255);
   });
 
-  fillRoundedRect(buffer, size, size, s(154), s(138), s(716), s(716), s(150), [255, 255, 255, 16]);
-  drawArc(buffer, size, size, s(512), s(512), s(302), s(228), -0.72, 3.82, s(19), [125, 211, 252, 70]);
-  drawArc(buffer, size, size, s(512), s(512), s(332), s(260), 2.64, 5.88, s(15), [167, 139, 250, 60]);
-  drawLine(buffer, size, size, s(230), s(780), s(804), s(224), s(28), [45, 212, 191, 70]);
+  const gradientAt = (x) => {
+    const t = clamp((x - s(205)) / s(620), 0, 1);
+    if (t < 0.36) return colorMix([255, 129, 44], [240, 79, 135], t / 0.36, 255);
+    if (t < 0.7) return colorMix([240, 79, 135], [152, 86, 246], (t - 0.36) / 0.34, 255);
+    return colorMix([152, 86, 246], [71, 103, 255], (t - 0.7) / 0.3, 255);
+  };
 
-  fillRoundedRect(buffer, size, size, s(190), s(190), s(214), s(166), s(50), [14, 165, 233, 232]);
-  fillRoundedRect(buffer, size, size, s(212), s(212), s(170), s(122), s(34), [255, 255, 255, 24]);
-  drawLetterA(buffer, size, size, s(250), s(220), scale, [245, 253, 255, 245]);
+  fillPolygon(buffer, size, size, [
+    [s(422), s(346)],
+    [s(612), s(346)],
+    [s(548), s(716)],
+    [s(516), s(758)],
+    [s(474), s(786)],
+    [s(326), s(786)],
+    [s(394), s(400)]
+  ], (_x, y) => {
+    const t = clamp((y - s(346)) / s(440), 0, 1);
+    return colorMix([33, 43, 67], [17, 25, 44], t, 255);
+  });
 
-  fillRoundedRect(buffer, size, size, s(620), s(672), s(230), s(168), s(54), [99, 102, 241, 236]);
-  fillRoundedRect(buffer, size, size, s(642), s(694), s(186), s(124), s(36), [255, 255, 255, 25]);
-  drawZhongGlyph(buffer, size, size, s(680), s(704), scale, [248, 250, 252, 245]);
+  fillRoundedRect(buffer, size, size, s(204), s(222), s(620), s(154), s(74), (x) => gradientAt(x));
 
-  drawArrow(buffer, size, size, s(426), s(246), s(594), s(246), s(15), [186, 230, 253, 215], 1);
-  drawArrow(buffer, size, size, s(598), s(778), s(432), s(778), s(15), [221, 214, 254, 210], -1);
-
-  drawLine(buffer, size, size, s(333), s(690), s(333), s(346), s(96), [2, 6, 23, 70]);
-  drawLine(buffer, size, size, s(333), s(346), s(692), s(690), s(96), [2, 6, 23, 70]);
-  drawLine(buffer, size, size, s(692), s(690), s(692), s(346), s(96), [2, 6, 23, 70]);
-
-  drawLine(buffer, size, size, s(333), s(690), s(333), s(346), s(76), [248, 250, 252, 250]);
-  drawLine(buffer, size, size, s(333), s(346), s(692), s(690), s(76), [94, 234, 212, 252]);
-  drawLine(buffer, size, size, s(692), s(690), s(692), s(346), s(76), [248, 250, 252, 250]);
-
-  fillCircle(buffer, size, size, s(333), s(346), s(23), [255, 255, 255, 255]);
-  fillCircle(buffer, size, size, s(692), s(690), s(23), [94, 234, 212, 255]);
+  drawFourPointStar(buffer, size, size, s(748), s(656), s(76), s(27), (_x, y) => {
+    const t = clamp((y - s(580)) / s(152), 0, 1);
+    if (t < 0.52) return colorMix([66, 105, 255], [147, 87, 247], t / 0.52, 255);
+    return colorMix([147, 87, 247], [255, 106, 118], (t - 0.52) / 0.48, 255);
+  });
 
   return buffer;
 }

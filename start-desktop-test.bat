@@ -37,9 +37,9 @@ if /I "%NEXUS_DESKTOP_TEST_CHECK_ONLY%"=="1" (
 )
 
 if exist "%NEXUS_PYTHONW%" (
-  start "NEXUS Desktop Test" /b "%NEXUS_PYTHONW%" "%NEXUS_PREVIEW%"
+  start "TransMate Desktop Test" /b "%NEXUS_PYTHONW%" "%NEXUS_PREVIEW%"
 ) else (
-  start "NEXUS Desktop Test" /b "%NEXUS_PYTHON%" "%NEXUS_PREVIEW%"
+  start "TransMate Desktop Test" /b "%NEXUS_PYTHON%" "%NEXUS_PREVIEW%"
 )
 
 exit /b 0

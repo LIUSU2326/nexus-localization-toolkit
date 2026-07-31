@@ -1,10 +1,10 @@
-# NEXUS · macOS Minimal Workbench
+# TransMate · macOS Minimal Workbench
 
 独立的静态 UI 概念稿，不连接现有业务逻辑。
 
 ## 这个方向
 
-它把 NEXUS 设想为一个原生桌面工具，而不是网页仪表盘：
+它把 TransMate 设想为一个原生桌面工具，而不是网页仪表盘：
 
 - 原生窗口标题栏、统一半透明工具栏和 macOS 交通灯；
 - 左侧为来源列表 / 项目资源，中间始终是当前文件的高密度翻译表格；

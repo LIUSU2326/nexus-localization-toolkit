@@ -3,11 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NEXUS Localize - Desktop</title>
-    <link rel="icon" href="data:,">
+    <title>TransMate · AI 游戏本地化助手</title>
+    <meta name="theme-color" content="#f8f9fc">
+    <link rel="icon" type="image/svg+xml" href="assets/transmate-mark.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Montserrat:ital,wght@1,700;1,800&family=Noto+Sans+SC:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
     <script src="vendor/xlsx.full.min.js"></script>
     <script src="vendor/jszip.min.js"></script>
@@ -16,8 +17,15 @@
     <div class="main-container">
         <aside class="sidebar">
             <div class="sidebar-header">
-                <h1 class="logo">NEXUS</h1>
-                <p class="tagline">本地化工具集</p>
+                <div class="brand-lockup" aria-label="TransMate · AI 游戏本地化助手">
+                    <span class="brand-icon-shell" aria-hidden="true">
+                        <img src="assets/transmate-mark.svg" alt="">
+                    </span>
+                    <span class="brand-copy">
+                        <h1 class="logo">TransMate</h1>
+                        <p class="tagline">AI 游戏本地化助手</p>
+                    </span>
+                </div>
             </div>
             
             <nav class="nav-menu">
@@ -107,7 +115,7 @@
         <main class="main-content">
             <div class="app-topbar">
                 <div class="breadcrumbs">
-                    <span>NEXUS</span>
+                    <span class="breadcrumbs-brand"><img src="assets/transmate-mark.svg" alt=""><span>TransMate</span></span>
                     <span>/</span>
                     <strong id="currentToolLabel">文件拆分</strong>
                 </div>

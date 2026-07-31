@@ -1,4 +1,4 @@
-"""Standalone desktop test window for the NEXUS Localization Toolkit.
+"""Standalone desktop test window for TransMate.
 
 This starts a loopback-only web server and loads the existing application in
 the Windows WebView2 control.  It is intentionally separate from Tauri so the
@@ -43,7 +43,7 @@ class ProjectRequestHandler(SimpleHTTPRequestHandler):
 def start_server() -> tuple[ThreadingHTTPServer, str]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), ProjectRequestHandler)
     server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, name="nexus-preview-server", daemon=True).start()
+    threading.Thread(target=server.serve_forever, name="transmate-preview-server", daemon=True).start()
     url = f"http://127.0.0.1:{server.server_address[1]}/index.html"
     logging.info("Desktop preview server started at %s", url)
     return server, url
@@ -75,7 +75,7 @@ def run_window() -> int:
     server, url = start_server()
     try:
         webview.create_window(
-            "NEXUS 本地化工具集 · 桌面测试",
+            "TransMate · AI 游戏本地化助手 · 桌面测试",
             url,
             width=1360,
             height=900,
