@@ -132,18 +132,18 @@ function fillRoundedRect(buffer, width, height, x, y, rectWidth, rectHeight, rad
 }
 
 function drawSoftShadow(buffer, width, height, x, y, rectWidth, rectHeight, radius) {
-  for (let i = 56; i >= 1; i -= 1) {
-    const alpha = Math.round(2.6 * (1 - i / 58));
+  for (let i = 32; i >= 1; i -= 1) {
+    const alpha = Math.round(1.45 * (1 - i / 34));
     fillRoundedRect(
       buffer,
       width,
       height,
       x - i,
-      y + 18 - i,
+      y + 14 - i,
       rectWidth + i * 2,
       rectHeight + i * 2,
       radius + i,
-      [15, 23, 42, alpha]
+      [23, 33, 55, alpha]
     );
   }
 }
@@ -240,6 +240,23 @@ function fillPolygon(buffer, width, height, points, colorAt) {
   }
 }
 
+function appendCubic(points, start, controlA, controlB, end, steps = 24) {
+  for (let i = 1; i <= steps; i += 1) {
+    const t = i / steps;
+    const inverse = 1 - t;
+    points.push([
+      inverse ** 3 * start[0]
+        + 3 * inverse ** 2 * t * controlA[0]
+        + 3 * inverse * t ** 2 * controlB[0]
+        + t ** 3 * end[0],
+      inverse ** 3 * start[1]
+        + 3 * inverse ** 2 * t * controlA[1]
+        + 3 * inverse * t ** 2 * controlB[1]
+        + t ** 3 * end[1]
+    ]);
+  }
+}
+
 function drawFourPointStar(buffer, width, height, cx, cy, outerRadius, innerRadius, colorAt) {
   const points = [];
   for (let i = 0; i < 8; i += 1) {
@@ -287,30 +304,53 @@ function createIcon(size) {
     return colorMix([255, 255, 255], [247, 248, 252], light, 255);
   });
 
+  const markOriginX = 190;
+  const markOriginY = 176;
+  const markScale = 6.55;
+  const mapMarkPoint = ([x, y]) => [s(markOriginX + x * markScale), s(markOriginY + y * markScale)];
+
   const gradientAt = (x) => {
-    const t = clamp((x - s(205)) / s(620), 0, 1);
+    const t = clamp((x - s(markOriginX + 8 * markScale)) / s(80 * markScale), 0, 1);
     if (t < 0.36) return colorMix([255, 129, 44], [240, 79, 135], t / 0.36, 255);
     if (t < 0.7) return colorMix([240, 79, 135], [152, 86, 246], (t - 0.36) / 0.34, 255);
     return colorMix([152, 86, 246], [71, 103, 255], (t - 0.7) / 0.3, 255);
   };
 
-  fillPolygon(buffer, size, size, [
-    [s(422), s(346)],
-    [s(612), s(346)],
-    [s(548), s(716)],
-    [s(516), s(758)],
-    [s(474), s(786)],
-    [s(326), s(786)],
-    [s(394), s(400)]
-  ], (_x, y) => {
-    const t = clamp((y - s(346)) / s(440), 0, 1);
+  const stemShape = [[38, 29], [61, 29], [53.8, 70.3]];
+  appendCubic(stemShape, [53.8, 70.3], [52, 81.1], [48, 87], [40, 87]);
+  stemShape.push([24.7, 87], [32.8, 39.6]);
+  appendCubic(stemShape, [32.8, 39.6], [34, 32.6], [35.3, 29], [38, 29]);
+
+  fillPolygon(buffer, size, size, stemShape.map(mapMarkPoint), (_x, y) => {
+    const top = s(markOriginY + 29 * markScale);
+    const bottom = s(markOriginY + 87 * markScale);
+    const t = clamp((y - top) / (bottom - top), 0, 1);
     return colorMix([33, 43, 67], [17, 25, 44], t, 255);
   });
 
-  fillRoundedRect(buffer, size, size, s(204), s(222), s(620), s(154), s(74), (x) => gradientAt(x));
+  const topShape = [[8, 29]];
+  appendCubic(topShape, [8, 29], [9.2, 17.6], [16.1, 11], [27.4, 11]);
+  topShape.push([87, 11]);
+  appendCubic(topShape, [87, 11], [87.9, 11], [88.6, 11.8], [88.4, 12.8], 8);
+  appendCubic(topShape, [88.4, 12.8], [86.8, 23.5], [78.7, 29], [67.7, 29]);
+  topShape.push([39.8, 29]);
+  appendCubic(topShape, [39.8, 29], [35.6, 29], [32.8, 30.8], [30.4, 34.6], 12);
+  topShape.push([31.3, 29], [8, 29]);
 
-  drawFourPointStar(buffer, size, size, s(748), s(656), s(76), s(27), (_x, y) => {
-    const t = clamp((y - s(580)) / s(152), 0, 1);
+  fillPolygon(buffer, size, size, topShape.map(mapMarkPoint), (x) => gradientAt(x));
+
+  const starOriginX = 89.36;
+  const starOriginY = 84.34;
+  const starScale = 8.2;
+  const mapStarPoint = ([x, y]) => [s(starOriginX + x * starScale), s(starOriginY + y * starScale)];
+  const starShape = [[75.2, 57.5]];
+  appendCubic(starShape, [75.2, 57.5], [76.3, 62.6], [79, 65.2], [84.1, 66.3], 18);
+  appendCubic(starShape, [84.1, 66.3], [79, 67.4], [76.3, 70.1], [75.2, 75.2], 18);
+  appendCubic(starShape, [75.2, 75.2], [74.1, 70.1], [71.4, 67.4], [66.3, 66.3], 18);
+  appendCubic(starShape, [66.3, 66.3], [71.4, 65.2], [74.1, 62.6], [75.2, 57.5], 18);
+
+  fillPolygon(buffer, size, size, starShape.map(mapStarPoint), (_x, y) => {
+    const t = clamp((y - s(556)) / s(144), 0, 1);
     if (t < 0.52) return colorMix([66, 105, 255], [147, 87, 247], t / 0.52, 255);
     return colorMix([147, 87, 247], [255, 106, 118], (t - 0.52) / 0.48, 255);
   });
