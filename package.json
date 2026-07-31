@@ -7,9 +7,14 @@
   "scripts": {
     "dev:web": "node scripts/dev-server.js",
     "build:web": "node scripts/build-web.js",
+    "test": "node scripts/test-language-carryover-guard.mjs && node scripts/test-protected-ui-token-policy.mjs && node scripts/test-translation-delivery-policy.mjs && node scripts/test-translation-preflight-error.mjs && node scripts/test-translation-preflight-state.mjs",
+    "test:language-guard": "node scripts/test-language-carryover-guard.mjs",
+    "test:protected-ui-tokens": "node scripts/test-protected-ui-token-policy.mjs",
+    "test:delivery-policy": "node scripts/test-translation-delivery-policy.mjs",
+    "test:translation-preflight": "node scripts/test-translation-preflight-error.mjs && node scripts/test-translation-preflight-state.mjs",
     "tauri": "tauri",
     "desktop": "tauri dev",
-    "desktop:build:app": "tauri build --bundles app",
+    "desktop:build:app": "tauri build --no-bundle",
     "desktop:build": "tauri build",
     "desktop:build:windows": "tauri build --bundles nsis"
   },

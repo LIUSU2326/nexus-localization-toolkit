@@ -2,5 +2,10 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
+.desktop-preview-deps/
+downloaded-artifacts/
+run-logs/
+__pycache__/
+*.py[cod]
 *.log
 .DS_Store

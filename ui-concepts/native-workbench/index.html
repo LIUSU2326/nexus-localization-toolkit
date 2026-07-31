@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>NEXUS · Native Workbench</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="desktop">
+      <header class="titlebar">
+        <div class="window-controls" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <div class="titlebar-title"><span class="app-mark">N</span> NEXUS 本地化工作台</div>
+        <div class="titlebar-actions"><span>Workspace · 2 个未保存更改</span><button class="chrome-button" aria-label="最小化">—</button><button class="chrome-button" aria-label="最大化">□</button><button class="chrome-button close" aria-label="关闭">×</button></div>
+      </header>
+
+      <div class="app-frame">
+        <aside class="activity-rail" aria-label="功能导航">
+          <button class="rail-logo" aria-label="NEXUS 首页">N</button>
+          <div class="rail-group">
+            <button class="rail-button active" title="本地化工作台"><span>▤</span></button>
+            <button class="rail-button" title="本地化检测"><span>◌</span></button>
+            <button class="rail-button" title="术语库"><span>⌘</span></button>
+            <button class="rail-button" title="替换规则"><span>⇄</span></button>
+          </div>
+          <div class="rail-spacer"></div>
+          <button class="rail-button" title="通知"><span>◔</span><i></i></button>
+          <button class="rail-avatar" title="账户">Y</button>
+        </aside>
+
+        <aside class="file-rail" aria-label="当前项目文件">
+          <div class="rail-heading">
+            <div>
+              <p class="eyebrow">当前项目</p>
+              <h1>星海传说 · 中文化</h1>
+            </div>
+            <button class="icon-button" title="项目菜单">···</button>
+          </div>
+
+          <button class="project-switcher"><span class="folder-glyph">▾</span><span>release_1.4</span><kbd>⌥ ↓</kbd></button>
+
+          <div class="file-tools">
+            <span>文件 <b>6</b></span>
+            <div><button class="tiny-action" title="导入文件">＋</button><button class="tiny-action" title="筛选文件">⌕</button></div>
+          </div>
+
+          <nav class="file-list">
+            <button class="file-item active" data-file="dialogue"><span class="file-type aqua">XL</span><span class="file-copy"><b>dialogue_zh-CN.xlsx</b><small>1,975 行 · 92%</small></span><span class="file-dot orange"></span></button>
+            <button class="file-item" data-file="ui"><span class="file-type violet">JS</span><span class="file-copy"><b>ui_strings.json</b><small>438 键 · 已完成</small></span><span class="file-dot green"></span></button>
+            <button class="file-item" data-file="quest"><span class="file-type pink">CSV</span><span class="file-copy"><b>quest_log.csv</b><small>762 行 · 45%</small></span><span class="file-dot orange"></span></button>
+            <button class="file-item" data-file="items"><span class="file-type amber">PO</span><span class="file-copy"><b>items.po</b><small>342 条 · 待处理</small></span><span class="file-dot gray"></span></button>
+          </nav>
+
+          <div class="file-section-label"><span>资源</span><button title="展开或收起">⌄</button></div>
+          <nav class="file-list secondary">
+            <button class="file-item"><span class="file-type stone">TG</span><span class="file-copy"><b>术语库</b><small>发行版术语 · 1,142 条</small></span></button>
+            <button class="file-item"><span class="file-type stone">RG</span><span class="file-copy"><b>检查规则</b><small>12 条规则已启用</small></span></button>
+          </nav>
+
+          <div class="rail-footer">
+            <div class="sync-orb"></div>
+            <span><b>同步正常</b><small>刚刚保存至本地</small></span>
+            <button class="icon-button" title="同步详情">›</button>
+          </div>
+        </aside>
+
+        <main class="workbench">
+          <header class="workspace-header">
+            <div class="breadcrumbs"><span>本地化</span><b>/</b><span>翻译工作区</span><b>/</b><strong>dialogue_zh-CN.xlsx</strong></div>
+            <div class="header-actions">
+              <button class="utility-button" id="commandButton"><span>⌘</span> 命令 <kbd>Ctrl K</kbd></button>
+              <button class="utility-button ai-entry" id="aiButton"><span class="spark">✦</span> AI 引擎 <i class="connected"></i></button>
+              <button class="user-menu">YU <span>⌄</span></button>
+            </div>
+          </header>
+
+          <div class="document-tabs" role="tablist" aria-label="打开的文件">
+            <button class="doc-tab active" role="tab" aria-selected="true"><i class="tab-accent aqua"></i><span>dialogue_zh-CN.xlsx</span><em>×</em></button>
+            <button class="doc-tab" role="tab"><i class="tab-accent violet"></i><span>ui_strings.json</span><em>×</em></button>
+            <button class="new-tab" title="打开文件">＋</button>
+          </div>
+
+          <section class="editor-shell">
+            <aside class="configuration-pane">
+              <div class="pane-title">
+                <div><p class="eyebrow">翻译范围</p><h2>批次设置</h2></div>
+                <button class="icon-button" title="重新检测文件">↻</button>
+              </div>
+
+              <section class="context-card">
+                <div class="context-line"><span class="context-icon file-blue">XL</span><div><b>dialogue_zh-CN.xlsx</b><small>Excel · 5 个工作表</small></div><button class="icon-button">›</button></div>
+                <dl class="context-stats"><div><dt>总行数</dt><dd>1,975</dd></div><div><dt>已完成</dt><dd class="success-text">1,818</dd></div><div><dt>需处理</dt><dd class="attention-text">157</dd></div></dl>
+              </section>
+
+              <section class="setting-group" data-collapsible>
+                <button class="setting-heading collapse-toggle" aria-expanded="true"><span><i class="step-index">01</i> 列映射</span><b>⌃</b></button>
+                <div class="setting-content">
+                  <label class="field-label">源文本 <span>必填</span></label>
+                  <button class="field-control"><span class="column-chip source">A</span><strong>原文 / 日文</strong><b>⌄</b></button>
+                  <label class="field-label">译文输出 <span>必填</span></label>
+                  <button class="field-control"><span class="column-chip target">D</span><strong>简体中文</strong><b>⌄</b></button>
+                  <button class="add-column">＋ 添加上下文列</button>
+                </div>
+              </section>
+
+              <section class="setting-group" data-collapsible>
+                <button class="setting-heading collapse-toggle" aria-expanded="true"><span><i class="step-index">02</i> 处理范围</span><b>⌃</b></button>
+                <div class="setting-content">
+                  <button class="field-control compact"><span class="filter-icon">⌇</span><strong>仅翻译：空白译文</strong><b>⌄</b></button>
+                  <div class="filter-row"><button class="filter-chip active">空白 <b>112</b></button><button class="filter-chip">待复核 <b>45</b></button></div>
+                  <label class="check-line"><input type="checkbox" checked /><span>跳过已锁定的条目</span></label>
+                </div>
+              </section>
+
+              <section class="setting-group collapsed" data-collapsible>
+                <button class="setting-heading collapse-toggle" aria-expanded="false"><span><i class="step-index">03</i> 质量与术语</span><b>⌄</b></button>
+                <div class="setting-content">
+                  <label class="check-line"><input type="checkbox" checked /><span>应用发布版术语库</span></label>
+                  <label class="check-line"><input type="checkbox" checked /><span>自动标记长度异常</span></label>
+                </div>
+              </section>
+
+              <div class="run-zone">
+                <div class="run-summary"><span class="ready-dot"></span><span><b>112 条</b>将发送到当前 AI 引擎</span></div>
+                <button class="primary-run" id="runButton"><span>翻译 112 条</span><kbd>Ctrl ↵</kbd></button>
+                <button class="secondary-run">预览影响范围</button>
+              </div>
+            </aside>
+
+            <section class="translation-pane" aria-label="翻译表格">
+              <header class="pane-toolbar">
+                <div class="toolbar-title"><div><p class="eyebrow">工作表 · Dialogue</p><h2>文本翻译</h2></div><span class="count-badge">112 项待处理</span></div>
+                <div class="toolbar-actions"><button class="toolbar-button active-filter" id="filterButton">≡ 筛选 <b>2</b></button><button class="toolbar-button">↕ 排序</button><button class="toolbar-button">☷ 列</button><button class="toolbar-button more">···</button></div>
+              </header>
+
+              <div class="active-filter-bar">
+                <span>当前视图</span>
+                <button class="view-chip"><i></i> 译文为空 <b>×</b></button>
+                <button class="view-chip"><i class="orange"></i> 未锁定 <b>×</b></button>
+                <button class="clear-filter">清除筛选</button>
+              </div>
+
+              <div class="grid-scroll">
+                <table class="translation-grid">
+                  <thead><tr><th class="select-cell"><input type="checkbox" id="selectAll" checked /></th><th class="row-number">#</th><th class="source-head"><span class="column-chip source">A</span> 原文 <small>日文</small><button>⌄</button></th><th class="context-head"><span class="column-chip context">C</span> 场景 / 备注 <button>⌄</button></th><th class="target-head"><span class="column-chip target">D</span> 译文 <small>简体中文</small><button>⌄</button></th><th class="quality-head">检查</th></tr></thead>
+                  <tbody>
+                    <tr class="selected" data-row="188"><td class="select-cell"><input type="checkbox" checked /></td><td class="row-number">188</td><td class="source-cell">ここから先は、王都の騎士以外は立ち入り禁止だ。</td><td class="context-cell"><span class="scene-pill">城门守卫</span><small>警告台词</small></td><td class="target-cell blank"><span>等待翻译</span></td><td class="quality-cell"><span class="status-dot pending"></span><span>待处理</span></td></tr>
+                    <tr data-row="189"><td class="select-cell"><input type="checkbox" checked /></td><td class="row-number">189</td><td class="source-cell">身分証をお持ちでなければ、ここは通せません。</td><td class="context-cell"><span class="scene-pill">城门守卫</span><small>重复出现 2 次</small></td><td class="target-cell blank"><span>等待翻译</span></td><td class="quality-cell"><span class="status-dot pending"></span><span>待处理</span></td></tr>
+                    <tr data-row="190"><td class="select-cell"><input type="checkbox" checked /></td><td class="row-number">190</td><td class="source-cell">王都へようこそ。どうぞ、ごゆっくり。</td><td class="context-cell"><span class="scene-pill blue">城门守卫</span><small>问候台词</small></td><td class="target-cell filled">欢迎来到王都。请慢慢游览。</td><td class="quality-cell"><span class="status-dot verified"></span><span>已校验</span></td></tr>
+                    <tr data-row="191"><td class="select-cell"><input type="checkbox" /></td><td class="row-number">191</td><td class="source-cell">……そんな顔をするな。お前なら、きっと大丈夫だ。</td><td class="context-cell"><span class="scene-pill violet">艾妲</span><small>角色台词</small></td><td class="target-cell blank"><span>等待翻译</span></td><td class="quality-cell"><span class="status-dot pending"></span><span>待处理</span></td></tr>
+                    <tr data-row="192"><td class="select-cell"><input type="checkbox" /></td><td class="row-number">192</td><td class="source-cell">この花は、雨上がりにしか咲かないんだって。</td><td class="context-cell"><span class="scene-pill green">艾妲</span><small>支线任务</small></td><td class="target-cell blank"><span>等待翻译</span></td><td class="quality-cell"><span class="status-dot warning"></span><span>术语提醒</span></td></tr>
+                    <tr data-row="193"><td class="select-cell"><input type="checkbox" /></td><td class="row-number">193</td><td class="source-cell">古い橋の向こうに、見慣れない光が見える。</td><td class="context-cell"><span class="scene-pill orange">探索提示</span><small>地图文本</small></td><td class="target-cell blank"><span>等待翻译</span></td><td class="quality-cell"><span class="status-dot pending"></span><span>待处理</span></td></tr>
+                    <tr data-row="194"><td class="select-cell"><input type="checkbox" /></td><td class="row-number">194</td><td class="source-cell">[QUEST_07] の進行度が更新されました。</td><td class="context-cell"><span class="scene-pill gray">系统</span><small>保留占位符</small></td><td class="target-cell filled">[QUEST_07] 的进度已更新。</td><td class="quality-cell"><span class="status-dot verified"></span><span>已校验</span></td></tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <footer class="table-statusbar">
+                <div><span class="grid-indicator"></span> 已选 <b id="selectedCount">3</b> 项 <span class="status-divider"></span> 行 188–194 / 1,975</div>
+                <div><span>自动保存</span><b class="save-state">已保存</b><span class="status-divider"></span><button class="compact-link">打开检查结果 →</button></div>
+              </footer>
+            </section>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="aiModal" aria-hidden="true">
+      <section class="engine-dialog" role="dialog" aria-modal="true" aria-labelledby="engineTitle">
+        <header class="dialog-header"><div><p class="eyebrow">全局配置</p><h2 id="engineTitle"><span class="spark">✦</span> AI 翻译引擎</h2></div><button class="close-dialog" id="closeAi" aria-label="关闭">×</button></header>
+        <div class="engine-connected"><span class="engine-logo">G</span><div><b>Google Gemini</b><small>gemini-2.0-flash · 当前翻译引擎</small></div><span class="connection-state"><i></i> 可用</span></div>
+        <label class="field-label">模型</label><button class="field-control dialog-field"><span>gemini-2.0-flash</span><b>⌄</b></button>
+        <div class="dialog-grid"><div><label class="field-label">并发数量</label><button class="field-control dialog-field"><span>3</span><b>⌄</b></button></div><div><label class="field-label">失败重试</label><button class="field-control dialog-field"><span>2 次</span><b>⌄</b></button></div></div>
+        <div class="dialog-note"><span>⌁</span><p>此配置应用于项目内所有翻译任务。API 密钥保存在本机系统凭据中。</p></div>
+        <footer class="dialog-footer"><button class="secondary-run" id="testAi">测试连接</button><button class="primary-run small" id="saveAi">保存配置</button></footer>
+      </section>
+    </div>
+
+    <div class="toast" id="toast" role="status"><span>✓</span><p><b>已准备好翻译任务</b><small>112 条文本将使用 Google Gemini 处理。</small></p><button>×</button></div>
+    <script src="app.js"></script>
+  </body>
+</html>

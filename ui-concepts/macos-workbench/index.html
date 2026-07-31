@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>NEXUS · 本地化工作台</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="window" aria-label="NEXUS 本地化工作台概念预览">
+      <header class="titlebar">
+        <div class="traffic-lights" aria-hidden="true">
+          <i class="close"></i><i class="minimize"></i><i class="zoom"></i>
+        </div>
+
+        <button class="workspace-name" id="workspaceMenu" aria-label="切换工作区">
+          <span class="app-glyph">N</span>
+          <span>春季版本 · 本地化</span>
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3" /></svg>
+        </button>
+
+        <div class="titlebar-spacer"></div>
+
+        <div class="toolbar-actions">
+          <button class="toolbar-icon" id="commandButton" aria-label="命令面板" title="命令面板 (⌘K)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 6.5h15M4.5 12h10M4.5 17.5h15" /></svg>
+          </button>
+          <button class="toolbar-button ai-button" id="aiButton" aria-expanded="false">
+            <span class="ai-spark">✦</span>
+            <span>AI 连接</span>
+            <span class="connection-dot" title="已连接"></span>
+          </button>
+          <button class="toolbar-icon inspector-toggle is-active" id="inspectorToggle" aria-pressed="true" aria-label="显示检查器" title="显示检查器">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h14v13H5zM14 5.5v13" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="app-body">
+        <aside class="source-list" aria-label="项目与资源">
+          <div class="sidebar-top">
+            <button class="add-file" id="addFile" aria-label="导入文件" title="导入文件">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            </button>
+            <button class="more-button" aria-label="更多项目操作">•••</button>
+          </div>
+
+          <section class="sidebar-group">
+            <div class="group-label"><span>文件</span><b>4</b></div>
+            <nav class="file-list" aria-label="文件列表">
+              <button class="file-row selected" data-file="dialogue" aria-current="page">
+                <span class="file-icon spreadsheet">▦</span>
+                <span class="file-meta"><strong>dialogue_zh-CN.xlsx</strong><small>1,975 条 · 92%</small></span>
+                <span class="file-state pending"></span>
+              </button>
+              <button class="file-row" data-file="ui">
+                <span class="file-icon json">{ }</span>
+                <span class="file-meta"><strong>ui_strings.json</strong><small>438 条 · 已完成</small></span>
+                <span class="file-state done"></span>
+              </button>
+              <button class="file-row" data-file="quests">
+                <span class="file-icon csv">⌁</span>
+                <span class="file-meta"><strong>quest_log.csv</strong><small>762 条 · 45%</small></span>
+                <span class="file-state pending"></span>
+              </button>
+              <button class="file-row" data-file="items">
+                <span class="file-icon po">PO</span>
+                <span class="file-meta"><strong>items.po</strong><small>342 条 · 未开始</small></span>
+                <span class="file-state quiet"></span>
+              </button>
+            </nav>
+          </section>
+
+          <section class="sidebar-group resources">
+            <div class="group-label"><span>资源</span></div>
+            <nav class="resource-list" aria-label="项目资源">
+              <button class="resource-row"><span>⌘</span><strong>术语库</strong><em>1,142</em></button>
+              <button class="resource-row"><span>✓</span><strong>检查规则</strong><em>12</em></button>
+              <button class="resource-row"><span>↗</span><strong>导出记录</strong></button>
+            </nav>
+          </section>
+
+          <footer class="sidebar-footer">
+            <span class="sync-mark">✓</span>
+            <span><strong>已保存在本地</strong><small>刚刚同步</small></span>
+          </footer>
+        </aside>
+
+        <section class="workspace" aria-label="文本翻译工作区">
+          <header class="document-header">
+            <div class="document-heading">
+              <div class="breadcrumb">本地化 <span>/</span> 文本翻译</div>
+              <div class="file-title-row">
+                <span class="document-icon">▦</span>
+                <h1 id="documentTitle">dialogue_zh-CN.xlsx</h1>
+                <button class="title-chevron" aria-label="打开文件菜单">
+                  <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3" /></svg>
+                </button>
+              </div>
+              <p id="documentSubline">Excel 工作簿 · 5 个工作表 · 上次修改于今天 10:42</p>
+            </div>
+            <div class="document-summary" aria-label="当前文件概览">
+              <span><b>1,975</b> 条文本</span>
+              <i></i>
+              <span><b class="green">1,818</b> 已完成</span>
+              <i></i>
+              <span><b class="orange">112</b> 待翻译</span>
+            </div>
+          </header>
+
+          <div class="mode-toolbar">
+            <div class="segmented-control" role="tablist" aria-label="工作模式">
+              <button class="segment active" role="tab" aria-selected="true" data-mode="translate">翻译</button>
+              <button class="segment" role="tab" aria-selected="false" data-mode="review">审校</button>
+              <button class="segment" role="tab" aria-selected="false" data-mode="check">检测</button>
+            </div>
+            <div class="mode-tools">
+              <button class="round-control" id="filterButton" aria-pressed="false" title="筛选">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4" /></svg>
+                <span>筛选</span>
+              </button>
+              <button class="round-control" title="排序">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 3-3 3 3M15 17l-3 3-3-3M12 4v16" /></svg>
+              </button>
+              <label class="search-field" aria-label="搜索文本">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5" /><path d="m15 15 4.5 4.5" /></svg>
+                <input id="searchInput" type="search" placeholder="搜索文本" />
+                <kbd>⌘F</kbd>
+              </label>
+            </div>
+          </div>
+
+          <div class="filter-strip" id="filterStrip" hidden>
+            <span>显示</span>
+            <button class="filter-pill active" data-filter="pending"><i></i> 待翻译 <b>112</b></button>
+            <button class="filter-pill" data-filter="flagged"><i class="warning"></i> 需确认 <b>45</b></button>
+            <button class="filter-pill" data-filter="locked"><i class="neutral"></i> 已锁定</button>
+            <button class="clear-filters" id="clearFilters">清除</button>
+          </div>
+
+          <section class="translation-table-shell" aria-label="翻译表格">
+            <div class="table-info">
+              <span id="tableCaption">Dialogue · 显示待翻译条目</span>
+              <span id="viewStatus">行 188–195 / 1,975</span>
+            </div>
+            <div class="table-scroll">
+              <table class="translation-table">
+                <colgroup><col class="select-col" /><col class="number-col" /><col class="source-col" /><col class="context-col" /><col class="target-col" /><col class="status-col" /></colgroup>
+                <thead>
+                  <tr>
+                    <th><input type="checkbox" id="selectAll" aria-label="选择全部可见条目" /></th>
+                    <th>#</th>
+                    <th><span class="column-token source">A</span> 原文 <small>日文</small><button class="column-menu">⌄</button></th>
+                    <th><span class="column-token note">C</span> 场景 / 备注</th>
+                    <th><span class="column-token target">D</span> 译文 <small>简体中文</small><button class="column-menu">⌄</button></th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody id="translationRows">
+                  <tr class="selected" data-status="pending" data-row="188">
+                    <td><input type="checkbox" checked aria-label="选择第 188 行" /></td><td>188</td>
+                    <td class="source-copy">ここから先は、王都の騎士以外は立ち入り禁止だ。</td>
+                    <td><span class="context-tag">城门守卫</span><small>警告台词</small></td>
+                    <td class="target-copy empty">待翻译</td>
+                    <td><span class="status pending"><i></i> 待处理</span></td>
+                  </tr>
+                  <tr data-status="pending" data-row="189">
+                    <td><input type="checkbox" checked aria-label="选择第 189 行" /></td><td>189</td>
+                    <td class="source-copy">身分証をお持ちでなければ、ここは通せません。</td>
+                    <td><span class="context-tag">城门守卫</span><small>重复出现 2 次</small></td>
+                    <td class="target-copy empty">待翻译</td>
+                    <td><span class="status pending"><i></i> 待处理</span></td>
+                  </tr>
+                  <tr data-status="review" data-row="190">
+                    <td><input type="checkbox" checked aria-label="选择第 190 行" /></td><td>190</td>
+                    <td class="source-copy">王都へようこそ。どうぞ、ごゆっくり。</td>
+                    <td><span class="context-tag blue">城门守卫</span><small>问候台词</small></td>
+                    <td class="target-copy">欢迎来到王都。请慢慢游览。</td>
+                    <td><span class="status verified"><i></i> 已校验</span></td>
+                  </tr>
+                  <tr data-status="pending" data-row="191">
+                    <td><input type="checkbox" aria-label="选择第 191 行" /></td><td>191</td>
+                    <td class="source-copy">……そんな顔をするな。お前なら、きっと大丈夫だ。</td>
+                    <td><span class="context-tag violet">艾妮</span><small>角色台词</small></td>
+                    <td class="target-copy empty">待翻译</td>
+                    <td><span class="status pending"><i></i> 待处理</span></td>
+                  </tr>
+                  <tr data-status="flagged" data-row="192">
+                    <td><input type="checkbox" aria-label="选择第 192 行" /></td><td>192</td>
+                    <td class="source-copy">この花は、雨上がりにしか咲かないんだって。</td>
+                    <td><span class="context-tag green">艾妮</span><small>支线任务</small></td>
+                    <td class="target-copy empty">待翻译</td>
+                    <td><span class="status warning"><i></i> 术语提醒</span></td>
+                  </tr>
+                  <tr data-status="pending" data-row="193">
+                    <td><input type="checkbox" aria-label="选择第 193 行" /></td><td>193</td>
+                    <td class="source-copy">古い橋の向こうに、見慣れない光が見える。</td>
+                    <td><span class="context-tag amber">探索提示</span><small>地图文本</small></td>
+                    <td class="target-copy empty">待翻译</td>
+                    <td><span class="status pending"><i></i> 待处理</span></td>
+                  </tr>
+                  <tr data-status="review" data-row="194">
+                    <td><input type="checkbox" aria-label="选择第 194 行" /></td><td>194</td>
+                    <td class="source-copy">[QUEST_07] の進行度が更新されました。</td>
+                    <td><span class="context-tag neutral">系统</span><small>保留占位符</small></td>
+                    <td class="target-copy">[QUEST_07] 的进度已更新。</td>
+                    <td><span class="status verified"><i></i> 已校验</span></td>
+                  </tr>
+                  <tr data-status="pending" data-row="195">
+                    <td><input type="checkbox" aria-label="选择第 195 行" /></td><td>195</td>
+                    <td class="source-copy">月が満ちる夜に、もう一度ここで会おう。</td>
+                    <td><span class="context-tag rose">任务尾声</span><small>剧情节点</small></td>
+                    <td class="target-copy empty">待翻译</td>
+                    <td><span class="status pending"><i></i> 待处理</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <footer class="bottom-bar">
+            <div class="selection-status"><span class="selection-dot"></span><span id="selectionCount">已选择 3 项</span><i></i><span>自动保存</span><b>已保存</b></div>
+            <div class="bottom-actions">
+              <button class="text-button" id="previewButton">预览更改</button>
+              <button class="primary-action" id="translateButton"><span>翻译所选 <b id="actionCount">3</b> 项</span><kbd>⌘↵</kbd></button>
+            </div>
+          </footer>
+        </section>
+
+        <aside class="inspector" id="inspector" aria-label="检查器">
+          <header class="inspector-header">
+            <h2>检查器</h2>
+            <button class="toolbar-icon small" id="closeInspector" aria-label="隐藏检查器">×</button>
+          </header>
+          <section class="inspector-section selected-row-summary">
+            <span class="section-kicker">当前条目</span>
+            <div class="row-identity"><span class="row-number-badge">188</span><span>Dialogue · 第 188 行</span></div>
+          </section>
+          <section class="inspector-section">
+            <div class="section-title"><span>翻译状态</span><button class="mini-menu">•••</button></div>
+            <button class="native-select"><span class="status pending"><i></i> 待处理</span><span>⌄</span></button>
+          </section>
+          <section class="inspector-section">
+            <div class="section-title"><span>上下文</span><button class="mini-menu">•••</button></div>
+            <dl class="detail-list"><div><dt>角色</dt><dd>城门守卫</dd></div><div><dt>场景</dt><dd>王都入口</dd></div><div><dt>出现</dt><dd>第 2 章 · 2 次</dd></div></dl>
+          </section>
+          <section class="inspector-section">
+            <div class="section-title"><span>术语提醒</span><span class="notice-count">1</span></div>
+            <button class="terminology-note"><strong>王都</strong><span>建议译为「王都」</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg></button>
+          </section>
+          <section class="inspector-section notes-section">
+            <div class="section-title"><span>备注</span></div>
+            <textarea aria-label="备注" placeholder="为这条文本添加备注…"></textarea>
+          </section>
+        </aside>
+      </div>
+
+      <div class="ai-popover" id="aiPopover" hidden role="dialog" aria-label="AI 连接设置">
+        <header><div><span class="popover-kicker">AI 连接</span><h2>翻译引擎</h2></div><button class="popover-close" id="closeAi" aria-label="关闭">×</button></header>
+        <div class="engine-line"><span class="engine-logo">✦</span><div><strong>Google Gemini</strong><small>已连接 · 本地凭据</small></div><span class="connected-label">可用</span></div>
+        <label class="field-name">模型</label>
+        <button class="native-field"><span>gemini-2.5-flash</span><b>⌄</b></button>
+        <div class="two-fields"><div><label class="field-name">并发</label><button class="native-field"><span>3</span><b>⌄</b></button></div><div><label class="field-name">失败重试</label><button class="native-field"><span>2 次</span><b>⌄</b></button></div></div>
+        <footer><button class="subtle-button" id="testConnection">测试连接</button><button class="popover-save" id="saveConnection">完成</button></footer>
+      </div>
+
+      <div class="command-palette" id="commandPalette" hidden role="dialog" aria-label="命令面板">
+        <div class="command-input"><span>⌘</span><input autofocus placeholder="搜索命令" /><kbd>Esc</kbd></div>
+        <div class="command-list"><button><span>⇧</span><div><strong>翻译所选条目</strong><small>使用当前 AI 引擎</small></div><kbd>⌘↵</kbd></button><button><span>⌕</span><div><strong>检查本页文本</strong><small>运行本地化规则</small></div></button><button><span>☷</span><div><strong>打开术语库</strong><small>1,142 个有效术语</small></div></button></div>
+      </div>
+
+      <div class="toast" id="toast" role="status" hidden><span>✓</span><p id="toastText">任务已准备好</p></div>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

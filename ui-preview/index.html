@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="NEXUS 本地化工具集 UI 重构预览：以任务为中心、将 AI 配置独立出来。"
+    />
+    <title>NEXUS / UI 重构预览</title>
+    <link rel="icon" href="data:," />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=Noto+Serif+SC:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell" id="appShell">
+      <aside class="rail" aria-label="工具导航">
+        <div class="rail-brand">
+          <div class="brand-mark" aria-hidden="true">NX</div>
+          <div>
+            <strong>NEXUS</strong>
+            <span>LOCALIZATION OPS</span>
+          </div>
+        </div>
+
+        <div class="rail-section-label">工作流</div>
+        <nav class="rail-nav">
+          <button class="rail-item active" type="button" data-view="translate">
+            <span class="rail-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 5h8M8 3v2m-3 8 4-4 4 4m-7.4-2.3L3.5 15"/><path d="M15 13h5M17.5 11v2m-1.7 8h3.4l-1.7-5-1.7 5Z"/></svg>
+            </span>
+            <span class="rail-item-copy">
+              <b>文本翻译</b>
+              <small>Translate</small>
+            </span>
+            <span class="rail-count">01</span>
+          </button>
+          <button class="rail-item" type="button" data-view="check">
+            <span class="rail-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/><path d="M12 3a9 9 0 1 0 9 9"/></svg>
+            </span>
+            <span class="rail-item-copy">
+              <b>本地化检测</b>
+              <small>Quality check</small>
+            </span>
+            <span class="rail-count warn">12</span>
+          </button>
+        </nav>
+
+        <div class="rail-section-label">工具</div>
+        <nav class="rail-nav rail-nav-muted">
+          <button class="rail-item" type="button" data-toast="文件拆分">
+            <span class="rail-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M8 4H4v4m0-4 7 7m9 9h-4m4 0-7-7M20 4h-4m4 0-7 7M4 20h4m-4 0 7-7"/></svg>
+            </span>
+            <span class="rail-item-copy"><b>文件拆分</b><small>Split</small></span>
+          </button>
+          <button class="rail-item" type="button" data-toast="格式转换">
+            <span class="rail-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 4v16M19 4v16M5 8h14M5 16h14"/></svg>
+            </span>
+            <span class="rail-item-copy"><b>格式转换</b><small>Convert</small></span>
+          </button>
+          <button class="rail-item" type="button" data-toast="精准替换">
+            <span class="rail-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 7h10m-10 10h10M15 4l4 3-4 3m0 4 4 3-4 3"/></svg>
+            </span>
+            <span class="rail-item-copy"><b>精准替换</b><small>Replace</small></span>
+          </button>
+          <button class="rail-item" type="button" data-toast="轻量质检">
+            <span class="rail-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="m5 12 4 4 10-10"/><path d="M20 12a8 8 0 1 1-3-6"/></svg>
+            </span>
+            <span class="rail-item-copy"><b>轻量质检</b><small>Lint</small></span>
+          </button>
+        </nav>
+
+        <div class="rail-section-label">资源</div>
+        <nav class="rail-nav rail-nav-muted">
+          <button class="rail-item" type="button" data-toast="术语表">
+            <span class="rail-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 4h10a3 3 0 0 1 3 3v12H8a3 3 0 0 1-3-3V4Z"/><path d="M8 19V7a3 3 0 0 1 3-3m-2 8h6m-6 3h4"/></svg>
+            </span>
+            <span class="rail-item-copy"><b>术语表</b><small>Glossary</small></span>
+          </button>
+          <button class="rail-item" type="button" data-toast="术语整理">
+            <span class="rail-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h10M4 19h7m6-5 3 3-3 3m0-3h4"/></svg>
+            </span>
+            <span class="rail-item-copy"><b>术语整理</b><small>Organize</small></span>
+          </button>
+        </nav>
+
+        <div class="rail-bottom">
+          <button class="rail-settings" id="openApiBtn" type="button">
+            <span class="settings-glyph" aria-hidden="true">◌</span>
+            <span><b>AI 与通道</b><small>3 个通道已连接</small></span>
+            <span class="status-dot live"></span>
+          </button>
+          <div class="rail-footer">
+            <span>v2.0 preview</span>
+            <span class="mono">LOCAL</span>
+          </div>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div class="topbar-context">
+            <button class="project-switcher" type="button" data-toast="项目切换">
+              <span class="project-avatar">M</span>
+              <span>
+                <b>佣兵小镇</b>
+                <small>项目空间 / Production</small>
+              </span>
+              <span class="chevron">⌄</span>
+            </button>
+            <span class="slash">/</span>
+            <span class="context-label" id="contextLabel">文本翻译</span>
+          </div>
+          <div class="topbar-tools">
+            <button class="search-trigger" id="openCommandBtn" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+              <span>搜索项目、文件、术语</span>
+              <kbd>Ctrl K</kbd>
+            </button>
+            <span class="runtime-state"><i></i> 本地运行</span>
+            <button class="icon-button" id="openApiTopBtn" type="button" aria-label="打开 AI 与通道设置" title="AI 与通道设置">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1"/><circle cx="12" cy="12" r="4"/></svg>
+            </button>
+            <div class="user-avatar" aria-label="当前用户">Y</div>
+          </div>
+        </header>
+
+        <section class="workspace-body" id="workspaceBody">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow" id="pageEyebrow">WORKFLOW / 01</p>
+              <h1 id="pageTitle">文本翻译</h1>
+              <p class="page-summary" id="pageSummary">把原文变成可交付的本地化文本，过程保持可追踪。</p>
+            </div>
+            <div class="heading-actions">
+              <button class="button ghost" type="button" data-toast="已打开运行记录">查看运行记录 <span>↗</span></button>
+              <button class="button dark" id="newTaskBtn" type="button">＋ 新建任务</button>
+            </div>
+          </div>
+
+          <div class="task-strip" id="taskStrip">
+            <div class="task-file">
+              <span class="file-symbol" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5M9 13h6m-6 4h6"/></svg>
+              </span>
+              <div>
+                <b>佣兵小镇-全文本.xlsx</b>
+                <small>22,557 行 · 5 列 · 最近打开 6 分钟前</small>
+              </div>
+              <button class="tiny-link" type="button" data-toast="选择其他文件">更换</button>
+            </div>
+            <div class="task-kpi">
+              <span>当前批次</span>
+              <strong>69 / 69</strong>
+            </div>
+            <div class="task-kpi task-kpi-warning">
+              <span>待处理问题</span>
+              <strong>44 <em>需复核</em></strong>
+            </div>
+            <div class="task-progress" aria-label="总任务进度">
+              <div class="progress-meta"><span>总任务进度</span><b>72%</b></div>
+              <div class="progress-track"><i style="width: 72%"></i></div>
+            </div>
+          </div>
+
+          <div class="mode-tabs" role="tablist" aria-label="工作台模式">
+            <button class="mode-tab active" type="button" role="tab" aria-selected="true" data-mode="translate">
+              <span class="tab-number">01</span>
+              <span><b>翻译工作台</b><small>Translate</small></span>
+            </button>
+            <button class="mode-tab" type="button" role="tab" aria-selected="false" data-mode="check">
+              <span class="tab-number">02</span>
+              <span><b>检测工作台</b><small>Quality check</small></span>
+            </button>
+            <div class="mode-tabs-note"><span class="status-dot live"></span> 结果会自动保存到本地任务记录</div>
+          </div>
+
+          <div class="view view-translate active" id="translateView">
+            <div class="stepper" aria-label="翻译步骤">
+              <button class="step active" type="button" data-step="1">
+                <span>01</span><b>数据范围</b><small>文件 / 列 / 项目</small>
+              </button>
+              <span class="step-line"></span>
+              <button class="step" type="button" data-step="2">
+                <span>02</span><b>翻译策略</b><small>语言 / 模型 / 术语</small>
+              </button>
+              <span class="step-line"></span>
+              <button class="step" type="button" data-step="3">
+                <span>03</span><b>检查与导出</b><small>质量门槛 / 交付</small>
+              </button>
+            </div>
+
+            <div class="work-grid">
+              <div class="work-column">
+                <section class="surface section-card">
+                  <div class="section-head">
+                    <div class="section-index">01</div>
+                    <div>
+                      <h2>数据范围</h2>
+                      <p>只保留会影响本次任务的选择。</p>
+                    </div>
+                    <span class="complete-mark">已完成</span>
+                  </div>
+                  <div class="field-group">
+                    <label>工作表</label>
+                    <button class="select-like" type="button" data-toast="打开工作表选择">
+                      <span><b>Sheet1 · 全文本</b><small>22,557 行</small></span><span class="chevron">⌄</span>
+                    </button>
+                  </div>
+                  <div class="field-group">
+                    <label>翻译列 <span class="label-hint">可多选</span></label>
+                    <div class="chip-grid">
+                      <button class="column-chip" type="button" data-chip-toggle="true"><span>列 1</span><b>id</b><small>-506 · -505 · -504</small></button>
+                      <button class="column-chip" type="button" data-chip-toggle="true"><span>列 2</span><b>备注</b><small>无数据</small></button>
+                      <button class="column-chip selected" type="button" data-chip-toggle="true"><span>列 3</span><b>管理</b><small>创建账号失败…</small></button>
+                      <button class="column-chip reference" type="button" data-chip-toggle="true"><span>列 4</span><b>英语</b><small>Account creation…</small></button>
+                      <button class="column-chip" type="button" data-chip-toggle="true"><span>列 5</span><b>(空列名)</b><small>无数据</small></button>
+                    </div>
+                  </div>
+                  <div class="inline-note">
+                    <span class="note-icon">i</span>
+                    <p><b>主源列</b>使用中文列“管理”；<b>参考列</b>使用英语列“英语”。参考列只提供语气和术语线索，不会覆盖主源含义。</p>
+                  </div>
+                </section>
+
+                <section class="surface section-card">
+                  <div class="section-head">
+                    <div class="section-index">02</div>
+                    <div>
+                      <h2>翻译策略</h2>
+                      <p>把模型选择和质量策略收在一个决策面里。</p>
+                    </div>
+                    <button class="collapse-button" type="button" data-collapse="strategyBody" aria-expanded="true">收起⌃</button>
+                  </div>
+                  <div class="section-body" id="strategyBody">
+                    <div class="two-fields">
+                      <div class="field-group">
+                        <label for="sourceLanguage">源语言</label>
+                        <select id="sourceLanguage">
+                          <option>中文（简体）</option>
+                        </select>
+                      </div>
+                      <div class="field-group">
+                        <label for="targetLanguage">目标语言</label>
+                        <select id="targetLanguage">
+                          <option>英语</option>
+                          <option>日语</option>
+                          <option>韩语</option>
+                          <option>法语</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div class="route-card">
+                      <div class="route-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="M4 12h14m-4-4 4 4-4 4"/></svg>
+                      </div>
+                      <div class="route-copy">
+                        <span class="label-hint">默认翻译通道</span>
+                        <b>Gemini 3.1 Flash Lite</b>
+                        <small>已连接 · 并发 3 · 预计 8 分钟</small>
+                      </div>
+                      <button class="tiny-link" id="routeSettingsBtn" type="button">管理通道</button>
+                    </div>
+                    <div class="strategy-options">
+                      <label class="toggle-row">
+                        <input type="checkbox" checked />
+                        <span class="fake-toggle"></span>
+                        <span><b>自动一致性记忆</b><small>用本文件高频短语减少同词多译</small></span>
+                      </label>
+                      <label class="toggle-row">
+                        <input type="checkbox" checked />
+                        <span class="fake-toggle"></span>
+                        <span><b>翻译后轻量检测</b><small>检查术语、数字、占位符和标签</small></span>
+                      </label>
+                      <label class="toggle-row">
+                        <input type="checkbox" />
+                        <span class="fake-toggle"></span>
+                        <span><b>超长译文二次精简</b><small>仅对超长句子追加一次 AI 调整</small></span>
+                      </label>
+                    </div>
+                    <div class="advanced-row">
+                      <button class="advanced-trigger" type="button" data-expand="advancedTranslate" aria-expanded="false">
+                        <span>更多策略</span><small>多语言队列、术语表约束、并发</small><span class="chevron">＋</span>
+                      </button>
+                      <div class="advanced-content" id="advancedTranslate" hidden>
+                        <div class="mini-field"><label>并发数量</label><select><option>3（推荐）</option><option>5（较快）</option></select></div>
+                        <div class="mini-field"><label>术语表</label><button class="select-like compact" type="button"><span><b>通用 UI · 384 条</b></span><span class="chevron">⌄</span></button></div>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="surface section-card compact-card">
+                  <div class="section-head">
+                    <div class="section-index">03</div>
+                    <div>
+                      <h2>检查与导出</h2>
+                      <p>翻译完成后再决定报告和交付方式。</p>
+                    </div>
+                    <span class="label-hint">可稍后设置</span>
+                  </div>
+                  <div class="export-options">
+                    <button class="export-choice selected" type="button" data-export-choice="replace"><span class="radio-dot"></span><span><b>生成新文件</b><small>保留源文件，新增目标语言列</small></span></button>
+                    <button class="export-choice" type="button" data-export-choice="report"><span class="radio-dot"></span><span><b>同时生成报告</b><small>附带问题类型和模型信息</small></span></button>
+                  </div>
+                </section>
+              </div>
+
+              <aside class="preview-column">
+                <section class="surface preview-card">
+                  <div class="preview-head">
+                    <div>
+                      <span class="eyebrow">LIVE PREVIEW</span>
+                      <h2>译文预览</h2>
+                    </div>
+                    <div class="preview-head-actions">
+                      <button class="icon-button small" type="button" data-toast="筛选预览行" aria-label="筛选预览行">≡</button>
+                      <button class="button ghost small" type="button" data-toast="打开完整表格">打开表格 ↗</button>
+                    </div>
+                  </div>
+                  <div class="preview-toolbar">
+                    <span><i class="status-dot live"></i> 已完成 69 条</span>
+                    <span class="toolbar-separator"></span>
+                    <span>显示：<b>需复核</b></span>
+                    <button class="toolbar-filter" type="button" data-toast="切换筛选">筛选⌄</button>
+                  </div>
+                  <div class="translation-rows">
+                    <article class="translation-row">
+                      <div class="row-meta"><span>#0481</span><span class="row-tag warning">需复核</span></div>
+                      <div class="row-text">
+                        <div><small>原文</small><p>创建账号失败，请稍后重试</p></div>
+                        <span class="row-arrow">→</span>
+                        <div><small>译文</small><p>Account creation failed. Please try again later.</p></div>
+                      </div>
+                      <div class="row-note"><span>⚠</span> 与术语表中的 “account” 规则不一致</div>
+                    </article>
+                    <article class="translation-row">
+                      <div class="row-meta"><span>#0482</span><span class="row-tag ok">通过</span></div>
+                      <div class="row-text">
+                        <div><small>原文</small><p>角色已达到最高等级</p></div>
+                        <span class="row-arrow">→</span>
+                        <div><small>译文</small><p>Character has reached the maximum level.</p></div>
+                      </div>
+                    </article>
+                    <article class="translation-row">
+                      <div class="row-meta"><span>#0483</span><span class="row-tag ok">通过</span></div>
+                      <div class="row-text">
+                        <div><small>原文</small><p>金币不足，无法购买该物品</p></div>
+                        <span class="row-arrow">→</span>
+                        <div><small>译文</small><p>Not enough gold to purchase this item.</p></div>
+                      </div>
+                    </article>
+                    <article class="translation-row muted-row">
+                      <div class="row-meta"><span>#0484</span><span class="row-tag info">已复用</span></div>
+                      <div class="row-text">
+                        <div><small>原文</small><p>返回主城</p></div>
+                        <span class="row-arrow">→</span>
+                        <div><small>译文</small><p>Return to town</p></div>
+                      </div>
+                    </article>
+                  </div>
+                  <div class="preview-foot">
+                    <span>仅展示最近 4 条 · 其余结果在报告中查看</span>
+                    <button class="tiny-link" type="button" data-toast="已打开报告">查看全部结果 ↗</button>
+                  </div>
+                </section>
+
+              </aside>
+            </div>
+          </div>
+
+          <div class="view view-check" id="checkView" hidden>
+            <div class="stepper check-stepper" aria-label="检测步骤">
+              <button class="step active" type="button" data-check-step="1"><span>01</span><b>检测范围</b><small>文件 / 列 / 术语</small></button>
+              <span class="step-line"></span>
+              <button class="step" type="button" data-check-step="2"><span>02</span><b>问题队列</b><small>类型 / 严重度 / 复核</small></button>
+              <span class="step-line"></span>
+              <button class="step" type="button" data-check-step="3"><span>03</span><b>报告交付</b><small>修正 / 导出 / 归档</small></button>
+            </div>
+            <div class="check-grid">
+              <div class="work-column">
+                <section class="surface section-card">
+                  <div class="section-head">
+                    <div class="section-index">01</div>
+                    <div><h2>检测范围</h2><p>先定范围，再决定检查严格度。</p></div>
+                    <span class="complete-mark">已完成</span>
+                  </div>
+                  <div class="field-group">
+                    <label>原文列 / 译文列</label>
+                    <div class="pair-select">
+                      <button class="select-like" type="button"><span><small>原文</small><b>列 3 · 管理</b></span><span class="chevron">⌄</span></button>
+                      <span class="pair-arrow">→</span>
+                      <button class="select-like" type="button"><span><small>译文</small><b>列 4 · English</b></span><span class="chevron">⌄</span></button>
+                    </div>
+                  </div>
+                  <div class="field-group">
+                    <label>检查规则</label>
+                    <div class="rule-grid">
+                      <button class="rule-chip active" type="button" data-rule-filter="all"><b>全部问题</b><span>111</span></button>
+                      <button class="rule-chip active" type="button" data-rule-filter="missing"><b>真实失败 / 缺失</b><span>72</span></button>
+                      <button class="rule-chip" type="button" data-rule-filter="format"><b>格式 / 占位符</b><span>2</span></button>
+                      <button class="rule-chip" type="button" data-rule-filter="length"><b>译文超长</b><span>26</span></button>
+                      <button class="rule-chip active" type="button" data-rule-filter="suspicious"><b>疑似未翻译</b><span>39</span></button>
+                    </div>
+                  </div>
+                  <div class="inline-note orange">
+                    <span class="note-icon">!</span>
+                    <p>当前选中 3 类问题，共 <b id="issueFilterCount">111</b> 条。先处理高风险项，低风险项可留到导出前。</p>
+                  </div>
+                </section>
+                <section class="surface section-card">
+                  <div class="section-head">
+                    <div class="section-index">02</div>
+                    <div><h2>检测策略</h2><p>模型只负责判断，不把配置细节铺在结果旁。</p></div>
+                    <button class="collapse-button" type="button" data-collapse="checkStrategyBody" aria-expanded="true">收起⌃</button>
+                  </div>
+                  <div class="section-body" id="checkStrategyBody">
+                    <div class="route-card">
+                      <div class="route-icon check">✓</div>
+                      <div class="route-copy"><span class="label-hint">检测模式</span><b>均衡模式</b><small>批量检测 + 异常复核 · 预计 11 分钟</small></div>
+                      <button class="tiny-link" type="button" data-toast="切换检测模式">更改</button>
+                    </div>
+                    <div class="strategy-options">
+                      <label class="toggle-row"><input type="checkbox" checked /><span class="fake-toggle"></span><span><b>参考当前术语表</b><small>只检查已启用的 384 条术语</small></span></label>
+                      <label class="toggle-row"><input type="checkbox" checked /><span class="fake-toggle"></span><span><b>自动保存阶段结果</b><small>暂停或异常时保留可恢复的报告</small></span></label>
+                    </div>
+                    <div class="advanced-row">
+                      <button class="advanced-trigger" type="button" data-expand="advancedCheck" aria-expanded="false"><span>更多策略</span><small>历史报告、追加模型、标色方式</small><span class="chevron">＋</span></button>
+                      <div class="advanced-content" id="advancedCheck" hidden><div class="mini-field"><label>历史报告</label><button class="select-like compact" type="button"><span><b>未导入</b></span><span class="chevron">⌄</span></button></div><div class="mini-field"><label>报告标色</label><select><option>仅标色译文列</option><option>不额外标色</option></select></div></div>
+                    </div>
+                  </div>
+                </section>
+              </div>
+
+              <aside class="preview-column">
+                <section class="surface result-card">
+                  <div class="preview-head">
+                    <div><span class="eyebrow">ISSUE QUEUE</span><h2>问题队列</h2></div>
+                    <div class="queue-score"><strong>69%</strong><span>通过率</span></div>
+                  </div>
+                  <div class="result-summary-strip">
+                    <div><span>待处理</span><b class="orange-text">111</b></div>
+                    <div><span>高风险</span><b>72</b></div>
+                    <div><span>已复核</span><b class="green-text">69</b></div>
+                  </div>
+                  <div class="queue-toolbar">
+                    <div class="segmented">
+                      <button class="segment active" type="button" data-queue="all">全部</button>
+                      <button class="segment" type="button" data-queue="high">高风险</button>
+                      <button class="segment" type="button" data-queue="mine">我标记的</button>
+                    </div>
+                    <button class="button ghost small" type="button" data-toast="打开筛选">筛选</button>
+                  </div>
+                  <div class="issue-list" id="issueList">
+                    <article class="issue-item selected" data-issue="missing">
+                      <div class="issue-marker danger"></div>
+                      <div class="issue-copy"><div><b>创建账号失败，请稍后重试</b><span class="row-tag danger">真实失败</span></div><p>Account creation failed, please try again later.</p><small>第 481 行 · 列 4</small></div>
+                      <button class="issue-check" type="button" aria-label="标记为已处理">✓</button>
+                    </article>
+                    <article class="issue-item" data-issue="suspicious">
+                      <div class="issue-marker warning"></div>
+                      <div class="issue-copy"><div><b>限时活动即将开始</b><span class="row-tag warning">疑似未翻译</span></div><p>限时活动即将开始</p><small>第 572 行 · 列 4</small></div>
+                      <button class="issue-check" type="button" aria-label="标记为已处理">✓</button>
+                    </article>
+                    <article class="issue-item" data-issue="format">
+                      <div class="issue-marker info"></div>
+                      <div class="issue-copy"><div><b>剩余 %s 个道具</b><span class="row-tag info">格式 / 占位符</span></div><p>%s items remaining</p><small>第 804 行 · 列 4</small></div>
+                      <button class="issue-check" type="button" aria-label="标记为已处理">✓</button>
+                    </article>
+                  </div>
+                  <div class="preview-foot"><span>显示 3 / 111 条问题</span><button class="tiny-link" type="button" data-toast="已打开完整报告">查看完整报告 ↗</button></div>
+                </section>
+              </aside>
+            </div>
+          </div>
+        </section>
+
+        <footer class="action-dock" id="actionDock">
+          <div class="dock-context">
+            <span class="dock-status"><i class="status-dot live"></i><b id="dockStatusLabel">配置已就绪</b></span>
+            <span class="dock-detail" id="dockDetail">3 个选择 · 69 条待处理 · 将生成新文件</span>
+          </div>
+          <div class="dock-actions">
+            <button class="button ghost" type="button" data-toast="已保存为草稿">保存草稿</button>
+            <button class="button primary" id="runTaskBtn" type="button"><span id="runTaskLabel">开始翻译</span><span class="button-arrow">→</span></button>
+          </div>
+        </footer>
+      </main>
+    </div>
+
+    <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+    <aside class="api-drawer" id="apiDrawer" aria-labelledby="apiDrawerTitle" aria-hidden="true">
+      <div class="drawer-header">
+        <div><span class="eyebrow">SETTINGS / AI</span><h2 id="apiDrawerTitle">AI 与通道</h2><p>通道只在需要时出现，任务页面只显示当前选择。</p></div>
+        <button class="icon-button" id="closeApiBtn" type="button" aria-label="关闭 AI 与通道设置">×</button>
+      </div>
+      <div class="drawer-tabs" role="tablist">
+        <button class="drawer-tab active" type="button" data-drawer-tab="profiles">通道</button>
+        <button class="drawer-tab" type="button" data-drawer-tab="defaults">默认策略</button>
+        <button class="drawer-tab" type="button" data-drawer-tab="diagnostics">诊断</button>
+      </div>
+      <div class="drawer-content">
+        <div class="drawer-panel active" id="drawerProfiles">
+          <div class="drawer-section-title"><span>已保存通道</span><button class="tiny-link" id="addProfileBtn" type="button">＋ 新增</button></div>
+          <div class="profile-list">
+            <button class="profile-card active" type="button" data-profile="gemini">
+              <span class="provider-mark gemini">✦</span><span class="profile-copy"><b>Gemini 生产通道</b><small>gemini-3.1-flash-lite · 并发 3</small></span><span class="profile-state">默认</span>
+            </button>
+            <button class="profile-card" type="button" data-profile="deepseek">
+              <span class="provider-mark deepseek">D</span><span class="profile-copy"><b>DeepSeek 复核</b><small>deepseek-v4-flash · 并发 2</small></span><span class="profile-state">可用</span>
+            </button>
+            <button class="profile-card" type="button" data-profile="openai">
+              <span class="provider-mark openai">◎</span><span class="profile-copy"><b>OpenAI 备用</b><small>gpt-4.1-mini · 并发 1</small></span><span class="profile-state">可用</span>
+            </button>
+          </div>
+          <div class="drawer-callout"><span class="callout-icon">i</span><p>API Key 只保存在本机。任务页不会展示密钥或 Base URL。</p></div>
+          <div class="drawer-section-title form-title"><span>通道详情</span><span class="label-hint">Gemini 生产通道</span></div>
+          <div class="drawer-form">
+            <label>通道名称<input type="text" value="Gemini 生产通道" /></label>
+            <label>平台<select><option>Google Gemini</option><option>DeepSeek</option><option>OpenAI 兼容</option></select></label>
+            <div class="form-split"><label>模型<input type="text" value="gemini-3.1-flash-lite" /></label><label>并发<input type="number" value="3" /></label></div>
+            <div class="form-split"><label>Base URL<input type="text" value="https://generativelanguage.googleapis.com" /></label><label>失败重试<input type="number" value="2" /></label></div>
+            <label>API Key<div class="secret-field"><input type="password" value="sk-preview••••••••" /><button type="button" data-toast="仅预览，不会读取密钥">显示</button></div></label>
+          </div>
+          <div class="drawer-actions"><button class="button ghost" type="button" data-toast="已发送测试请求">测试通道</button><button class="button primary" type="button" data-toast="通道已保存">保存更改</button></div>
+        </div>
+        <div class="drawer-panel" id="drawerDefaults" hidden>
+          <div class="drawer-section-title"><span>任务默认值</span></div>
+          <div class="drawer-form">
+            <label>翻译默认模型<select><option>Gemini 生产通道</option><option>DeepSeek 复核</option></select></label>
+            <label>检测模式<select><option>均衡模式</option><option>严格模式</option><option>省钱模式</option></select></label>
+            <label>默认并发<input type="number" value="3" /></label>
+          </div>
+          <div class="drawer-callout"><span class="callout-icon">↗</span><p>任务页可临时覆盖默认值，覆盖只对当前任务生效。</p></div>
+        </div>
+        <div class="drawer-panel" id="drawerDiagnostics" hidden>
+          <div class="diagnostic-card"><span class="diagnostic-icon good">✓</span><div><b>Gemini 生产通道</b><small>最近测试 2 分钟前 · 480ms</small></div><span class="diagnostic-state good">正常</span></div>
+          <div class="diagnostic-card"><span class="diagnostic-icon good">✓</span><div><b>DeepSeek 复核</b><small>最近测试 8 分钟前 · 620ms</small></div><span class="diagnostic-state good">正常</span></div>
+          <div class="diagnostic-card"><span class="diagnostic-icon warn">!</span><div><b>OpenAI 备用</b><small>额度提醒 · 建议检查账户余额</small></div><span class="diagnostic-state warn">注意</span></div>
+        </div>
+      </div>
+    </aside>
+
+    <div class="command-backdrop" id="commandBackdrop" hidden></div>
+    <div class="command-dialog" id="commandDialog" role="dialog" aria-modal="true" aria-labelledby="commandTitle" aria-hidden="true">
+      <div class="command-input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="commandInput" placeholder="搜索工具、项目、文件、术语…" /><kbd>ESC</kbd></div>
+      <div class="command-body"><span id="commandTitle" class="eyebrow">QUICK NAVIGATION</span><button type="button" data-command="translate"><b>文本翻译</b><small>打开翻译工作台</small><kbd>01</kbd></button><button type="button" data-command="check"><b>本地化检测</b><small>打开检测工作台</small><kbd>02</kbd></button><button type="button" data-command="api"><b>AI 与通道</b><small>管理 API 配置</small><kbd>⌘ ,</kbd></button></div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

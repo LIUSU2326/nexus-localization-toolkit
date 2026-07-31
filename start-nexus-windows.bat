@@ -9,6 +9,12 @@ if exist "%USERPROFILE%\.cargo\bin\cargo.exe" (
 
 where npm >nul 2>nul
 if errorlevel 1 (
+  if exist "%~dp0start-desktop-test.bat" (
+    echo System npm was not found. Opening the local desktop test window instead...
+    call "%~dp0start-desktop-test.bat"
+    if errorlevel 1 exit /b 1
+    exit /b 0
+  )
   echo [ERROR] npm was not found. Please install Node.js first.
   echo Download: https://nodejs.org/
   pause

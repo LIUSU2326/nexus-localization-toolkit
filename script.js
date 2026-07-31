@@ -9,6 +9,56 @@ function escapeAttribute(text) {
     return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+function getNexusDiscountGuard() {
+    return globalThis.NexusDiscountGuard || null;
+}
+
+function evaluateNexusDiscountTranslation(sourceText, translatedText, targetLang = '') {
+    const guard = getNexusDiscountGuard();
+    return guard
+        ? guard.evaluateDiscountTranslation(sourceText, translatedText, targetLang)
+        : {
+            status: 'not_applicable',
+            issues: [],
+            expressions: [],
+            candidates: [],
+            sourceRanges: [],
+            targetRanges: []
+        };
+}
+
+function getNexusDiscountQaIssues(sourceText, translatedText, targetLang = '') {
+    const result = evaluateNexusDiscountTranslation(sourceText, translatedText, targetLang);
+    /* A placeholder/range such as %s 折 cannot be safely converted without
+     * runtime data.  The local test panel reports it for review, but it must
+     * not create a false failed task merely because static QA cannot decide. */
+    if (result.sourceAmbiguous) return [];
+    return result
+        .issues
+        .map(issue => typeof issue === 'string' ? issue : issue.message)
+        .filter(Boolean);
+}
+
+function getNexusDiscountQaStatus(sourceText, translatedText, targetLang = '') {
+    const issues = getNexusDiscountQaIssues(sourceText, translatedText, targetLang);
+    return issues.length ? `需确认：${issues.join('；')}` : '';
+}
+
+function maskNexusDiscountRanges(text, ranges = []) {
+    const guard = getNexusDiscountGuard();
+    return guard ? guard.maskRanges(text, ranges) : String(text || '');
+}
+
+function buildNexusDiscountPromptInstruction(sourceText, targetLang = '') {
+    const guard = getNexusDiscountGuard();
+    return guard ? guard.buildPromptInstruction(sourceText, targetLang) : '';
+}
+
+function getNexusStandaloneDiscountTranslation(sourceText, targetLang = '') {
+    const guard = getNexusDiscountGuard();
+    return guard ? guard.getStandaloneDiscountTranslation(sourceText, targetLang) : null;
+}
+
 function setStatus(type, text, subtext = '', actionCallback = null, actionLabel = '查看') {
     const statusBar = document.getElementById('statusBar');
     const statusIcon = document.getElementById('statusIcon');
@@ -112,17 +162,22 @@ function startInspectorTaskTimer(phase = '运行中') {
 }
 
 function finishInspectorTaskTimer(type = 'success', phase = '') {
-    if (!inspectorTaskStartedAt || inspectorTaskStatus !== 'running') return;
-    inspectorTaskFinishedAt = Date.now();
-    inspectorTaskStatus = type === 'error' ? 'error' : 'success';
+    if (!inspectorTaskStartedAt) return;
+    const isError = type === 'error';
+    const isWarning = type === 'warning';
+    const isRunning = inspectorTaskStatus === 'running';
+    const isTerminalWarningOverride = isWarning && inspectorTaskStatus === 'success';
+    if (!isRunning && !isTerminalWarningOverride) return;
+    if (isRunning) inspectorTaskFinishedAt = Date.now();
+    inspectorTaskStatus = isError ? 'error' : (isWarning ? 'warning' : 'success');
     if (inspectorTaskTimerId) {
         clearInterval(inspectorTaskTimerId);
         inspectorTaskTimerId = null;
     }
     renderInspectorTaskTimer();
-    setInspectorText('inspectorTaskBadge', type === 'error' ? '异常' : '完成');
-    setInspectorText('inspectorTaskPhase', phase || (type === 'error' ? '处理异常' : '处理完成'));
-    setInspectorText('inspectorEstimateBadge', type === 'error' ? '已停止' : '已计时');
+    setInspectorText('inspectorTaskBadge', isError ? '异常' : (isWarning ? '需处理' : '完成'));
+    setInspectorText('inspectorTaskPhase', phase || (isError ? '处理异常' : (isWarning ? '处理完成，仍需修复' : '处理完成')));
+    setInspectorText('inspectorEstimateBadge', isError ? '已停止' : '已计时');
 }
 
 function resetInspectorTaskTimer() {
@@ -176,6 +231,17 @@ function formatRelativeTime(timestamp) {
     return `${Math.floor(diff / (24 * hour))} 天前`;
 }
 
+function normalizeRecentTaskDisplayText(value = '') {
+    return String(value || '')
+        .replace(/失败翻译补跑完成！?/g, '硬问题重译完成')
+        .replace(/失败\/需确认/g, '发现问题')
+        .replace(/真实失败\/缺失/g, '翻译失败/未返回')
+        .replace(/QA软风险/g, '软性需确认')
+        .replace(/默认补跑/g, '可自动处理')
+        .replace(/补跑失败翻译/g, '重译硬问题')
+        .replace(/有可补跑项/g, '有可自动处理项');
+}
+
 function renderRecentTasks() {
     const list = document.getElementById('recentTaskList');
     if (!list) return;
@@ -188,8 +254,8 @@ function renderRecentTasks() {
         <div class="recent-task-item ${escapeAttribute(task.status || 'ready')}">
             <span class="recent-task-icon">${task.status === 'success' ? '✓' : task.status === 'error' ? '!' : '•'}</span>
             <div>
-                <strong>${escapeHtml(task.title)}</strong>
-                <small>${escapeHtml(task.detail || '')}${task.detail ? ' · ' : ''}${formatRelativeTime(task.createdAt)}</small>
+                <strong>${escapeHtml(normalizeRecentTaskDisplayText(task.title))}</strong>
+                <small>${escapeHtml(normalizeRecentTaskDisplayText(task.detail))}${task.detail ? ' · ' : ''}${formatRelativeTime(task.createdAt)}</small>
             </div>
         </div>
     `).join('');
@@ -268,6 +334,39 @@ function updateInspectorEstimate(files = []) {
     }
 }
 
+const apiRuntimeHealthByProfile = new Map();
+
+function getApiRuntimeHealthKey(profile) {
+    if (!profile) return '';
+    return String(
+        profile.id ||
+        profile.profileId ||
+        `${profile.provider || 'custom'}:${profile.baseUrl || ''}:${profile.model || ''}`
+    );
+}
+
+function getApiRuntimeHealth(profile) {
+    const key = getApiRuntimeHealthKey(profile);
+    return key ? (apiRuntimeHealthByProfile.get(key) || null) : null;
+}
+
+function setApiRuntimeHealth(profile, status, message = '') {
+    const key = getApiRuntimeHealthKey(profile);
+    if (!key) return;
+    apiRuntimeHealthByProfile.set(key, {
+        status: status || 'configured',
+        message: String(message || '').trim(),
+        checkedAt: Date.now()
+    });
+    renderApiSummary();
+    document.dispatchEvent(new CustomEvent('nexus:api-runtime-health-updated'));
+}
+
+function clearApiRuntimeHealth(profile) {
+    const key = getApiRuntimeHealthKey(profile);
+    if (key) apiRuntimeHealthByProfile.delete(key);
+}
+
 function renderApiSummary() {
     const apiConfig = typeof getApiConfig === 'function' ? getApiConfig() : null;
     const profileName = apiConfig?.name || apiConfig?.profileName || getPlatformName(apiConfig?.provider) || '未配置通道';
@@ -275,6 +374,16 @@ function renderApiSummary() {
     const hasKey = Boolean(String(apiConfig?.apiKey || '').trim());
     const concurrency = Number(apiConfig?.concurrency || apiConfig?.profileConcurrency || 1);
     const visual = getPlatformVisual(apiConfig?.provider || 'custom');
+    const runtimeHealth = hasKey ? getApiRuntimeHealth(apiConfig) : null;
+    const healthStatus = hasKey ? (runtimeHealth?.status || 'configured') : 'missing';
+    const healthPresentation = {
+        missing: { inspector: '待配置', topbar: 'AI 通道待配置', className: '' },
+        configured: { inspector: '待验证', topbar: 'AI 通道待验证', className: '' },
+        checking: { inspector: '验证中', topbar: 'AI 通道验证中', className: 'checking' },
+        online: { inspector: '可用', topbar: 'AI 通道可用', className: 'online' },
+        quota: { inspector: '额度已用尽', topbar: 'AI 额度已用尽', className: 'blocked' },
+        error: { inspector: '不可用', topbar: 'AI 通道不可用', className: 'blocked' }
+    }[healthStatus] || { inspector: '待验证', topbar: 'AI 通道待验证', className: '' };
 
     const apiName = document.getElementById('inspectorApiName');
     const apiModel = document.getElementById('inspectorApiModel');
@@ -285,7 +394,10 @@ function renderApiSummary() {
 
     if (apiName) apiName.textContent = hasKey ? profileName : '未配置通道';
     if (apiModel) apiModel.textContent = hasKey ? model : '保存 API Key 后可用于翻译、检测和术语处理';
-    if (apiHealth) apiHealth.textContent = hasKey ? '已连接' : '待配置';
+    if (apiHealth) {
+        apiHealth.textContent = healthPresentation.inspector;
+        apiHealth.title = runtimeHealth?.message || '';
+    }
     if (apiConcurrency) apiConcurrency.textContent = hasKey ? String(concurrency) : '-';
     if (apiIcon) {
         apiIcon.className = `api-summary-icon ${hasKey ? visual.tone : 'custom'}`;
@@ -293,8 +405,12 @@ function renderApiSummary() {
         apiIcon.title = hasKey ? visual.label : '未配置通道';
     }
     if (topbarApiStatus) {
-        topbarApiStatus.classList.toggle('online', hasKey);
-        topbarApiStatus.innerHTML = `<span class="status-dot"></span>${hasKey ? 'AI 通道已连接' : 'AI 通道待配置'}`;
+        topbarApiStatus.classList.remove('online', 'checking', 'blocked');
+        if (healthPresentation.className) topbarApiStatus.classList.add(healthPresentation.className);
+        topbarApiStatus.innerHTML = `<span class="status-dot"></span>${healthPresentation.topbar}`;
+        topbarApiStatus.title = runtimeHealth?.message || (hasKey
+            ? '已保存通道配置；开始任务或点击“测试”后会验证实际可用性。'
+            : '请先保存 API 通道。');
     }
     refreshAllVisualSelects();
 }
@@ -570,16 +686,43 @@ function openTranslationProgressDb() {
     return translationProgressDbPromise;
 }
 
+function isBlankTranslationResult(text) {
+    return String(text ?? '').trim().length === 0;
+}
+
+function isMarkedTranslationFailure(text) {
+    return String(text ?? '').trimStart().startsWith('[翻译失败');
+}
+
+function isMissingTranslationResult(text) {
+    const value = String(text ?? '').trim();
+    if (!value) return true;
+    if (!isMarkedTranslationFailure(value)) return false;
+    const failureLabel = value.match(/^\[翻译失败[^\]]*\]/)?.[0] || '';
+    return /返回空译文|未返回结果|空返回/.test(failureLabel);
+}
+
 function compactTranslationProgressEntry(entry) {
     if (!entry?.taskKey) return null;
+    const translatedText = String(entry.translatedText ?? '');
+    const statusFromText = isMissingTranslationResult(translatedText)
+        ? 'missing'
+        : (isMarkedTranslationFailure(translatedText) ? 'failed' : '');
     return {
         taskKey: entry.taskKey,
-        status: entry.status || (String(entry.translatedText || '').startsWith('[翻译失败') ? 'failed' : 'success'),
-        translatedText: entry.translatedText || '',
+        status: entry.manualResolutionValid
+            ? 'success'
+            : (statusFromText || entry.status || 'success'),
+        translatedText,
         qaStatus: entry.qaStatus || '',
         completenessRisk: entry.completenessRisk || '',
         actionSuggestion: entry.actionSuggestion || '',
-        error: entry.error || ''
+        error: entry.error || '',
+        userDecision: entry.userDecision || '',
+        revisedText: entry.revisedText || '',
+        decisionNote: entry.decisionNote || '',
+        manualResolutionValid: Boolean(entry.manualResolutionValid),
+        revisionApplied: Boolean(entry.revisionApplied)
     };
 }
 
@@ -655,6 +798,20 @@ async function saveTranslationTaskProgressBatch(entries) {
         return true;
     } catch (error) {
         console.warn('Task checkpoint save failed; metadata fallback will be used if available:', error);
+        return false;
+    }
+}
+
+async function deleteTranslationTaskProgress(taskKey) {
+    if (!taskKey) return true;
+    try {
+        const db = await openTranslationProgressDb();
+        const transaction = db.transaction(TRANSLATION_PROGRESS_TASK_STORE, 'readwrite');
+        transaction.objectStore(TRANSLATION_PROGRESS_TASK_STORE).delete(taskKey);
+        await waitForIdbTransaction(transaction);
+        return true;
+    } catch (error) {
+        console.warn('Old translation task checkpoint cleanup failed:', error);
         return false;
     }
 }
@@ -3019,6 +3176,18 @@ function getProfileConcurrency(profile) {
     return Number.isFinite(concurrency) ? Math.max(1, Math.min(10, concurrency)) : 3;
 }
 
+function getApiProfileRuntimeStatusTag(profile, hasCredentials = true) {
+    if (!hasCredentials) return '<span class="resource-status-tag warning">缺少凭据</span>';
+    const runtimeHealth = getApiRuntimeHealth(profile);
+    const presentation = {
+        checking: { label: '验证中', className: 'warning' },
+        online: { label: '可用', className: 'online' },
+        quota: { label: '额度已用尽', className: 'error' },
+        error: { label: '不可用', className: 'error' }
+    }[runtimeHealth?.status] || { label: '已配置，待验证', className: '' };
+    return `<span class="resource-status-tag ${presentation.className}">${presentation.label}</span>`;
+}
+
 function getTranslationBatchSize(profile) {
     if (profile?.provider === 'youdaoTranslate') return 20;
     if (profile?.provider === 'deepseek') return 20;
@@ -3084,7 +3253,7 @@ function renderApiProfileChecklist(container, selectedIds, onChange, emptyText, 
                 <span class="resource-title-line">
                     <span class="resource-title">${escapeHtml(profile.name)}</span>
                     ${isDefaultProfile ? `<span class="resource-default-tag">${isDefaultSelected ? '默认主检测' : '默认通道'}</span>` : ''}
-                    ${hasKey ? '<span class="resource-status-tag online">已连接</span>' : '<span class="resource-status-tag warning">缺少 Key</span>'}
+                    ${getApiProfileRuntimeStatusTag(profile, hasKey)}
                 </span>
                 <span class="resource-meta">
                     ${getPlatformName(profile.provider)} · ${escapeHtml(getModelDisplayName(profile.provider, profile.model))}
@@ -3156,7 +3325,7 @@ function renderTranslationProfileChecklist(container, selectedIds, onChange, emp
             <span class="resource-main">
                 <span class="resource-title-line">
                     <span class="resource-title">${escapeHtml(profile.name)}</span>
-                    ${hasKey ? '<span class="resource-status-tag online">已连接</span>' : '<span class="resource-status-tag warning">缺少 Key</span>'}
+                    ${getApiProfileRuntimeStatusTag(profile, hasKey && hasSecret)}
                     ${isApiProfileTranslationOnly(profile) ? '<span class="resource-status-tag">翻译专用</span>' : ''}
                 </span>
                 <span class="resource-meta">
@@ -3504,6 +3673,7 @@ function initApiConfig() {
                 pendingDeleteProfileId = '';
 
                 const nextProfiles = loadApiProfiles().filter(item => item.id !== profile.id);
+                clearApiRuntimeHealth(profile);
                 saveApiProfiles(nextProfiles);
                 if (localStorage.getItem(ACTIVE_API_PROFILE_KEY) === profile.id) {
                     if (nextProfiles[0]) {
@@ -3575,6 +3745,7 @@ function initApiConfig() {
         }
         apiStatus.textContent = `正在测试通道：${profile.name}`;
         apiStatus.className = 'api-status';
+        setApiRuntimeHealth(profile, 'checking', '正在验证 Key、Base URL、模型权限和账户可用性。');
         let doubaoFallbackModel = '';
         try {
             await requestModelContent(profile, {
@@ -3592,6 +3763,7 @@ function initApiConfig() {
                 ? `通道测试通过：${profile.name}（已自动改用可用模型 ${doubaoFallbackModel}，建议保存通道）`
                 : `通道测试通过：${profile.name}`;
             apiStatus.className = 'api-status success';
+            setApiRuntimeHealth(profile, 'online', '通道测试通过，可正常调用。');
             if (doubaoFallbackModel && profile.provider === 'doubao') {
                 profile.model = doubaoFallbackModel;
                 if (globalAiModelSelect && [...globalAiModelSelect.options].some(option => option.value === doubaoFallbackModel)) {
@@ -3605,6 +3777,7 @@ function initApiConfig() {
             }
             return true;
         } catch (error) {
+            const quotaDepleted = isApiQuotaDepletedError(error);
             const familyHint = isGatewayProvider(profile.provider)
                 ? '请确认这个 Key 属于当前选择的 AIGoCode 模型族，并支持第三方调用。'
                 : profile.provider === 'xiaomi'
@@ -3612,8 +3785,12 @@ function initApiConfig() {
                 : profile.provider === 'doubao'
                     ? '豆包需要 Key + 正确模型 ID；请优先选择 doubao-seed-2-0-lite-260428，或填写火山方舟“API 接入”里显示的 ep-* 接入点 ID，Base URL 保持 https://ark.cn-beijing.volces.com/api/v3。'
                 : '请检查 API Key、Base URL、模型权限或账户余额。';
-            apiStatus.textContent = `通道测试失败：${error.message || '接口返回异常'} ${familyHint}`;
+            const errorMessage = error.message || '接口返回异常';
+            apiStatus.textContent = quotaDepleted
+                ? `通道额度已用尽：${errorMessage} 请充值/恢复额度，或切换到其他有额度的通道。`
+                : `通道测试失败：${errorMessage} ${familyHint}`;
             apiStatus.className = 'api-status error';
+            setApiRuntimeHealth(profile, quotaDepleted ? 'quota' : 'error', errorMessage);
             return false;
         } finally {
             if (triggerButton) {
@@ -3679,6 +3856,7 @@ function initApiConfig() {
             Object.assign(profile, newProfile);
         }
 
+        clearApiRuntimeHealth(profile);
         saveApiProfiles(profiles);
         setActiveApiProfile(profile);
         editingProfileId = '';
@@ -4176,6 +4354,10 @@ function getApiResponseErrorMessage(payload, rawText, fallback = '接口返回�
     const text = `${rawMessage || ''} ${rawText || ''}`;
     const numericCode = Number(code);
 
+    if (isApiQuotaDepletedSignal(code, status, rawMessage, rawText)) {
+        return `API 额度已用尽。当前通道无法继续调用；请在服务商控制台充值或恢复额度，或切换到其他有额度的通道。原始提示：${rawMessage}`;
+    }
+
     if (isApiRateLimitSignal(code, status, rawMessage, rawText)) {
         const retryText = retryDelayMs > 0 ? `；接口建议约 ${Math.ceil(retryDelayMs / 1000)} 秒后再试` : '';
         return `额度或频率已达到限制${retryText}。原始提示：${rawMessage}`;
@@ -4203,7 +4385,31 @@ function getApiResponseErrorMessage(payload, rawText, fallback = '接口返回�
     return String(message).replace(/\s+/g, ' ').trim();
 }
 
+function isApiQuotaDepletedSignal(...values) {
+    if (values.slice(0, 2).some(value => Number(value) === 402)) return true;
+    const text = values
+        .map(value => {
+            if (value == null) return '';
+            if (typeof value === 'string' || typeof value === 'number') return String(value);
+            try {
+                return JSON.stringify(value);
+            } catch {
+                return String(value);
+            }
+        })
+        .join(' ');
+    return /prepayment credits?\s+(?:(?:have|has)\s+been\s+|are\s+)?(?:deplet|exhaust)|credits?\s+(?:(?:have|has)\s+been\s+|are\s+)?(?:deplet|exhaust)|insufficient\s+(?:credit|balance)|(?:credit|account)\s+balance\s+(?:is\s+)?(?:insufficient|exhausted|depleted)|billing\s+(?:is\s+)?(?:required|disabled)|payment required|账户余额不足|余额不足|额度已用尽|预付额度已耗尽|欠费|需要充值/i.test(text);
+}
+
+function isApiQuotaDepletedError(error) {
+    return Boolean(
+        error?.isQuotaDepleted ||
+        isApiQuotaDepletedSignal(error?.message, error?.rawText, error?.payload)
+    );
+}
+
 function isApiRateLimitSignal(code, status, message = '', rawText = '') {
+    if (isApiQuotaDepletedSignal(code, status, message, rawText)) return false;
     const numericCode = Number(code);
     const numericStatus = Number(status);
     const text = `${message || ''} ${rawText || ''}`;
@@ -4322,6 +4528,7 @@ async function tryDoubaoModelFallback(apiConfig, tunedBody, currentModel, signal
     error.rawText = [originalError?.rawText, failedModels.join(' | ')].filter(Boolean).join(' | ');
     error.retryAfterMs = originalError?.retryAfterMs || 0;
     error.isRateLimited = originalError?.isRateLimited || false;
+    error.isQuotaDepleted = originalError?.isQuotaDepleted || false;
     throw error;
 }
 
@@ -4333,7 +4540,9 @@ function createApiRequestError(message, status, payload, rawText) {
     error.payload = payload;
     error.rawText = rawText;
     error.retryAfterMs = getApiRetryDelayMs(payload, rawText);
-    error.isRateLimited = isApiRateLimitSignal(code, status || payloadStatus, message, rawText);
+    error.isQuotaDepleted = isApiQuotaDepletedSignal(code, status || payloadStatus, message, rawText, payload);
+    error.isRateLimited = !error.isQuotaDepleted &&
+        isApiRateLimitSignal(code, status || payloadStatus, message, rawText);
     error.isTemporary = status === 500 ||
         status === 502 ||
         status === 503 ||
@@ -5761,12 +5970,23 @@ function initTranslateTool() {
     const translateProfileList = document.getElementById('translateProfileList');
     const translateProfileSummary = document.getElementById('translateProfileSummary');
     const translateSubmitPlanHint = document.getElementById('translateSubmitPlanHint');
+    const translateDiscountCheckBtn = document.getElementById('translateDiscountCheckBtn');
+    const translateDiscountCheckStatus = document.getElementById('translateDiscountCheckStatus');
+    const translateDiscountCheckActions = document.getElementById('translateDiscountCheckActions');
+    const translateDiscountRepairBtn = document.getElementById('translateDiscountRepairBtn');
+    const translateDiscountDownloadBtn = document.getElementById('translateDiscountDownloadBtn');
+    const translateDiscountCheckDetails = document.getElementById('translateDiscountCheckDetails');
+    const translateDiscountCheckDetailsSummary = document.getElementById('translateDiscountCheckDetailsSummary');
+    const translateDiscountCheckDetailsBody = document.getElementById('translateDiscountCheckDetailsBody');
     const translateProgressImportInput = document.getElementById('translateProgressImportInput');
     const translateProgressImportStatus = document.getElementById('translateProgressImportStatus');
     const translateClearImportedProgressBtn = document.getElementById('translateClearImportedProgressBtn');
     const translateReviewImportedProgressBtn = document.getElementById('translateReviewImportedProgressBtn');
     const translateRetrySuspiciousBtn = document.getElementById('translateRetrySuspiciousBtn');
     const translateCompactLongImportedBtn = document.getElementById('translateCompactLongImportedBtn');
+    const translateImportIssueFilterPanel = document.getElementById('translateImportIssueFilterPanel');
+    const translateImportIssueFilterSummary = document.getElementById('translateImportIssueFilterSummary');
+    const translateImportIssueFilterList = document.getElementById('translateImportIssueFilterList');
     const translateGlossaryList = document.getElementById('translateGlossaryList');
     const translateSheetSelectPanel = document.getElementById('translateSheetSelectPanel');
     const translateSheetSelectList = document.getElementById('translateSheetSelectList');
@@ -5796,7 +6016,22 @@ function initTranslateTool() {
     const translateCurrentLanguageLabel = document.getElementById('translateCurrentLanguageLabel');
     const translateLanguageRunMeta = document.getElementById('translateLanguageRunMeta');
     const translateLanguageRunChips = document.getElementById('translateLanguageRunChips');
+    const translateDownloadTitle = document.getElementById('translateDownloadTitle');
     const translateDownloadLanguageSummary = document.getElementById('translateDownloadLanguageSummary');
+    const translateResultBreakdown = document.getElementById('translateResultBreakdown');
+    const translateResultPassedCount = document.getElementById('translateResultPassedCount');
+    const translateResultFailedCount = document.getElementById('translateResultFailedCount');
+    const translateResultHardQaCount = document.getElementById('translateResultHardQaCount');
+    const translateResultSoftCount = document.getElementById('translateResultSoftCount');
+    const translateHardQaDetails = document.getElementById('translateHardQaDetails');
+    const translateHardQaDetailsSummary = document.getElementById('translateHardQaDetailsSummary');
+    const translateHardQaDetailsBody = document.getElementById('translateHardQaDetailsBody');
+    const translateDownloadBtnLabel = document.getElementById('translateDownloadBtnLabel');
+    const translateDownloadUnverifiedBtn = document.getElementById('translateDownloadUnverifiedBtn');
+    const translateUnverifiedExportConfirm = document.getElementById('translateUnverifiedExportConfirm');
+    const translateUnverifiedExportMessage = document.getElementById('translateUnverifiedExportMessage');
+    const translateConfirmUnverifiedExportBtn = document.getElementById('translateConfirmUnverifiedExportBtn');
+    const translateCancelUnverifiedExportBtn = document.getElementById('translateCancelUnverifiedExportBtn');
 
     let isPaused = false;
     let isTranslationCancelled = false;
@@ -5821,9 +6056,11 @@ function initTranslateTool() {
     let translateChannelProgressState = new Map();
     let translateRunStartedAt = 0;
     let translateElapsedTimer = null;
+    let translateHardQaDetailsFingerprint = '';
     let translateRunSummaryState = { completed: 0, total: 0, phase: '等待开始' };
     let translateRunConsistencyTerms = [];
     let importedTranslateProgressState = createEmptyTranslateProgressImportState();
+    let translateDiscountCheckState = createEmptyTranslateDiscountCheckState();
     let translateLanguageRunState = {
         targets: [],
         currentIndex: -1,
@@ -5831,6 +6068,80 @@ function initTranslateTool() {
         failed: [],
         status: 'idle'
     };
+    const TRANSLATE_IMPORT_ISSUE_FILTERS = [
+        {
+            id: 'retryable',
+            label: '可自动处理',
+            description: '翻译失败、结果缺失或硬质检未通过',
+            match: entry => isRepairableTranslationReportEntry(entry)
+        },
+        {
+            id: 'mixedChinese',
+            label: '混入中文',
+            description: '目标译文仍含中文字符或中文汉字',
+            match: entry => /混入中文|中文汉字|与中文原文高度一致/.test(getTranslationReportIssueText(entry))
+        },
+        {
+            id: 'mixedEnglish',
+            label: '英文沿用',
+            description: '目标译文仍含英文参考，或英文专名需要确认',
+            match: entry => /混入英文|疑似照抄英文|目标译文仍含英文|玩法名疑似沿用英文|英文玩法名需确认|英文专名需确认|英文参考短语需确认|英文参考词需确认|源文英文专名需确认|游戏借词|英文词需确认/.test(getTranslationReportIssueText(entry))
+        },
+        {
+            id: 'mixedJapanese',
+            label: '混入日文',
+            description: '目标译文中出现日文假名等跨语种残留',
+            match: entry => /混入日文|日文假名/.test(getTranslationReportIssueText(entry))
+        },
+        {
+            id: 'placeholder',
+            label: '占位符 / UI 标记',
+            description: '格式占位符，或 LV、HP、CD、S/SS/SSS、A/B 等 UI 与等级标记被改动',
+            match: entry => /格式\/占位符|缺少格式|多出格式|占位符顺序|受保护UI标记/.test(getTranslationReportIssueText(entry))
+        },
+        {
+            id: 'number',
+            label: '数字不一致',
+            description: '译文里的数字、倍率、时间等与原文不一致',
+            match: entry => /数字不一致/.test(getTranslationReportIssueText(entry))
+        },
+        {
+            id: 'discount',
+            label: '折扣语义',
+            description: '折扣方向、支付比例或折扣表达缺失',
+            match: entry => /折扣语义不一致|折扣翻译缺失|折扣表达需确认/.test(getTranslationReportIssueText(entry))
+        },
+        {
+            id: 'term',
+            label: '术语未遵守',
+            description: '命中的硬性术语没有按术语表输出',
+            match: entry => /术语未遵守/.test(getTranslationReportIssueText(entry))
+        },
+        {
+            id: 'length',
+            label: '译文超长',
+            description: '只重跑报告中“译文长度超出建议”的行',
+            match: entry => isLengthSoftRiskTranslationReportEntry(entry)
+        },
+        {
+            id: 'untranslated',
+            label: '疑似未翻译',
+            description: '输出为空、截断、漏译或疑似保留原文',
+            match: entry => /疑似未翻译|返回空译文|输出被截断|内容流失|译文过短/.test(getTranslationReportIssueText(entry))
+        },
+        {
+            id: 'zhConversion',
+            label: '繁简转换问题',
+            description: '繁中转换不完整或关键语义缺失',
+            match: entry => /繁简转换不完整|繁中关键语义缺失/.test(getTranslationReportIssueText(entry))
+        },
+        {
+            id: 'spacing',
+            label: '逐字空格',
+            description: '译文出现逐字分隔、异常空格等格式问题',
+            match: entry => /逐字空格|异常空格/.test(getTranslationReportIssueText(entry))
+        }
+    ];
 
     const DEFAULT_PROJECTS = [
         {
@@ -5865,6 +6176,7 @@ function initTranslateTool() {
     const TRANSLATE_CONSISTENCY_TERM_POOL_LIMIT = 160;
     const TRANSLATE_CONSISTENCY_TASK_TERM_LIMIT = 12;
     const TRANSLATE_CONSISTENCY_PROMPT_TERM_LIMIT = 12;
+    const TRANSLATE_CONSISTENCY_EXAMPLE_LIMIT = 4;
 
     function makeTranslateSourceId(fileName, sheetName, index) {
         return `translate_source_${makeStableId(`${fileName}:${sheetName}:${index}`)}`;
@@ -6067,10 +6379,117 @@ function initTranslateTool() {
             .map(item => item.term);
     }
 
-    function buildTranslateConsistencyPromptSection(terms = []) {
+    function normalizeTranslateConsistencyExampleText(value) {
+        return String(value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function buildTranslateConsistencyExamplePool(entries = [], targetLang = '') {
+        const indexedByTerm = new Map();
+        const indexedBySource = new Map();
+        const seen = new Set();
+
+        (entries || []).forEach(entry => {
+            const sourceText = normalizeTranslateConsistencyExampleText(entry?.sourceText);
+            const referenceText = normalizeTranslateConsistencyExampleText(entry?.referenceText);
+            const translatedText = normalizeTranslateConsistencyExampleText(entry?.translatedText);
+            if (
+                !sourceText ||
+                !translatedText ||
+                sourceText.length > 160 ||
+                translatedText.length > 240 ||
+                isTranslateFailureText(translatedText) ||
+                !isTranslationQaPassed(entry?.qaStatus)
+            ) return;
+            const leakageIssues = getTargetLanguageLeakageIssues(sourceText, translatedText, targetLang, {
+                referenceText,
+                projectRules: currentProject?.rules || ''
+            });
+            if (leakageIssues.length) return;
+
+            const key = `${sourceText}\u001f${translatedText}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            const example = {
+                taskKey: entry?.taskKey || '',
+                sourceText,
+                translatedText
+            };
+            if (!indexedBySource.has(sourceText)) indexedBySource.set(sourceText, []);
+            indexedBySource.get(sourceText).push(example);
+
+            extractTranslateConsistencyCandidatesFromText(sourceText)
+                .filter(term => term.length >= 3)
+                .sort((left, right) => right.length - left.length)
+                .slice(0, 24)
+                .forEach(term => {
+                    if (!indexedByTerm.has(term)) indexedByTerm.set(term, []);
+                    const bucket = indexedByTerm.get(term);
+                    if (bucket.length < 24) bucket.push(example);
+                });
+        });
+        return { indexedByTerm, indexedBySource };
+    }
+
+    function getRelevantTranslateConsistencyExamples(task, pool, limit = TRANSLATE_CONSISTENCY_EXAMPLE_LIMIT) {
+        if (!isTranslateConsistencyMemoryEnabled() || !task?.text || !pool) return [];
+        const sourceText = normalizeTranslateConsistencyExampleText(task.text);
+        const taskTerms = [...new Set([
+            ...(task.consistencyTerms || []),
+            ...extractTranslateConsistencyCandidatesFromText(sourceText)
+        ])]
+            .filter(term => term.length >= 3)
+            .sort((left, right) => right.length - left.length)
+            .slice(0, 24);
+        const candidates = new Set(pool.indexedBySource?.get(sourceText) || []);
+        taskTerms.forEach(term => {
+            (pool.indexedByTerm?.get(term) || []).forEach(example => candidates.add(example));
+        });
+
+        return [...candidates]
+            .filter(example => !task.taskKey || example.taskKey !== task.taskKey)
+            .map(example => {
+                const sharedTerms = taskTerms.filter(term => example.sourceText.includes(term));
+                const exactSource = example.sourceText === sourceText;
+                if (!exactSource && sharedTerms.length === 0) return null;
+                const longestShared = sharedTerms.reduce((max, term) => Math.max(max, term.length), 0);
+                return {
+                    ...example,
+                    score: (exactSource ? 10000 : 0) +
+                        longestShared * 100 +
+                        sharedTerms.length * 8 -
+                        Math.min(example.sourceText.length, 160)
+                };
+            })
+            .filter(Boolean)
+            .sort((left, right) => right.score - left.score || left.sourceText.length - right.sourceText.length)
+            .slice(0, limit)
+            .map(({ sourceText: exampleSource, translatedText }) => ({
+                sourceText: exampleSource,
+                translatedText
+            }));
+    }
+
+    function buildTranslateConsistencyPromptSection(terms = [], examples = []) {
         const uniqueTerms = [...new Set((terms || []).map(normalizeTranslateConsistencyTerm).filter(isUsefulTranslateConsistencyTerm))].slice(0, TRANSLATE_CONSISTENCY_PROMPT_TERM_LIMIT);
-        if (uniqueTerms.length === 0) return '';
-        return `\n临时一致性记忆（非正式术语表）：这些中文短语在本次文件中重复出现。语境一致时，为同一短语保持同一种目标语表达，减少同词多译；但它不是硬性术语表，不要牺牲语义。若 item.glossary 或 referenceText 给出不同要求，以 item.glossary / referenceText 优先。\n${uniqueTerms.map(term => `- ${term}`).join('\n')}`;
+        const uniqueExamples = [];
+        const seenExamples = new Set();
+        (examples || []).forEach(example => {
+            const sourceText = normalizeTranslateConsistencyExampleText(example?.sourceText);
+            const translatedText = normalizeTranslateConsistencyExampleText(example?.translatedText);
+            const key = `${sourceText}\u001f${translatedText}`;
+            if (!sourceText || !translatedText || seenExamples.has(key)) return;
+            seenExamples.add(key);
+            uniqueExamples.push({ sourceText, translatedText });
+        });
+        if (uniqueTerms.length === 0 && uniqueExamples.length === 0) return '';
+
+        const termSection = uniqueTerms.length
+            ? `\n本次文件中的重复中文短语：\n${uniqueTerms.map(term => `- ${term}`).join('\n')}`
+            : '';
+        const exampleSection = uniqueExamples.length
+            ? `\n本文件中已本地化的同词示例（只参考其中共同术语的目标语表达，不要机械照抄整句）：\n${uniqueExamples.slice(0, TRANSLATE_CONSISTENCY_EXAMPLE_LIMIT).map(example => `- ${example.sourceText} => ${example.translatedText}`).join('\n')}`
+            : '';
+        return `\n临时一致性记忆（非正式术语表）：语境一致时，同一中文短语必须保持同一种目标语核心表达，减少同词多译。英文参考只帮助理解含义，不能覆盖已经出现的目标语表达；硬性术语表和项目明确规则仍然优先。${termSection}${exampleSection}`;
     }
 
     function getTranslateSourceOutput(source) {
@@ -6088,23 +6507,34 @@ function initTranslateTool() {
         const header = outputRows[0] || [];
         const key = `${task.colIndex}:${task.profile.id}`;
         if (!source.outputColMap.has(key)) {
-            const targetColIndex = header.length;
             const targetLangName = getTranslateLanguageName(document.getElementById('targetLang').value);
             const sourceHeader = header[task.colIndex] || `列${task.colIndex + 1}`;
-            header.push(`${sourceHeader} (${targetLangName} · ${getCompactModelLabel(task.profile)})`);
+            const profileLabel = getCompactModelLabel(task.profile);
+            const translationHeader = `${sourceHeader} (${targetLangName} · ${profileLabel})`;
+            const qaHeader = `${sourceHeader} (${targetLangName} · ${profileLabel} · 检测)`;
             const hasQa = Boolean(translatePostCheckInput?.checked);
-            if (hasQa) {
-                header.push(`${sourceHeader} (${targetLangName} · ${getCompactModelLabel(task.profile)} · 检测)`);
+            let targetColIndex = header.findIndex(value => String(value || '').trim() === translationHeader);
+            let qaColIndex = hasQa
+                ? header.findIndex(value => String(value || '').trim() === qaHeader)
+                : -1;
+
+            if (targetColIndex < 0) {
+                targetColIndex = header.length;
+                header.push(translationHeader);
+            }
+            if (hasQa && qaColIndex < 0) {
+                qaColIndex = header.length;
+                header.push(qaHeader);
             }
             source.outputColMap.set(key, {
                 translationCol: targetColIndex,
-                qaCol: hasQa ? targetColIndex + 1 : -1
+                qaCol: hasQa ? qaColIndex : -1
             });
             outputRows[0] = header;
             outputRows.forEach((row, rowIndex) => {
                 if (rowIndex === 0) return;
                 if (row[targetColIndex] === undefined) row[targetColIndex] = '';
-                if (hasQa && row[targetColIndex + 1] === undefined) row[targetColIndex + 1] = '';
+                if (hasQa && row[qaColIndex] === undefined) row[qaColIndex] = '';
             });
         }
         return source.outputColMap.get(key);
@@ -6119,12 +6549,14 @@ function initTranslateTool() {
     renderTranslateTargetLanguageList();
     renderTranslateProfileList();
     updateTranslateProgressImportStatus();
+    renderTranslateDiscountCheckState();
     renderTranslateGlossaryList();
     renderReferenceColumnOptions();
     document.addEventListener('nexus:api-profiles-updated', () => {
         syncTranslateProfilesToActiveDefault();
         renderTranslateProfileList();
     });
+    document.addEventListener('nexus:api-runtime-health-updated', renderTranslateProfileList);
     document.addEventListener('nexus:glossary-library-updated', renderTranslateGlossaryList);
 
     fileInput.addEventListener('click', (e) => e.stopPropagation());
@@ -6143,15 +6575,24 @@ function initTranslateTool() {
     saveProjectBtn.addEventListener('click', saveProject);
     viewProjectBtn.addEventListener('click', toggleViewMode);
     editProjectBtn.addEventListener('click', toggleEditMode);
-    translateBtn.addEventListener('click', startTranslate);
+    translateBtn.addEventListener('click', handleTranslatePrimaryAction);
+    translateDiscountCheckBtn?.addEventListener('click', () => runLocalDiscountCheck());
+    translateDiscountRepairBtn?.addEventListener('click', repairDetectedDiscountIssues);
+    translateDiscountDownloadBtn?.addEventListener('click', downloadTranslated);
     downloadBtn.addEventListener('click', downloadTranslated);
+    translateDownloadUnverifiedBtn?.addEventListener('click', showUnverifiedTranslationExportConfirmation);
+    translateConfirmUnverifiedExportBtn?.addEventListener('click', downloadUnverifiedTranslation);
+    translateCancelUnverifiedExportBtn?.addEventListener('click', hideUnverifiedTranslationExportConfirmation);
     resetBtn.addEventListener('click', resetTranslateTool);
     pauseBtn.addEventListener('click', pauseTranslate);
     resumeBtn.addEventListener('click', resumeTranslate);
     downloadProgressBtn.addEventListener('click', downloadCurrentProgress);
     downloadReportBtn?.addEventListener('click', downloadTranslationReport);
     downloadFinalReportBtn?.addEventListener('click', downloadTranslationReport);
-    retryFailedBtn?.addEventListener('click', () => retryFailedTranslations({ skipConfirm: true }));
+    retryFailedBtn?.addEventListener('click', () => retryFailedTranslations({
+        skipConfirm: true,
+        suppressAutoSave: false
+    }));
     translateProgressImportInput?.addEventListener('change', (event) => {
         const files = [...(event.target.files || [])];
         if (!files.length) return;
@@ -6174,6 +6615,7 @@ function initTranslateTool() {
     targetLangSelect?.addEventListener('change', () => {
         const value = targetLangSelect.value;
         if (!value) return;
+        resetTranslateDiscountCheck();
         if (selectedTranslateTargetLangs.size <= 1) {
             selectedTranslateTargetLangs = new Set([value]);
         } else {
@@ -6207,6 +6649,577 @@ function initTranslateTool() {
     projectModal.addEventListener('click', (e) => {
         if (e.target === projectModal) closeModal();
     });
+
+    function getDiscountGuardTextSnippet(value, maxLength = 78) {
+        const text = String(value || '').replace(/\s+/g, ' ').trim();
+        if (!text) return '（空）';
+        return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+    }
+
+    function collectDiscountGuardSourceHits() {
+        const guard = getNexusDiscountGuard();
+        if (!guard) return { count: 0, samples: [] };
+        const sources = getSelectedTranslateSources().length
+            ? getSelectedTranslateSources()
+            : translateSources;
+        const samples = [];
+        let count = 0;
+        sources.forEach(source => {
+            const rows = Array.isArray(source?.rows) ? source.rows : [];
+            const scanColumns = selectedColumns.length
+                ? selectedColumns
+                : (rows[0] || []).map((_, index) => index);
+            rows.slice(1).forEach((row, offset) => {
+                scanColumns.forEach(columnIndex => {
+                    const sourceText = String(row?.[columnIndex] ?? '');
+                    if (!guard.hasDiscountSignal(sourceText)) return;
+                    count++;
+                    if (samples.length < 10) {
+                        samples.push({
+                            sourceFile: source?.fileName || originalFileName || '',
+                            sheetName: source?.sheetName || '',
+                            rowNumber: offset + 2,
+                            column: columnIndex + 1,
+                            sourceText
+                        });
+                    }
+                });
+            });
+        });
+        return { count, samples };
+    }
+
+    function collectDiscountGuardReportEntries(options = {}) {
+        const records = [];
+        const seen = new Set();
+        const add = (entries, fallbackTargetLang = '') => {
+            (entries || []).forEach(entry => {
+                const sourceText = String(entry?.sourceText || '');
+                if (!sourceText || !getNexusDiscountGuard()?.hasDiscountSignal(sourceText)) return;
+                const key = entry?.taskKey || [
+                    entry?.sourceFile || entry?.fileName || '',
+                    entry?.sheetName || '',
+                    entry?.rowNumber || entry?.rowIndex || '',
+                    entry?.column || entry?.colIndex || '',
+                    sourceText,
+                    entry?.translatedText || ''
+                ].join('\u001f');
+                if (seen.has(key)) return;
+                seen.add(key);
+                records.push({
+                    ...entry,
+                    sourceText,
+                    targetLang: entry?.targetLang || fallbackTargetLang || targetLangSelect?.value || ''
+                });
+            });
+        };
+        add(translationRunReport?.entries, translationRunReport?.targetLang);
+        if (options.includeImported !== false) {
+            add(importedTranslateProgressState?.entries, importedTranslateProgressState?.targetLang);
+        }
+        add([...translationProgressTasks.values()], translationRunReport?.targetLang || targetLangSelect?.value);
+        return records;
+    }
+
+    function createEmptyTranslateDiscountCheckState() {
+        return {
+            status: 'idle',
+            checkedAt: 0,
+            targetLang: '',
+            sourceHits: { count: 0, samples: [] },
+            reportEntries: [],
+            evaluatedEntries: [],
+            blocks: [],
+            reviews: [],
+            passes: [],
+            regressionFailures: [],
+            localFoldFailures: [],
+            repairSummary: null,
+            hasGeneratedFile: false,
+            errorMessage: ''
+        };
+    }
+
+    function getDiscountCheckEntryLocation(entry = {}) {
+        return [
+            entry.sourceFile || entry.fileName,
+            entry.sheetName,
+            entry.rowNumber ? `行 ${entry.rowNumber}` : '',
+            entry.column ? `列 ${entry.column}` : ''
+        ].filter(Boolean).join(' / ') || '未记录位置';
+    }
+
+    function renderDiscountCheckItems(items = [], kind = 'block') {
+        const visibleItems = items.slice(0, 20);
+        const rows = visibleItems.map(({ entry, result }) => {
+            const issue = result.issues?.[0]?.message || '需要人工确认';
+            return `
+                <li class="discount-check-item ${kind === 'review' ? 'review' : ''}">
+                    <div class="discount-check-location">${escapeHtml(getDiscountCheckEntryLocation(entry))}</div>
+                    <div class="discount-check-text">
+                        <span>${escapeHtml(getDiscountGuardTextSnippet(entry.sourceText, 96))}</span>
+                        <span class="discount-check-arrow">→</span>
+                        <span>${escapeHtml(getDiscountGuardTextSnippet(entry.translatedText || '（空）', 96))}</span>
+                    </div>
+                    <p class="discount-check-reason">${escapeHtml(issue)}</p>
+                </li>
+            `;
+        }).join('');
+        const more = items.length > visibleItems.length
+            ? `<p class="discount-check-more">另有 ${items.length - visibleItems.length} 条未展开，修复时会一并处理可确定的错误。</p>`
+            : '';
+        return `<ul class="discount-check-list">${rows}</ul>${more}`;
+    }
+
+    function renderTranslateDiscountCheckState() {
+        if (!translateDiscountCheckStatus) return;
+        const state = translateDiscountCheckState;
+        const systemFailed = state.regressionFailures.length > 0 || state.localFoldFailures.length > 0;
+        let tone = '';
+        let title = '尚未检查';
+        let description = '点击“检查折扣问题”查看当前文件是否存在折扣方向错误。';
+
+        if (state.status === 'checking') {
+            tone = 'processing';
+            title = '正在检查折扣问题';
+            description = '正在扫描当前文件和已导入的翻译报告。';
+        } else if (state.status === 'repairing') {
+            tone = 'processing';
+            title = `正在修复 ${state.blocks.length} 条折扣错误`;
+            description = '将使用当前翻译通道重新翻译并自动复检；全部阻断问题清零后才生成交付版。';
+        } else if (state.status === 'error') {
+            tone = 'issue';
+            title = '折扣检查未完成';
+            description = state.errorMessage || '请重新检查后再试。';
+        } else if (systemFailed) {
+            tone = 'issue';
+            title = '折扣规则自检失败';
+            description = '本地折扣规则当前不可用，请重新启动桌面端后再试。';
+        } else if (state.status === 'ready') {
+            const blockCount = state.blocks.length;
+            const reviewCount = state.reviews.length;
+            const checkedCount = state.evaluatedEntries.length;
+            if (state.repairSummary && blockCount === 0) {
+                tone = reviewCount > 0 ? 'warning' : 'pass';
+                title = '修复完成';
+                description = `${state.repairSummary.resolvedCount} 条确定错误已通过复检${reviewCount ? `；另有 ${reviewCount} 条无法自动判断，文件中保持不变` : ''}。`;
+            } else if (state.repairSummary && blockCount > 0) {
+                tone = 'issue';
+                title = `仍有 ${blockCount} 条需要修复`;
+                description = `本次已有 ${state.repairSummary.resolvedCount} 条通过复检；请再次修复。阻断问题清零前不能下载交付版。`;
+            } else if (blockCount > 0) {
+                tone = 'issue';
+                title = `发现 ${blockCount} 条需要修复`;
+                description = `${checkedCount} 条折扣译文中，通过 ${state.passes.length} 条${reviewCount ? `，另有 ${reviewCount} 条无法自动判断` : ''}。`;
+            } else if (reviewCount > 0) {
+                tone = 'warning';
+                title = '未发现确定的折扣错误';
+                description = `已核对 ${checkedCount} 条；其中 ${reviewCount} 条包含占位符或范围，无法自动判断，文件中保持不变。`;
+            } else if (checkedCount > 0) {
+                tone = 'pass';
+                title = '未发现折扣语义问题';
+                description = `已核对 ${checkedCount} 条折扣译文，全部通过。`;
+            } else if (state.sourceHits.count > 0) {
+                tone = 'warning';
+                title = `发现 ${state.sourceHits.count} 条折扣表达`;
+                description = '当前没有可核对的译文报告；完成翻译或导入报告后可检查并修复。';
+            } else {
+                tone = 'pass';
+                title = '未发现折扣表达';
+                description = '当前所选文件和列中没有需要检查的折扣内容。';
+            }
+        }
+
+        translateDiscountCheckStatus.className = `translate-discount-guard-result${tone ? ` ${tone}` : ''}`;
+        translateDiscountCheckStatus.innerHTML = `<strong>${escapeHtml(title)}</strong><span>${escapeHtml(description)}</span>`;
+
+        const canRepair = state.status === 'ready' && !systemFailed && state.blocks.length > 0;
+        if (translateDiscountRepairBtn) {
+            translateDiscountRepairBtn.style.display = canRepair ? 'inline-flex' : 'none';
+            translateDiscountRepairBtn.disabled = Boolean(activeTranslateRunId);
+            translateDiscountRepairBtn.textContent = state.repairSummary
+                ? `再次修复（${state.blocks.length}）`
+                : '一键修复并生成文件';
+        }
+        if (translateDiscountDownloadBtn) {
+            const deliveryGate = getTranslationDeliveryGate();
+            translateDiscountDownloadBtn.style.display = state.hasGeneratedFile && deliveryGate.ready ? 'inline-flex' : 'none';
+            translateDiscountDownloadBtn.disabled = Boolean(activeTranslateRunId) || !deliveryGate.ready;
+            translateDiscountDownloadBtn.title = deliveryGate.ready
+                ? '下载已通过硬质检的交付版'
+                : `仍有 ${deliveryGate.blockingCount} 条阻断问题，不能下载交付版`;
+        }
+        if (translateDiscountCheckActions) {
+            const hasVisibleAction = canRepair || (state.hasGeneratedFile && getTranslationDeliveryGate().ready);
+            translateDiscountCheckActions.style.display = hasVisibleAction ? 'flex' : 'none';
+        }
+
+        const detailCount = state.blocks.length + state.reviews.length +
+            state.regressionFailures.length + state.localFoldFailures.length;
+        if (translateDiscountCheckDetails) {
+            translateDiscountCheckDetails.style.display = detailCount > 0 ? 'block' : 'none';
+        }
+        if (translateDiscountCheckDetailsSummary) {
+            translateDiscountCheckDetailsSummary.textContent = detailCount > 0
+                ? `查看详情（${detailCount}）`
+                : '查看详情';
+        }
+        if (translateDiscountCheckDetailsBody) {
+            const groups = [];
+            if (state.blocks.length) {
+                groups.push(`
+                    <section class="discount-check-group">
+                        <h5>需要修复 · ${state.blocks.length} 条</h5>
+                        ${renderDiscountCheckItems(state.blocks, 'block')}
+                    </section>
+                `);
+            }
+            if (state.reviews.length) {
+                groups.push(`
+                    <section class="discount-check-group">
+                        <h5>无法自动判断 · ${state.reviews.length} 条</h5>
+                        ${renderDiscountCheckItems(state.reviews, 'review')}
+                    </section>
+                `);
+            }
+            if (systemFailed) {
+                const diagnostics = [
+                    ...state.regressionFailures.map(item => `规则异常：${item.label}，预期 ${item.expected}，实际 ${item.actual}`),
+                    ...state.localFoldFailures.map(item => `换算异常：${item.source} → ${item.target || '无本地模板'}（${item.status}）`)
+                ];
+                groups.push(`
+                    <section class="discount-check-group">
+                        <h5>规则诊断</h5>
+                        <ul class="discount-check-list">
+                            ${diagnostics.map(message => `<li class="discount-check-item"><p class="discount-check-reason">${escapeHtml(message)}</p></li>`).join('')}
+                        </ul>
+                    </section>
+                `);
+            }
+            translateDiscountCheckDetailsBody.innerHTML = groups.join('');
+        }
+
+        if (translateDiscountCheckBtn) {
+            translateDiscountCheckBtn.disabled = state.status === 'checking' || state.status === 'repairing' || Boolean(activeTranslateRunId);
+            translateDiscountCheckBtn.textContent = state.status === 'checking'
+                ? '检查中...'
+                : (state.checkedAt ? '重新检查' : '检查折扣问题');
+        }
+    }
+
+    function resetTranslateDiscountCheck() {
+        translateDiscountCheckState = createEmptyTranslateDiscountCheckState();
+        if (translateDiscountCheckDetails) translateDiscountCheckDetails.open = false;
+        renderTranslateDiscountCheckState();
+    }
+
+    function runLocalDiscountCheck(options = {}) {
+        if (!translateDiscountCheckStatus) return translateDiscountCheckState;
+        const previousState = translateDiscountCheckState;
+        translateDiscountCheckState = {
+            ...createEmptyTranslateDiscountCheckState(),
+            status: 'checking',
+            hasGeneratedFile: Boolean(options.hasGeneratedFile ?? previousState.hasGeneratedFile)
+        };
+        renderTranslateDiscountCheckState();
+
+        const guard = getNexusDiscountGuard();
+        if (!guard) {
+            translateDiscountCheckState = {
+                ...translateDiscountCheckState,
+                status: 'error',
+                errorMessage: '本地折扣规则未加载，请重新启动桌面端后再试。'
+            };
+            renderTranslateDiscountCheckState();
+            return translateDiscountCheckState;
+        }
+
+        /* These cases exercise both directions. Expected "block" and
+         * "review" outcomes are successful diagnostics, not file failures. */
+        const regressionCases = [
+            { label: '英语：3折 → 70% off', source: '3折', target: '70% off', lang: 'en', expected: 'pass' },
+            { label: '英语：3折 → 30% off', source: '3折', target: '30% off', lang: 'en', expected: 'block' },
+            { label: '英语：3折 → 支付原价30%', source: '3折', target: '30% of the original price', lang: 'en', expected: 'pass' },
+            { label: '英语：3折 → 裸30%', source: '3折', target: '30%', lang: 'en', expected: 'review' },
+            { label: '泰语：三折 → ลด 70%', source: '三折', target: 'ลด 70%', lang: 'th', expected: 'pass' },
+            { label: '泰语：三折 → ลด 30%', source: '三折', target: 'ลด 30%', lang: 'th', expected: 'block' },
+            { label: '日语：3折 → 7割引', source: '3折', target: '7割引', lang: 'ja', expected: 'pass' },
+            { label: '占位符：%s折', source: '%s折', target: '%s OFF', lang: 'en', expected: 'review' }
+        ];
+        const regressionResults = regressionCases.map(test => ({
+            ...test,
+            actual: evaluateNexusDiscountTranslation(test.source, test.target, test.lang).status
+        }));
+        const regressionFailures = regressionResults.filter(test => test.actual !== test.expected);
+
+        const currentTargetLang = targetLangSelect?.value || 'en';
+        const localFoldResults = [8, 6, 3, 1].map(fold => {
+            const source = `${fold}折`;
+            const target = getNexusStandaloneDiscountTranslation(source, currentTargetLang);
+            const status = target == null
+                ? 'review'
+                : evaluateNexusDiscountTranslation(source, target, currentTargetLang).status;
+            return { fold, source, target, status };
+        });
+        const localFoldFailures = localFoldResults.filter(item => item.status !== 'pass');
+
+        const sourceHits = collectDiscountGuardSourceHits();
+        const reportEntries = collectDiscountGuardReportEntries({
+            includeImported: options.includeImported !== false
+        });
+        const evaluatedEntries = reportEntries.map(entry => ({
+            entry,
+            result: evaluateNexusDiscountTranslation(entry.sourceText, entry.translatedText || '', entry.targetLang)
+        }));
+        const blocks = evaluatedEntries.filter(item => item.result.status === 'block');
+        const reviews = evaluatedEntries.filter(item => item.result.status === 'review');
+        const passes = evaluatedEntries.filter(item => item.result.status === 'pass');
+        const repairSummary = options.repairSummary
+            ? {
+                ...options.repairSummary,
+                resolvedCount: Math.max(0, Number(options.repairSummary.beforeBlockCount || 0) - blocks.length)
+            }
+            : null;
+
+        translateDiscountCheckState = {
+            status: 'ready',
+            checkedAt: Date.now(),
+            targetLang: currentTargetLang,
+            sourceHits,
+            reportEntries,
+            evaluatedEntries,
+            blocks,
+            reviews,
+            passes,
+            regressionFailures,
+            localFoldFailures,
+            repairSummary,
+            hasGeneratedFile: Boolean(options.hasGeneratedFile ?? previousState.hasGeneratedFile),
+            errorMessage: ''
+        };
+        renderTranslateDiscountCheckState();
+        return translateDiscountCheckState;
+    }
+
+    function findTaskForDiscountCheckEntry(entry, tasks = [], taskByKey = null, fallbackIndex = null) {
+        if (!entry || !tasks.length) return null;
+        const resolvedTaskByKey = taskByKey || new Map(tasks.map(task => [task.taskKey, task]));
+        const resolvedFallbackIndex = fallbackIndex || buildTranslateImportTaskIndex(tasks);
+        const importedMatch = findImportedTranslationTaskMatch(entry, resolvedTaskByKey, resolvedFallbackIndex);
+        if (importedMatch) return importedMatch;
+
+        const entryRow = Number(entry.rowNumber || 0);
+        const entryColumn = Number(entry.column || 0);
+        const entrySource = normalizeTranslateImportKeyPart(entry.sourceText);
+        const entrySheet = normalizeTranslateImportKeyPart(entry.sheetName);
+        const candidates = tasks.filter(task => {
+            const taskRow = Number(task.originalRowNumber || task.rowIndex + 1);
+            const taskColumn = Number(task.colIndex + 1);
+            if (entryRow && taskRow !== entryRow) return false;
+            if (entryColumn && taskColumn !== entryColumn) return false;
+            if (entrySource && normalizeTranslateImportKeyPart(task.text) !== entrySource) return false;
+            if (
+                entrySheet &&
+                task.source?.sheetName &&
+                normalizeTranslateImportKeyPart(task.source.sheetName) !== entrySheet
+            ) {
+                return false;
+            }
+            return Boolean(entryRow || entryColumn || entrySource);
+        });
+        if (!candidates.length) return null;
+
+        const modelKeys = new Set(
+            [entry.model, entry.profile]
+                .filter(Boolean)
+                .map(normalizeTranslateImportKeyPart)
+        );
+        return candidates.find(task =>
+            modelKeys.has(normalizeTranslateImportKeyPart(task.profile?.model || '')) ||
+            modelKeys.has(normalizeTranslateImportKeyPart(task.profile?.name || getCompactModelLabel(task.profile)))
+        ) || candidates[0];
+    }
+
+    function refreshDiscountQaInOutput(evaluatedEntries = [], tasks = [], targetLang = '') {
+        if (!evaluatedEntries.length || !tasks.length) return { refreshed: 0, unmatched: 0 };
+        const taskByKey = new Map(tasks.map(task => [task.taskKey, task]));
+        const fallbackIndex = buildTranslateImportTaskIndex(tasks);
+        const usedTaskKeys = new Set();
+        let refreshed = 0;
+        let unmatched = 0;
+
+        evaluatedEntries.forEach(({ entry }) => {
+            if (!entry?.translatedText || isTranslateFailureText(entry.translatedText)) return;
+            const task = findTaskForDiscountCheckEntry(entry, tasks, taskByKey, fallbackIndex);
+            if (!task || usedTaskKeys.has(task.taskKey)) {
+                unmatched++;
+                return;
+            }
+            usedTaskKeys.add(task.taskKey);
+            const qaStatus = summarizeTranslationQa(
+                task.text,
+                entry.translatedText,
+                task.glossaryTerms || [],
+                targetLang,
+                task
+            );
+            writeTranslationResult(task, entry.translatedText, qaStatus);
+            upsertTranslationRunReportEntry(task, entry.translatedText, qaStatus, {
+                preserveResolution: true
+            });
+            refreshed++;
+        });
+        refreshTranslationRunCountsFromReport();
+        return { refreshed, unmatched };
+    }
+
+    async function repairDetectedDiscountIssues() {
+        if (activeTranslateRunId) {
+            setStatus('warning', '已有翻译任务正在运行', '请等待当前任务完成后再修复折扣问题。');
+            return;
+        }
+        if (!translateDiscountCheckState.blocks.length) {
+            runLocalDiscountCheck();
+            if (!translateDiscountCheckState.blocks.length) {
+                setStatus('success', '没有需要自动修复的折扣错误', '当前检查结果中没有确定的折扣语义错误。');
+            }
+            return;
+        }
+        if (!sheetData || !translateSources.length) {
+            setStatus('warning', '无法修复折扣问题', '请先上传与翻译报告对应的原文件。');
+            return;
+        }
+        if (selectedColumns.length === 0) {
+            columnSelectSection.style.display = 'block';
+            renderColumnList();
+            columnSelectSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setStatus('warning', '请选择原文列', '工具需要原文列来定位并修复折扣问题。');
+            return;
+        }
+
+        const activeProfiles = getSelectedTranslateProfiles();
+        if (!activeProfiles.length) {
+            setStatus('error', '未选择可用修复通道', '请先勾选至少一个翻译模型通道。', revealApiConfigPanel, '去配置');
+            return;
+        }
+
+        const reportTargetLang = translateDiscountCheckState.blocks
+            .map(item => item.entry?.targetLang)
+            .find(Boolean) ||
+            importedTranslateProgressState?.targetLang ||
+            translationRunReport?.targetLang ||
+            targetLangSelect?.value ||
+            '';
+        if (reportTargetLang && targetLangSelect && targetLangSelect.value !== reportTargetLang) {
+            targetLangSelect.value = reportTargetLang;
+            selectedTranslateTargetLangs = new Set([reportTargetLang]);
+            renderTranslateTargetLanguageList();
+        }
+
+        const allTasks = collectTranslationTasks(activeProfiles);
+        const taskByKey = new Map(allTasks.map(task => [task.taskKey, task]));
+        const fallbackIndex = buildTranslateImportTaskIndex(allTasks);
+        const retryTasks = [];
+        const usedTaskKeys = new Set();
+        translateDiscountCheckState.blocks.forEach(({ entry }) => {
+            const matchedTask = findTaskForDiscountCheckEntry(entry, allTasks, taskByKey, fallbackIndex);
+            const task = matchedTask
+                ? {
+                    ...matchedTask,
+                    retryOfTaskKey: entry.taskKey || matchedTask.taskKey
+                }
+                : null;
+            if (!task || usedTaskKeys.has(task.taskKey)) return;
+            retryTasks.push(task);
+            usedTaskKeys.add(task.taskKey);
+        });
+
+        if (!retryTasks.length) {
+            setStatus('error', '没有定位到可修复的行', '请确认当前文件、工作表和所选原文列与翻译报告一致。');
+            return;
+        }
+
+        const beforeBlockCount = translateDiscountCheckState.blocks.length;
+        const unmappedCount = Math.max(0, beforeBlockCount - retryTasks.length);
+        if (importedTranslateProgressState?.entries?.length) {
+            initializeTranslateOutputFromImportedReport(
+                allTasks,
+                reportTargetLang || targetLangSelect?.value || '',
+                { includeQaFailed: true }
+            );
+        }
+        refreshDiscountQaInOutput(
+            translateDiscountCheckState.evaluatedEntries,
+            allTasks,
+            reportTargetLang || targetLangSelect?.value || ''
+        );
+        failedTranslationTasks = retryTasks;
+        updateTranslationRunActions();
+        translateDiscountCheckState = {
+            ...translateDiscountCheckState,
+            status: 'repairing'
+        };
+        renderTranslateDiscountCheckState();
+        setStatus(
+            'processing',
+            '正在修复折扣问题',
+            `已定位 ${retryTasks.length} 条，将使用当前翻译通道重新翻译并自动复检。`
+        );
+
+        const previousPostCheckEnabled = Boolean(translatePostCheckInput?.checked);
+        if (translatePostCheckInput) translatePostCheckInput.checked = true;
+        try {
+            const result = await retryFailedTranslations({
+                skipConfirm: true,
+                suppressAutoSave: true
+            });
+            if (result?.status !== 'success') {
+                translateDiscountCheckState = {
+                    ...translateDiscountCheckState,
+                    status: 'error',
+                    errorMessage: result?.status === 'cancelled' ? '修复已取消。' : '修复未完成，请稍后重试。'
+                };
+                renderTranslateDiscountCheckState();
+                return;
+            }
+            const nextState = runLocalDiscountCheck({
+                hasGeneratedFile: true,
+                includeImported: false,
+                repairSummary: {
+                    beforeBlockCount,
+                    attemptedCount: retryTasks.length,
+                    unmappedCount
+                }
+            });
+            const remainingText = nextState.blocks.length
+                ? `，仍有 ${nextState.blocks.length} 条未通过`
+                : '';
+            setStatus(
+                nextState.blocks.length ? 'warning' : 'success',
+                nextState.blocks.length ? '折扣修复已完成，仍有问题' : '折扣修复完成',
+                nextState.blocks.length
+                    ? `已修复并复检 ${retryTasks.length} 条${remainingText}；当前只保留问题报告，不生成交付版。`
+                    : `已修复并复检 ${retryTasks.length} 条；硬问题已清零，可下载交付版。`
+            );
+            if (nextState.blocks.length) {
+                finishInspectorTaskTimer('warning', '折扣修复已完成，仍有问题');
+            }
+        } catch (error) {
+            console.error('Discount repair error:', error);
+            recordClientError('discount-repair', error);
+            translateDiscountCheckState = {
+                ...translateDiscountCheckState,
+                status: 'error',
+                errorMessage: error?.message || '修复未完成，请稍后重试。'
+            };
+            renderTranslateDiscountCheckState();
+            setStatus('error', '折扣修复失败', error?.message || '未知错误');
+        } finally {
+            if (translatePostCheckInput) {
+                translatePostCheckInput.checked = previousPostCheckEnabled;
+            }
+        }
+    }
 
     async function pauseTranslate() {
         if (isTranslationCancelled) return;
@@ -6317,6 +7330,7 @@ function initTranslateTool() {
         if (!silent) {
             setStatus('warning', '翻译任务已取消', '已停止后续请求。现在可以重新选择模型、调整配置，或上传新的文件。');
         }
+        finishInspectorTaskTimer('warning', '翻译任务已取消');
     }
 
     function getTranslateTargetLanguageOptions() {
@@ -6384,10 +7398,10 @@ function initTranslateTool() {
             } else if (disabled.length === 0) {
                 translateQualitySummary.textContent = `推荐策略 + ${[
                     compactEnabled ? '超长精简' : '',
-                    autoRetryEnabled ? '自动补跑' : ''
+                    autoRetryEnabled ? '自动重译硬问题' : ''
                 ].filter(Boolean).join(' + ')}`;
             } else {
-                translateQualitySummary.textContent = `已调整：关闭 ${disabled.join('、')}${compactEnabled ? '，开启超长精简' : ''}${autoRetryEnabled ? '，开启自动补跑' : ''}`;
+                translateQualitySummary.textContent = `已调整：关闭 ${disabled.join('、')}${compactEnabled ? '，开启超长精简' : ''}${autoRetryEnabled ? '，开启自动重译硬问题' : ''}`;
             }
         }
     }
@@ -6433,7 +7447,7 @@ function initTranslateTool() {
             if (selected.length > 1) {
                 const preview = selected.slice(0, 4).map(getTranslateLanguageName).join('、');
                 const rest = selected.length > 4 ? ` 等 ${selected.length} 种语言` : '';
-                translateLanguageRunHint.textContent = `已选择 ${selected.length} 种目标语言：${preview}${rest}。任务会逐语言运行，每完成一种自动保存独立译文文件和报告。`;
+                translateLanguageRunHint.textContent = `已选择 ${selected.length} 种目标语言：${preview}${rest}。任务会逐语言运行；每种语言保存报告，只有硬错误清零才保存独立交付版。`;
             } else if (selected.length === 1) {
                 translateLanguageRunHint.textContent = `当前按单语言翻译为 ${getTranslateLanguageName(selected[0])}。勾选多个语言后会自动进入多语言队列。`;
             } else {
@@ -6456,6 +7470,76 @@ function initTranslateTool() {
         if (!translateDownloadLanguageSummary) return;
         translateDownloadLanguageSummary.textContent = text;
         translateDownloadLanguageSummary.style.display = text ? 'block' : 'none';
+    }
+
+    function renderTranslationResultBreakdown() {
+        if (!translateResultBreakdown) return;
+        const entries = translationRunReport?.entries || [];
+        if (!entries.length) {
+            translateResultBreakdown.style.display = 'none';
+            renderTranslationHardQaDetails([]);
+            return;
+        }
+        const summary = getTranslationReportIssueSummary(entries);
+        translateResultBreakdown.style.display = 'grid';
+        if (translateResultPassedCount) translateResultPassedCount.textContent = summary.success;
+        if (translateResultFailedCount) translateResultFailedCount.textContent = summary.failedOrMissing;
+        if (translateResultHardQaCount) translateResultHardQaCount.textContent = summary.hardQa;
+        if (translateResultSoftCount) translateResultSoftCount.textContent = summary.softRisk;
+        const hardQaEntries = getTranslationReportIssueGroups(entries).hard
+            .filter(entry => !isActualTranslationFailureReportEntry(entry));
+        renderTranslationHardQaDetails(hardQaEntries);
+    }
+
+    function renderTranslationHardQaDetails(entries = []) {
+        if (!translateHardQaDetails || !translateHardQaDetailsSummary || !translateHardQaDetailsBody) return;
+        if (!entries.length) {
+            translateHardQaDetails.style.display = 'none';
+            translateHardQaDetails.open = false;
+            translateHardQaDetailsSummary.textContent = '查看硬质检明细';
+            translateHardQaDetailsBody.innerHTML = '';
+            translateHardQaDetailsFingerprint = '';
+            return;
+        }
+
+        const fingerprint = entries
+            .map(entry => getTranslationIssueIdentity(entry))
+            .join('|');
+        if (fingerprint !== translateHardQaDetailsFingerprint) {
+            translateHardQaDetails.open = entries.length <= 10;
+            translateHardQaDetailsFingerprint = fingerprint;
+        }
+
+        const visibleEntries = entries.slice(0, 20);
+        const rows = visibleEntries.map(entry => {
+            const reason = (!isTranslationQaPassed(entry.qaStatus)
+                ? getTranslationQaDisplayText(entry)
+                : '') || entry.error || entry.completenessRisk || '硬质检未通过';
+            return `
+                <li class="discount-check-item">
+                    <div class="discount-check-location">${escapeHtml(getDiscountCheckEntryLocation(entry))}</div>
+                    <div class="discount-check-text">
+                        <span>${escapeHtml(getDiscountGuardTextSnippet(entry.sourceText || '（原文为空）', 160))}</span>
+                        <span class="discount-check-arrow">→</span>
+                        <span>${escapeHtml(getDiscountGuardTextSnippet(entry.translatedText || '（译文为空）', 160))}</span>
+                    </div>
+                    <p class="discount-check-reason">${escapeHtml(reason)}</p>
+                </li>
+            `;
+        }).join('');
+        const more = entries.length > visibleEntries.length
+            ? `<p class="discount-check-more">另有 ${entries.length - visibleEntries.length} 条未展开；点击“一键修复”时会一并处理。</p>`
+            : '';
+
+        translateHardQaDetails.style.display = 'block';
+        translateHardQaDetailsSummary.textContent = `查看 ${entries.length} 条硬质检明细`;
+        translateHardQaDetailsBody.innerHTML = `
+            <div class="discount-check-group">
+                <h5>以下问题会阻断交付</h5>
+                <ul class="discount-check-list">${rows}</ul>
+                ${more}
+            </div>
+        `;
     }
 
     function updateTranslateLanguageRunState(patch = {}) {
@@ -6529,6 +7613,7 @@ function initTranslateTool() {
         const shouldShow = currentLang && (
             progressSection.style.display !== 'none' ||
             translateLanguageRunState.status === 'success' ||
+            translateLanguageRunState.status === 'needs_action' ||
             translateLanguageRunState.status === 'stopped'
         );
 
@@ -6553,21 +7638,25 @@ function initTranslateTool() {
 
         if (translateLanguageRunState.status === 'success') {
             translateLanguageRunMeta.textContent = isMulti
-                ? `多语言队列完成：${completedNames.join('、') || targets.map(getTranslateLanguageName).join('、')}${failedNames.length ? `；需补跑：${failedNames.join('、')}` : ''}`
+                ? `多语言队列完成：${completedNames.join('、') || targets.map(getTranslateLanguageName).join('、')}${failedNames.length ? `；仍有硬问题：${failedNames.join('、')}` : ''}`
                 : `${getTranslateLanguageName(currentLang)}已完成`;
+        } else if (translateLanguageRunState.status === 'needs_action') {
+            translateLanguageRunMeta.textContent = isMulti
+                ? `队列处理完成；以下语言仍有阻断问题，只生成报告：${failedNames.join('、') || '请查看报告'}`
+                : `${getTranslateLanguageName(currentLang)}仍有阻断问题，只生成报告`;
         } else if (translateLanguageRunState.status === 'stopped') {
             translateLanguageRunMeta.textContent = `队列已停止，已完成 ${completed.size}/${targets.length} 种语言${failedNames.length ? `，异常：${failedNames.join('、')}` : ''}`;
         } else if (isMulti) {
             translateLanguageRunMeta.textContent = `已完成 ${completed.size}/${targets.length} 种语言${completedNames.length ? `：${completedNames.join('、')}` : ''}${nextLang ? `；下一种：${getTranslateLanguageName(nextLang)}` : ''}`;
         } else {
-            translateLanguageRunMeta.textContent = `${getTranslateLanguageName(currentLang)}翻译进行中，完成后会自动保存译文文件和报告。`;
+            translateLanguageRunMeta.textContent = `${getTranslateLanguageName(currentLang)}翻译进行中；硬错误清零后自动保存交付版，否则只保存问题报告。`;
         }
 
         translateLanguageRunChips.innerHTML = targets.map((lang, index) => {
             let status = 'pending';
             if (failed.has(lang)) status = 'failed';
             else if (completed.has(lang)) status = 'completed';
-            else if (index === translateLanguageRunState.currentIndex && !['success', 'stopped'].includes(translateLanguageRunState.status)) status = 'current';
+            else if (index === translateLanguageRunState.currentIndex && !['success', 'needs_action', 'stopped'].includes(translateLanguageRunState.status)) status = 'current';
             const label = status === 'completed'
                 ? '已完成'
                 : (status === 'failed' ? '异常' : (status === 'current' ? '进行中' : '等待'));
@@ -6708,9 +7797,141 @@ function initTranslateTool() {
             reviewedAt: 0,
             reviewSummary: null,
             issueSummary: null,
+            selectedIssueFilters: [],
             failedOrMissingCount: 0,
             skippedCount: 0
         };
+    }
+
+    function getImportedIssueFilterSelection(state = importedTranslateProgressState) {
+        const validIds = new Set(TRANSLATE_IMPORT_ISSUE_FILTERS.map(filter => filter.id));
+        return new Set((state?.selectedIssueFilters || []).filter(id => validIds.has(id)));
+    }
+
+    function setImportedIssueFilterSelection(ids = []) {
+        const validIds = new Set(TRANSLATE_IMPORT_ISSUE_FILTERS.map(filter => filter.id));
+        importedTranslateProgressState.selectedIssueFilters = [...new Set(ids.filter(id => validIds.has(id)))];
+    }
+
+    function getTranslationReportEntryDedupeKey(entry) {
+        if (!entry) return '';
+        return [
+            entry.taskKey,
+            entry.sourceFile,
+            entry.sheetName,
+            entry.rowNumber,
+            entry.column,
+            entry.profile,
+            entry.model,
+            entry.sourceText
+        ].map(value => normalizeTranslateImportKeyPart(value)).join('|');
+    }
+
+    function dedupeTranslationReportEntries(entries = []) {
+        const seen = new Set();
+        const unique = [];
+        (entries || []).forEach(entry => {
+            const key = getTranslationReportEntryDedupeKey(entry);
+            if (key && seen.has(key)) return;
+            if (key) seen.add(key);
+            unique.push(entry);
+        });
+        return unique;
+    }
+
+    function getTranslationReportIssueFilterStats(state = importedTranslateProgressState) {
+        const failedEntries = (state?.entries || []).filter(isFailedTranslationReportEntry);
+        return TRANSLATE_IMPORT_ISSUE_FILTERS
+            .map(filter => {
+                const entries = dedupeTranslationReportEntries(failedEntries.filter(entry => filter.match(entry)));
+                return { filter, entries, count: entries.length };
+            })
+            .filter(stat => stat.count > 0);
+    }
+
+    function getTranslationReportEntriesForIssueFilters(state = importedTranslateProgressState, selectedIds = getImportedIssueFilterSelection(state)) {
+        const selectedSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds || []);
+        if (!selectedSet.size) return [];
+        const activeFilters = TRANSLATE_IMPORT_ISSUE_FILTERS.filter(filter => selectedSet.has(filter.id));
+        if (!activeFilters.length) return [];
+        const failedEntries = (state?.entries || []).filter(isFailedTranslationReportEntry);
+        return dedupeTranslationReportEntries(failedEntries.filter(entry =>
+            activeFilters.some(filter => filter.match(entry))
+        ));
+    }
+
+    function getImportedIssueRetryPreview(state = importedTranslateProgressState) {
+        const selectedIds = getImportedIssueFilterSelection(state);
+        const selectedFilters = TRANSLATE_IMPORT_ISSUE_FILTERS.filter(filter => selectedIds.has(filter.id));
+        const entries = selectedIds.size
+            ? getTranslationReportEntriesForIssueFilters(state, selectedIds)
+            : dedupeTranslationReportEntries(state?.suspiciousEntries || []);
+        return {
+            custom: selectedIds.size > 0,
+            entries,
+            count: entries.length,
+            selectedFilters
+        };
+    }
+
+    function formatImportedIssueFilterSelection(preview) {
+        const labels = (preview?.selectedFilters || []).map(filter => filter.label);
+        if (!labels.length) return '';
+        return labels.length <= 3 ? labels.join('、') : `${labels.slice(0, 3).join('、')}等 ${labels.length} 类`;
+    }
+
+    function renderTranslateImportIssueFilters(state = importedTranslateProgressState) {
+        if (!translateImportIssueFilterPanel || !translateImportIssueFilterList || !translateImportIssueFilterSummary) return;
+        const stats = getTranslationReportIssueFilterStats(state);
+        if (!state?.entries?.length || !stats.length) {
+            translateImportIssueFilterPanel.style.display = 'none';
+            translateImportIssueFilterList.innerHTML = '';
+            translateImportIssueFilterSummary.textContent = '暂无可筛选问题';
+            return;
+        }
+
+        const availableIds = new Set(stats.map(stat => stat.filter.id));
+        const selectedIds = getImportedIssueFilterSelection(state);
+        const prunedSelection = [...selectedIds].filter(id => availableIds.has(id));
+        if (prunedSelection.length !== selectedIds.size) {
+            setImportedIssueFilterSelection(prunedSelection);
+        }
+
+        const preview = getImportedIssueRetryPreview(state);
+        translateImportIssueFilterPanel.style.display = 'block';
+        translateImportIssueFilterSummary.textContent = preview.custom
+            ? `已选 ${preview.selectedFilters.length} 类，约 ${preview.count} 条`
+            : (state.suspiciousEntries?.length
+                ? `未选择时按可疑行 ${state.suspiciousEntries.length} 条`
+                : '勾选类型后启用定向重译');
+
+        const activeSelection = getImportedIssueFilterSelection(state);
+        translateImportIssueFilterList.innerHTML = stats.map(({ filter, count }) => {
+            const checked = activeSelection.has(filter.id);
+            const inputId = `translateImportIssueFilter_${filter.id}`;
+            return `
+                <label class="resource-check-item translate-issue-filter-item${checked ? ' selected' : ''}" for="${escapeAttribute(inputId)}">
+                    <input type="checkbox" id="${escapeAttribute(inputId)}" data-issue-filter="${escapeAttribute(filter.id)}" ${checked ? 'checked' : ''} ${activeTranslateRunId ? 'disabled' : ''}>
+                    <span class="resource-main">
+                        <span class="resource-title-line">
+                            <span class="resource-title">${escapeHtml(filter.label)}</span>
+                            <span class="translate-issue-filter-count">${count}</span>
+                        </span>
+                        <span class="resource-meta">${escapeHtml(filter.description)}</span>
+                    </span>
+                </label>
+            `;
+        }).join('');
+
+        translateImportIssueFilterList.querySelectorAll('input[data-issue-filter]').forEach(input => {
+            input.addEventListener('change', () => {
+                const selected = [...translateImportIssueFilterList.querySelectorAll('input[data-issue-filter]:checked')]
+                    .map(item => item.dataset.issueFilter)
+                    .filter(Boolean);
+                setImportedIssueFilterSelection(selected);
+                updateTranslateProgressImportStatus();
+            });
+        });
     }
 
     function updateTranslateProgressImportStatus() {
@@ -6718,12 +7939,15 @@ function initTranslateTool() {
         const state = importedTranslateProgressState;
         if (!state?.entries?.length) {
             translateProgressImportStatus.className = 'translate-import-status';
-            translateProgressImportStatus.textContent = '可导入之前下载的 translation_report.xlsx，或带“翻译报告”分页的 translated.xlsx；成功项会复用，失败/缺失项会继续翻译。';
+                translateProgressImportStatus.textContent = '导入旧 translation_report.xlsx 后会按当前规则重检；报告中的“必须重译 / 接受现译 / 使用修订译文”也会一起生效。硬错误清零后才生成交付版。';
             if (translateBtnLabel) translateBtnLabel.textContent = '开始翻译';
             if (translateClearImportedProgressBtn) translateClearImportedProgressBtn.style.display = 'none';
             if (translateReviewImportedProgressBtn) translateReviewImportedProgressBtn.disabled = true;
+            if (translateReviewImportedProgressBtn) translateReviewImportedProgressBtn.style.display = 'none';
             if (translateRetrySuspiciousBtn) translateRetrySuspiciousBtn.style.display = 'none';
             if (translateCompactLongImportedBtn) translateCompactLongImportedBtn.style.display = 'none';
+            if (translateImportIssueFilterPanel) translateImportIssueFilterPanel.style.display = 'none';
+            if (translateImportIssueFilterList) translateImportIssueFilterList.innerHTML = '';
             return;
         }
 
@@ -6734,18 +7958,36 @@ function initTranslateTool() {
         const issueSummary = state.issueSummary || getTranslationReportIssueSummary(state.entries);
         const reportMissingCount = state.reviewSummary?.reportMissing || 0;
         const reviewText = state.reviewedAt
-            ? ` 已复查：发现 ${suspiciousCount} 条疑似漏译/不完整译文${reportMissingCount ? `，其中 ${reportMissingCount} 条报告缺失` : ''}。`
-            : ' 可点击“复查已完成译文”先本地排查漏译风险。';
+            ? ` 已自动重检：发现 ${issueSummary.autoRepairable || 0} 条可自动修复、${issueSummary.softRisk || 0} 条需确认${reportMissingCount ? `，另有 ${reportMissingCount} 条报告缺失` : ''}。`
+            : ' 目标语言尚未确认，将在开始处理时自动重检旧译文。';
         const hasRisk = suspiciousCount > 0 || issueSummary.softRisk > 0;
         const issueText = formatTranslationReportIssueSummary(issueSummary);
         translateProgressImportStatus.className = `translate-import-status ready${state.targetLang ? '' : ' warning'}${hasRisk ? ' danger' : ''}`;
-        translateProgressImportStatus.textContent = `已导入 ${state.reusableEntries.length} 条可复用成功译文；默认补跑 ${state.failedOrMissingCount} 条（${issueText}），${state.skippedCount} 条无译文已跳过。${languageText}。开始翻译只补真实失败/缺失，QA软风险不会自动消耗 API。${reviewText}`;
-        if (translateBtnLabel) translateBtnLabel.textContent = state.failedOrMissingCount > 0 ? '开始补跑缺失项' : '复用报告生成结果';
+        translateProgressImportStatus.textContent = `已导入 ${state.reusableEntries.length} 条可复用译文；${languageText}。${reviewText} ${issueText}。点击主按钮后只处理明确问题，其余译文继续复用。`;
         if (translateClearImportedProgressBtn) translateClearImportedProgressBtn.style.display = 'inline-flex';
         if (translateReviewImportedProgressBtn) translateReviewImportedProgressBtn.disabled = false;
+        if (translateReviewImportedProgressBtn) {
+            translateReviewImportedProgressBtn.style.display = state.reviewedAt ? 'none' : 'inline-flex';
+            translateReviewImportedProgressBtn.textContent = '按当前语言检查旧译文';
+        }
+        renderTranslateImportIssueFilters(state);
+        const retryPreview = getImportedIssueRetryPreview(state);
+        if (translateBtnLabel) {
+            translateBtnLabel.textContent = retryPreview.custom
+                ? `按选中类型重译（${retryPreview.count}）`
+                : (state.failedOrMissingCount > 0
+                    ? `一键修复并生成交付版（${state.failedOrMissingCount}）`
+                    : '复用译文并生成交付版');
+        }
         if (translateRetrySuspiciousBtn) {
-            translateRetrySuspiciousBtn.style.display = suspiciousCount > 0 ? 'inline-flex' : 'none';
-            translateRetrySuspiciousBtn.textContent = suspiciousCount > 0 ? `只补译可疑行（${suspiciousCount}）` : '只补译可疑行';
+            translateRetrySuspiciousBtn.style.display = retryPreview.custom && retryPreview.count > 0 ? 'inline-flex' : 'none';
+            translateRetrySuspiciousBtn.disabled = Boolean(activeTranslateRunId) || retryPreview.count === 0;
+            translateRetrySuspiciousBtn.textContent = retryPreview.custom
+                ? `按选中类型重译（${retryPreview.count}）`
+                : (suspiciousCount > 0 ? `只补译可疑行（${suspiciousCount}）` : '选择问题类型后重译');
+            translateRetrySuspiciousBtn.title = retryPreview.custom
+                ? `只重译：${formatImportedIssueFilterSelection(retryPreview)}`
+                : '不勾选问题类型时，仍按复查出的可疑行补译。';
         }
         if (translateCompactLongImportedBtn) {
             const lengthCount = Number(issueSummary.length || 0);
@@ -6762,6 +8004,7 @@ function initTranslateTool() {
         importedTranslateProgressState = createEmptyTranslateProgressImportState();
         if (!options.keepInput && translateProgressImportInput) translateProgressImportInput.value = '';
         updateTranslateProgressImportStatus();
+        if (!options.keepDiscountCheck) resetTranslateDiscountCheck();
     }
 
     function releaseTranslateRunBuffers(options = {}) {
@@ -6843,9 +8086,12 @@ function initTranslateTool() {
 
     function getTranslationReportColumnMap(headerRow = []) {
         const headers = headerRow.map(normalizeHeaderText);
+        const machineStatusColumn = findHeaderColumn(headers, ['机器状态', 'machine status', 'machinestatus']);
         return {
             taskKey: findHeaderColumn(headers, ['任务key', '任务 key', 'taskkey', 'task key']),
-            status: findHeaderColumn(headers, ['状态', 'status']),
+            status: machineStatusColumn >= 0
+                ? machineStatusColumn
+                : findHeaderColumn(headers, ['状态', 'status']),
             sourceFile: findHeaderColumn(headers, ['来源文件', 'source file', 'sourcefile', 'file']),
             sheetName: findHeaderColumn(headers, ['工作表', 'sheet', 'worksheet', 'sheet name', 'sheetname']),
             rowNumber: findHeaderColumn(headers, ['原始行号', '行号', 'row number', 'rownumber', 'row']),
@@ -6859,7 +8105,10 @@ function initTranslateTool() {
             qaStatus: findHeaderColumn(headers, ['译后检测', '检测', 'qa', 'qa status', 'qastatus']),
             completenessRisk: findHeaderColumn(headers, ['完整性风险', '内容完整性', 'completeness risk', 'completenessrisk']),
             actionSuggestion: findHeaderColumn(headers, ['处理建议', '建议', 'action suggestion', 'actionsuggestion']),
-            error: findHeaderColumn(headers, ['错误', 'error'])
+            error: findHeaderColumn(headers, ['错误', 'error']),
+            userDecision: findHeaderColumn(headers, ['处理决定', '用户决定', '人工决定', 'decision', 'user decision', 'userdecision']),
+            revisedText: findHeaderColumn(headers, ['修订译文', '人工修订译文', 'revised translation', 'revision', 'revisedtext']),
+            decisionNote: findHeaderColumn(headers, ['处理备注', '决定备注', '人工备注', 'decision note', 'note', 'decisionnote'])
         };
     }
 
@@ -6873,14 +8122,17 @@ function initTranslateTool() {
     }
 
     function normalizeImportedTranslationStatus(entry) {
+        if (entry?.manualResolutionValid === true) return 'success';
         const status = normalizeHeaderText(entry.status);
         const qaStatus = normalizeHeaderText(entry.qaStatus);
+        if (status === 'missing' || status.includes('缺失') || status.includes('未返回')) return 'missing';
+        if (status === 'failed' || status.includes('失败') || status.includes('error')) return 'failed';
+        if (isMissingTranslationResult(entry.translatedText)) return 'missing';
+        if (isMarkedTranslationFailure(entry.translatedText)) return 'failed';
         if (entry.completenessRisk && !/无|通过|pass/i.test(entry.completenessRisk)) return 'qa_failed';
         if (qaStatus.includes('需确认') || qaStatus.includes('待确认') || qaStatus.includes('qa_failed')) return 'qa_failed';
         if (status === 'success' || status === '通过' || status === 'passed' || status === 'pass') return 'success';
         if (status === 'qa_failed' || status.includes('需确认') || status.includes('待确认')) return 'qa_failed';
-        if (status === 'missing' || status.includes('缺失') || status.includes('未返回')) return 'missing';
-        if (status === 'failed' || status.includes('失败') || status.includes('error')) return 'failed';
         if (entry.translatedText && !isTranslateFailureText(entry.translatedText)) return 'success';
         return status || 'missing';
     }
@@ -6892,16 +8144,27 @@ function initTranslateTool() {
         return true;
     }
 
+    function isTranslationReportTailBoundary(row = []) {
+        const firstCell = String(row?.[0] ?? '').trim();
+        if (['失败任务', '待处理任务', '需重新处理任务', '可自动处理任务'].includes(firstCell)) {
+            return true;
+        }
+        return /^(?:failed tasks?|pending tasks?|tasks? to reprocess)$/i.test(firstCell);
+    }
+
     function parseTranslationReportEntries(rows = [], headerIndex = 0) {
         const headerRow = rows[headerIndex] || [];
         const columns = getTranslationReportColumnMap(headerRow);
         const entries = [];
         let skippedCount = 0;
+        let tailBoundaryIndex = -1;
 
         for (let rowIndex = headerIndex + 1; rowIndex < rows.length; rowIndex++) {
             const row = rows[rowIndex] || [];
-            const firstCell = String(row[0] ?? '').trim();
-            if (firstCell === '失败任务' || /^failed tasks?$/i.test(firstCell)) break;
+            if (isTranslationReportTailBoundary(row)) {
+                tailBoundaryIndex = rowIndex;
+                break;
+            }
             if (row.every(cell => !String(cell ?? '').trim())) continue;
 
             const entry = {
@@ -6920,8 +8183,14 @@ function initTranslateTool() {
                 qaStatus: readReportCell(row, columns.qaStatus),
                 completenessRisk: readReportCell(row, columns.completenessRisk),
                 actionSuggestion: readReportCell(row, columns.actionSuggestion),
-                error: readReportCell(row, columns.error)
+                error: readReportCell(row, columns.error),
+                userDecision: readReportCell(row, columns.userDecision),
+                revisedText: readReportCell(row, columns.revisedText),
+                decisionNote: readReportCell(row, columns.decisionNote)
             };
+            entry.userDecision = globalThis.NexusTranslationDeliveryPolicy?.normalizeDecision
+                ? globalThis.NexusTranslationDeliveryPolicy.normalizeDecision(entry.userDecision)
+                : entry.userDecision;
             entry.status = normalizeImportedTranslationStatus(entry);
 
             if (!entry.sourceText && !entry.translatedText && !entry.taskKey) {
@@ -6931,10 +8200,102 @@ function initTranslateTool() {
             entries.push(entry);
         }
 
+        if (tailBoundaryIndex >= 0) {
+            const tailHeaderOffset = findTranslationReportHeaderIndex(rows.slice(tailBoundaryIndex + 1));
+            const tailHeaderIndex = tailHeaderOffset >= 0
+                ? tailBoundaryIndex + 1 + tailHeaderOffset
+                : -1;
+            if (tailHeaderIndex >= 0) {
+                const tailColumns = getTranslationReportColumnMap(rows[tailHeaderIndex] || []);
+                const entriesByTaskKey = new Map(
+                    entries.filter(entry => entry.taskKey).map(entry => [entry.taskKey, entry])
+                );
+                const entriesByLocation = new Map(entries.map(entry => [
+                    makeTranslateImportMatchKey([
+                        entry.sourceFile,
+                        entry.sheetName,
+                        entry.rowNumber,
+                        entry.column,
+                        entry.sourceText
+                    ]),
+                    entry
+                ]));
+
+                for (let rowIndex = tailHeaderIndex + 1; rowIndex < rows.length; rowIndex++) {
+                    const row = rows[rowIndex] || [];
+                    if (row.every(cell => !String(cell ?? '').trim())) continue;
+                    const userDecisionRaw = readReportCell(row, tailColumns.userDecision);
+                    const revisedText = readReportCell(row, tailColumns.revisedText);
+                    const decisionNote = readReportCell(row, tailColumns.decisionNote);
+                    if (!userDecisionRaw && !revisedText && !decisionNote) continue;
+
+                    const taskKey = readReportCell(row, tailColumns.taskKey);
+                    const locationKey = makeTranslateImportMatchKey([
+                        readReportCell(row, tailColumns.sourceFile),
+                        readReportCell(row, tailColumns.sheetName),
+                        parseReportInteger(readReportCell(row, tailColumns.rowNumber)),
+                        parseReportInteger(readReportCell(row, tailColumns.column)),
+                        readReportCell(row, tailColumns.sourceText)
+                    ]);
+                    const entry = entriesByTaskKey.get(taskKey) || entriesByLocation.get(locationKey);
+                    if (!entry) continue;
+                    const mergedDecision = globalThis.NexusTranslationDeliveryPolicy?.mergeDecisionFields
+                        ? globalThis.NexusTranslationDeliveryPolicy.mergeDecisionFields(entry, {
+                            userDecision: userDecisionRaw,
+                            revisedText,
+                            decisionNote
+                        })
+                        : {
+                            ...entry,
+                            userDecision: userDecisionRaw,
+                            revisedText,
+                            decisionNote
+                        };
+                    Object.assign(entry, mergedDecision);
+                }
+            }
+        }
+
         return { entries, skippedCount };
     }
 
-    function inferTranslateImportTargetLang(fileName = '') {
+    function inferTranslateImportTargetLangFromReportRows(rows = []) {
+        const options = getTranslateTargetLanguageOptions();
+        const validCodes = new Set(options.map(option => option.value));
+        const namesByCode = new Map(options.map(option => [
+            option.value,
+            new Set([
+                String(option.label || '').trim().toLowerCase(),
+                String(getTranslateLanguageName(option.value) || '').trim().toLowerCase()
+            ].filter(Boolean))
+        ]));
+        const max = Math.min(Array.isArray(rows) ? rows.length : 0, 40);
+        for (let index = 0; index < max; index++) {
+            const row = rows[index] || [];
+            const label = String(row[0] ?? '').trim().toLowerCase();
+            const value = String(row[1] ?? '').trim();
+            if (!label || !value) continue;
+            if (/^(?:目标语言代码|target\s*language\s*code|targetlang)$/.test(label)) {
+                if (validCodes.has(value)) return value;
+                const normalizedCode = [...validCodes].find(code =>
+                    code.toLowerCase() === value.toLowerCase()
+                );
+                if (normalizedCode) return normalizedCode;
+            }
+            if (/^(?:目标语言|target\s*language)$/.test(label)) {
+                const normalizedName = value.toLowerCase();
+                const matched = [...namesByCode.entries()].find(([, names]) =>
+                    names.has(normalizedName)
+                );
+                if (matched) return matched[0];
+            }
+        }
+        return '';
+    }
+
+    function inferTranslateImportTargetLang(fileName = '', reportRows = []) {
+        const metadataTargetLang = inferTranslateImportTargetLangFromReportRows(reportRows);
+        if (metadataTargetLang) return metadataTargetLang;
         const name = String(fileName || '').toLowerCase();
         const options = getTranslateTargetLanguageOptions()
             .map(option => option.value)
@@ -6947,6 +8308,7 @@ function initTranslateTool() {
 
     async function importTranslateProgressFile(file) {
         try {
+            resetTranslateDiscountCheck();
             setStatus('processing', '正在导入翻译报告', file.name);
             if (translateProgressImportStatus) {
                 translateProgressImportStatus.className = 'translate-import-status loading';
@@ -6963,23 +8325,43 @@ function initTranslateTool() {
                 throw new Error('报告里没有可读取的翻译结果。');
             }
 
-            const importedTargetLang = inferTranslateImportTargetLang(file.name);
+            const importedTargetLang = inferTranslateImportTargetLang(file.name, reportSheet.rows);
             if (importedTargetLang && targetLangSelect) {
                 targetLangSelect.value = importedTargetLang;
             }
-            const reusableEntries = parsedEntries.entries.filter(isReusableImportedTranslationEntry);
-            const issueSummary = getTranslationReportIssueSummary(parsedEntries.entries);
+            const reviewTargetLang = importedTargetLang;
+            const shouldAutoReview = Boolean(reviewTargetLang);
+            const reviewedEntries = shouldAutoReview
+                ? parsedEntries.entries.map(entry => buildReviewedImportedTranslationEntry(entry, reviewTargetLang))
+                : parsedEntries.entries;
+            const reusableEntries = reviewedEntries.filter(isReusableImportedTranslationEntry);
+            const suspiciousEntries = reviewedEntries.filter(entry =>
+                entry.status === 'missing' ||
+                (
+                    entry.status === 'qa_failed' &&
+                    entry.translatedText &&
+                    !isTranslateFailureText(entry.translatedText)
+                )
+            );
+            const issueSummary = getTranslationReportIssueSummary(reviewedEntries);
             const failedOrMissingCount = issueSummary.retryable;
             importedTranslateProgressState = {
                 fileName: file.name,
                 importedAt: Date.now(),
                 targetLang: importedTargetLang,
-                entries: parsedEntries.entries,
+                entries: reviewedEntries,
                 reusableEntries,
-                suspiciousEntries: [],
-                reviewedAt: 0,
-                reviewSummary: null,
+                suspiciousEntries,
+                reviewedAt: shouldAutoReview ? Date.now() : 0,
+                reviewSummary: shouldAutoReview ? {
+                    total: reviewedEntries.length,
+                    reusable: reusableEntries.length,
+                    suspicious: suspiciousEntries.length,
+                    failedOrMissing: failedOrMissingCount,
+                    reportMissing: 0
+                } : null,
                 issueSummary,
+                selectedIssueFilters: [],
                 failedOrMissingCount,
                 skippedCount: parsedEntries.skippedCount
             };
@@ -6989,12 +8371,12 @@ function initTranslateTool() {
             }
             updateTranslateProgressImportStatus();
             const languageText = importedTargetLang
-                ? `已切换到 ${getTranslateLanguageName(importedTargetLang)}，本次会按单语言补跑。`
+                ? `已切换到 ${getTranslateLanguageName(importedTargetLang)}，本次会按单语言处理硬问题。`
                 : '未从文件名识别出语言，请手动确认目标语言后再开始。';
             setStatus(
                 'success',
                 '翻译报告已导入',
-                `可复用 ${reusableEntries.length} 条成功译文；默认补跑 ${failedOrMissingCount} 条真实失败/缺失；QA软风险 ${issueSummary.softRisk} 条${issueSummary.length ? `，其中超长 ${issueSummary.length} 条可单独精简` : ''}。${languageText}`
+                `${shouldAutoReview ? '已按当前规则自动重检；' : ''}可复用 ${reusableEntries.length} 条通过译文；可自动处理 ${failedOrMissingCount} 条（${formatTranslationReportIssueSummary(issueSummary)}）。软性需确认不会自动重译${issueSummary.length ? `；其中超长 ${issueSummary.length} 条可单独精简` : ''}。${languageText}`
             );
             return {
                 status: 'success',
@@ -7022,7 +8404,7 @@ function initTranslateTool() {
         const reportFiles = [...files].filter(Boolean);
         if (!reportFiles.length) return;
         if (!sheetData || !translateSources.length) {
-            alert('请先上传与这些报告对应的原文件，再批量导入报告补跑。');
+            alert('请先上传与这些报告对应的原文件，再批量导入报告继续处理。');
             if (translateProgressImportInput) translateProgressImportInput.value = '';
             return;
         }
@@ -7036,11 +8418,11 @@ function initTranslateTool() {
         }
         const activeProfiles = getSelectedTranslateProfiles();
         if (!activeProfiles.length) {
-            setStatus('error', '未选择可用补跑通道', '请先勾选至少一个翻译模型通道。', revealApiConfigPanel, '去配置');
+            setStatus('error', '未选择可用重译通道', '请先勾选至少一个翻译模型通道。', revealApiConfigPanel, '去配置');
             if (translateProgressImportInput) translateProgressImportInput.value = '';
             return;
         }
-        const confirmed = confirm(`将按顺序导入 ${reportFiles.length} 个翻译报告，并按报告语言逐个补跑真实失败/缺失项。\n\n成功译文会复用，不会全量重跑；QA软风险和超长行不会在批量补跑里自动消耗 API。未从文件名识别出语言的报告会跳过。\n\n是否开始批量补跑？`);
+        const confirmed = confirm(`将按顺序导入 ${reportFiles.length} 个翻译报告，并按报告语言逐个处理翻译失败、结果缺失和硬质检问题。\n\n通过译文会复用，不会全量重跑；软性需确认和超长行不会在批量处理中自动消耗 API。未从文件名识别出语言的报告会跳过。\n\n是否开始批量处理？`);
         if (!confirmed) {
             if (translateProgressImportInput) translateProgressImportInput.value = '';
             return;
@@ -7057,7 +8439,7 @@ function initTranslateTool() {
                 const file = reportFiles[index];
                 if (isTranslationCancelled) break;
                 try {
-                    setStatus('processing', `批量报告补跑 ${index + 1}/${reportFiles.length}`, `正在导入 ${file.name}`);
+                    setStatus('processing', `批量报告处理 ${index + 1}/${reportFiles.length}`, `正在导入 ${file.name}`);
                     const importResult = await importTranslateProgressFile(file);
                     if (importResult?.status !== 'success') {
                         failed++;
@@ -7072,15 +8454,15 @@ function initTranslateTool() {
                     if (Number(importResult.failedOrMissingCount || 0) <= 0) {
                         skipped++;
                         const softText = importResult.issueSummary?.softRisk
-                            ? `，QA软风险 ${importResult.issueSummary.softRisk} 条`
+                            ? `，软性需确认 ${importResult.issueSummary.softRisk} 条`
                             : '';
-                        details.push(`${getTranslateLanguageName(importResult.targetLang)}: 无真实失败/缺失${softText}`);
+                        details.push(`${getTranslateLanguageName(importResult.targetLang)}: 无可自动处理项${softText}`);
                         continue;
                     }
                     setStatus(
                         'processing',
-                        `正在补跑 ${getTranslateLanguageName(importResult.targetLang)} (${index + 1}/${reportFiles.length})`,
-                        `已复用 ${importResult.reusableCount} 条成功译文，真实失败/缺失 ${importResult.failedOrMissingCount} 条会继续处理；QA软风险 ${importResult.issueSummary?.softRisk || 0} 条保留在报告里。`
+                        `正在重译 ${getTranslateLanguageName(importResult.targetLang)} 的硬问题 (${index + 1}/${reportFiles.length})`,
+                        `已复用 ${importResult.reusableCount} 条通过译文；${importResult.failedOrMissingCount} 条翻译失败、结果缺失或硬质检问题会重新处理，${importResult.issueSummary?.softRisk || 0} 条软性需确认保留当前译文。`
                     );
                     const runResult = await startTranslate({
                         skipMultiTarget: true,
@@ -7088,7 +8470,7 @@ function initTranslateTool() {
                     });
                     if (runResult?.status === 'success') {
                         completed++;
-                        details.push(`${getTranslateLanguageName(importResult.targetLang)}: 完成，剩余可补跑 ${runResult.repairableCount || 0}`);
+                        details.push(`${getTranslateLanguageName(importResult.targetLang)}: 完成，剩余可自动处理 ${runResult.repairableCount || 0}`);
                     } else {
                         failed++;
                         details.push(`${getTranslateLanguageName(importResult.targetLang)}: ${runResult?.status || '异常'}`);
@@ -7118,7 +8500,7 @@ function initTranslateTool() {
         const summary = `完成 ${completed}/${reportFiles.length} 个报告${skipped ? `，跳过 ${skipped} 个` : ''}${failed ? `，失败 ${failed} 个` : ''}。`;
         setStatus(
             failed || skipped ? 'warning' : 'success',
-            '批量报告补跑完成',
+            '批量报告处理完成',
             `${summary}${details.length ? ` ${details.slice(0, 6).join('；')}${details.length > 6 ? '…' : ''}` : ''}`
         );
     }
@@ -7201,6 +8583,7 @@ function initTranslateTool() {
     }
 
     function isTemporaryTranslateApiError(error) {
+        if (isApiQuotaDepletedError(error)) return false;
         const message = `${error?.message || ''} ${error?.rawText || ''} ${JSON.stringify(error?.payload || '')}`;
         return error?.status === 429 ||
             error?.status === 500 ||
@@ -7210,6 +8593,50 @@ function initTranslateTool() {
             error?.isRateLimited ||
             error?.isTimeout ||
             /超时|timeout|UNAVAILABLE|high demand|temporar|try again|overloaded|rate.?limit|quota|限流|频率/i.test(message);
+    }
+
+    function getFriendlyTranslateApiErrorMessage(error) {
+        const message = String(error?.message || error?.rawText || '接口返回异常')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 500);
+        const status = Number(error?.status || 0);
+        const diagnosticText = `${message} ${String(error?.rawText || '')}`;
+
+        if (isApiQuotaDepletedError(error)) {
+            return message.includes('API 额度已用尽')
+                ? message
+                : `API 额度已用尽：${message}。请在服务商控制台充值或恢复额度，或切换到其他有额度的通道。`;
+        }
+
+        if (
+            error?.isRateLimited ||
+            status === 429 ||
+            /quota|rate.?limit|too many requests|RESOURCE_EXHAUSTED|限流|频率|额度|余额/i.test(diagnosticText)
+        ) {
+            const retryText = error?.retryAfterMs > 0
+                ? `接口建议等待约 ${Math.ceil(error.retryAfterMs / 1000)} 秒后重试`
+                : '建议稍后重试，或降低该通道并发';
+            return `额度或频率限制：${message}。${retryText}。`;
+        }
+
+        if (
+            error?.isTimeout ||
+            error?.name === 'ApiTimeoutError' ||
+            /超时|timeout|timed out/i.test(diagnosticText)
+        ) {
+            return `请求超时：${message}。建议稍后重试，或降低该通道并发。`;
+        }
+
+        if (
+            error?.isTemporary ||
+            [500, 502, 503].includes(status) ||
+            /UNAVAILABLE|high demand|temporar|try again|overloaded|服务繁忙|临时不可用/i.test(diagnosticText)
+        ) {
+            return `模型服务临时繁忙或不可用：${message}。建议稍后重试或切换可用模型。`;
+        }
+
+        return message;
     }
 
     async function validateTranslateProfileConnection(profile, sourceLang, targetLang, signal) {
@@ -7253,10 +8680,22 @@ function initTranslateTool() {
                 return;
             } catch (error) {
                 if (error.name === 'AbortError' || signal?.aborted) throw error;
-                const canRetry = (error.isOutputTruncated || error.isRateLimited || isTemporaryTranslateApiError(error)) && attempt < 1;
+                const quotaDepleted = isApiQuotaDepletedError(error);
+                const canRetry = !quotaDepleted &&
+                    (error.isOutputTruncated || error.isRateLimited || isTemporaryTranslateApiError(error)) &&
+                    attempt < 1;
                 if (!canRetry) {
                     const prefix = error.status || error.payload ? '请求失败' : '无法连接接口';
-                    throw new Error(`${prefix}：${getFriendlyApiErrorMessage(error, profile)}`);
+                    const wrappedError = new Error(`${prefix}：${getFriendlyTranslateApiErrorMessage(error)}`);
+                    wrappedError.status = error.status;
+                    wrappedError.payload = error.payload;
+                    wrappedError.rawText = error.rawText;
+                    wrappedError.retryAfterMs = error.retryAfterMs || 0;
+                    wrappedError.isRateLimited = error.isRateLimited || false;
+                    wrappedError.isQuotaDepleted = quotaDepleted;
+                    wrappedError.isPreflightFailure = true;
+                    wrappedError.cause = error;
+                    throw wrappedError;
                 }
                 const retryDelay = error.retryAfterMs > 0
                     ? Math.min(error.retryAfterMs, 8000)
@@ -7273,24 +8712,33 @@ function initTranslateTool() {
         for (let index = 0; index < uniqueProfiles.length; index++) {
             const profile = uniqueProfiles[index];
             try {
+                setApiRuntimeHealth(profile, 'checking', '正在预检 Key、Base URL、模型权限和账户可用性。');
                 updateTranslateChannelProgress(profile, {
                     status: 'running',
-                    message: '正在预检 Key、Base URL 和模型权限'
+                    message: '正在预检 Key、Base URL、模型权限和账户额度'
                 });
                 await validateTranslateProfileConnection(profile, sourceLang, targetLang, signal);
+                setApiRuntimeHealth(profile, 'online', '预检通过，当前通道可正常调用。');
                 updateTranslateChannelProgress(profile, {
                     status: 'waiting',
                     message: '预检通过，低并发等待开始'
                 });
             } catch (error) {
                 if (error.name === 'AbortError' || signal?.aborted) throw error;
+                const quotaDepleted = isApiQuotaDepletedError(error);
+                setApiRuntimeHealth(
+                    profile,
+                    quotaDepleted ? 'quota' : 'error',
+                    error.message || '预检失败'
+                );
                 updateTranslateChannelProgress(profile, {
                     status: 'failed',
-                    message: error.message || '预检失败'
+                    message: quotaDepleted ? '额度已用尽，未开始翻译' : (error.message || '预检失败')
                 });
                 failures.push({
                     profile,
-                    message: error.message || '未知错误'
+                    message: error.message || '未知错误',
+                    isQuotaDepleted: quotaDepleted
                 });
             }
 
@@ -7303,7 +8751,10 @@ function initTranslateTool() {
             const detail = failures
                 .map(item => `${getApiProfileLabel(item.profile)}：${item.message}`)
                 .join('；');
-            throw new Error(`以下翻译通道预检失败，任务未开始批量翻译：${detail}`);
+            const preflightError = new Error(`以下翻译通道预检失败，任务未开始批量翻译：${detail}`);
+            preflightError.isPreflightFailure = true;
+            preflightError.isQuotaDepleted = failures.some(item => item.isQuotaDepleted);
+            throw preflightError;
         }
     }
 
@@ -7575,6 +9026,7 @@ function initTranslateTool() {
         translationProgressTasks = new Map();
         translateRunConsistencyTerms = [];
         clearImportedTranslateProgress({ keepInput: true });
+        resetTranslateDiscountCheck();
         updateTranslationRunActions();
         fileInfo.style.display = 'none';
         columnSelectSection.style.display = 'none';
@@ -7587,12 +9039,34 @@ function initTranslateTool() {
             const sourceGroups = [];
             const encodings = new Set();
             const skippedHiddenSheets = [];
+            const embeddedReportEntries = [];
+            const embeddedReportTargetLangs = new Set();
+            let embeddedReportSkippedCount = 0;
+            let embeddedReportFileName = '';
             let sourceIndex = 0;
 
             for (const file of fileList) {
                 const parsed = await readSpreadsheetSheets(file);
                 if (parsed.encoding) encodings.add(parsed.encoding);
+                const embeddedReport = findTranslationReportSheet(parsed.sheets || []);
+                if (embeddedReport) {
+                    const parsedReport = parseTranslationReportEntries(
+                        embeddedReport.rows,
+                        embeddedReport.headerIndex
+                    );
+                    if (parsedReport.entries.length) {
+                        embeddedReportEntries.push(...parsedReport.entries);
+                        embeddedReportSkippedCount += parsedReport.skippedCount;
+                        embeddedReportFileName = embeddedReportFileName || file.name;
+                        const inferredTarget = inferTranslateImportTargetLang(
+                            file.name,
+                            embeddedReport.rows
+                        );
+                        if (inferredTarget) embeddedReportTargetLangs.add(inferredTarget);
+                    }
+                }
                 parsed.sheets.forEach(sheet => {
+                    if (embeddedReport?.sheet === sheet) return;
                     if (sheet.hidden) {
                         skippedHiddenSheets.push(`${file.name} / ${sheet.sheetName}`);
                         return;
@@ -7628,6 +9102,35 @@ function initTranslateTool() {
                 ? fileList[0].name.replace(/\.(csv|xlsx|xls)$/i, '')
                 : `批量翻译_${fileList.length}个文件`;
 
+            if (embeddedReportEntries.length) {
+                const entries = dedupeTranslationReportEntries(embeddedReportEntries);
+                const targetLang = embeddedReportTargetLangs.size === 1
+                    ? [...embeddedReportTargetLangs][0]
+                    : '';
+                const reusableEntries = entries.filter(isReusableImportedTranslationEntry);
+                const issueSummary = getTranslationReportIssueSummary(entries);
+                importedTranslateProgressState = {
+                    fileName: embeddedReportFileName || fileList[0]?.name || '',
+                    importedAt: Date.now(),
+                    targetLang,
+                    entries,
+                    reusableEntries,
+                    suspiciousEntries: [],
+                    reviewedAt: 0,
+                    reviewSummary: null,
+                    issueSummary,
+                    selectedIssueFilters: [],
+                    failedOrMissingCount: issueSummary.retryable,
+                    skippedCount: embeddedReportSkippedCount
+                };
+                if (targetLang && targetLangSelect) {
+                    targetLangSelect.value = targetLang;
+                    selectedTranslateTargetLangs = new Set([targetLang]);
+                    renderTranslateTargetLanguageList();
+                }
+                updateTranslateProgressImportStatus();
+            }
+
             document.getElementById('translateFileName').textContent = fileList.length === 1
                 ? fileList[0].name
                 : `${fileList.length} 个文件 / ${translateSources.length} 个工作表`;
@@ -7646,7 +9149,10 @@ function initTranslateTool() {
             const hiddenSkipText = skippedHiddenSheets.length
                 ? `；已跳过 ${skippedHiddenSheets.length} 个隐藏工作表：${skippedHiddenSheets.slice(0, 3).join('、')}${skippedHiddenSheets.length > 3 ? '…' : ''}`
                 : '';
-            setStatus('success', '已载入新文件', `${fileList.length === 1 ? fileList[0].name : `${fileList.length} 个文件`}${hiddenSkipText}`);
+            const embeddedReportText = embeddedReportEntries.length
+                ? `；已自动载入内嵌翻译报告 ${dedupeTranslationReportEntries(embeddedReportEntries).length} 条`
+                : '';
+            setStatus('success', '已载入新文件', `${fileList.length === 1 ? fileList[0].name : `${fileList.length} 个文件`}${hiddenSkipText}${embeddedReportText}`);
             columnSelectSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         } catch (error) {
             console.error('Translate file load error:', error);
@@ -7702,6 +9208,7 @@ function initTranslateTool() {
                 rebuildTranslateSheetData();
                 selectedColumns = [];
                 referenceColumn = null;
+                resetTranslateDiscountCheck();
                 renderTranslateSheetSelectList();
                 renderColumnList();
                 document.getElementById('translateTotalRows').textContent = Math.max(0, (sheetData?.length || 1) - 1);
@@ -7920,6 +9427,7 @@ function initTranslateTool() {
         } else {
             selectedColumns.push(index);
         }
+        resetTranslateDiscountCheck();
         renderColumnList();
     }
 
@@ -8185,19 +9693,47 @@ function initTranslateTool() {
         return String(text || '').match(TRANSLATE_FORMAT_TOKEN_PATTERN) || [];
     }
 
-    function createPlaceholderProtectionContext(fields = {}) {
+    function createPlaceholderProtectionContext(fields = {}, options = {}) {
         const replacements = [];
         let index = 0;
-        const protect = value => String(value || '').replace(TRANSLATE_FORMAT_TOKEN_PATTERN, token => {
+        const protectedUiTokenPolicy = globalThis.NexusProtectedUiTokenPolicy;
+        const sourceFieldKey = Object.prototype.hasOwnProperty.call(fields, 'sourceText')
+            ? 'sourceText'
+            : (Object.prototype.hasOwnProperty.call(fields, 'text') ? 'text' : '');
+        const sourceText = sourceFieldKey ? fields[sourceFieldKey] : '';
+        const protectedUiRequirements = protectedUiTokenPolicy?.getRequirements
+            ? protectedUiTokenPolicy.getRequirements(sourceText, fields.referenceText || '', {
+                projectRules: options.projectRules || currentProject?.rules || ''
+            })
+            : [];
+        const makePlaceholder = token => {
             const placeholder = `__PH_${++index}__`;
             replacements.push({ placeholder, token });
             return placeholder;
-        });
+        };
+        const protect = (value, key) => {
+            let protectedValue = String(value || '').replace(
+                TRANSLATE_FORMAT_TOKEN_PATTERN,
+                token => makePlaceholder(token)
+            );
+            if (
+                key === sourceFieldKey &&
+                protectedUiRequirements.length &&
+                protectedUiTokenPolicy?.replaceProtectedTokens
+            ) {
+                protectedValue = protectedUiTokenPolicy.replaceProtectedTokens(
+                    protectedValue,
+                    protectedUiRequirements,
+                    token => makePlaceholder(token)
+                );
+            }
+            return protectedValue;
+        };
         const protectedFields = {};
         Object.entries(fields).forEach(([key, value]) => {
-            protectedFields[key] = protect(value);
+            protectedFields[key] = protect(value, key);
         });
-        return { fields: protectedFields, replacements };
+        return { fields: protectedFields, replacements, protectedUiRequirements };
     }
 
     function restoreProtectedPlaceholders(text, replacements = []) {
@@ -8525,29 +10061,42 @@ function initTranslateTool() {
         return false;
     }
 
-    function getTargetLanguageLeakageIssues(sourceText, translatedText, targetLang) {
+    function getTargetLanguageLeakageIssues(sourceText, translatedText, targetLang, context = {}) {
         const target = String(translatedText || '');
         const issues = [];
-        const hasChineseHan = /[\u4e00-\u9fff]/.test(target);
-        const hasJapaneseKana = /[\u3040-\u30ff]/.test(target);
-        const hasHangul = /[\uac00-\ud7af]/.test(target);
+        const hardAllowedTerms = (context.glossaryTerms || [])
+            .filter(term => term?.constraint !== 'reference' && term?.target)
+            .map(term => term.target);
+        const carryoverGuard = globalThis.NexusLanguageCarryoverGuard;
+        const guardOptions = {
+            referenceText: context.referenceText || '',
+            allowedTerms: hardAllowedTerms,
+            allowlist: context.englishAllowlist || [],
+            projectRules: context.projectRules || currentProject?.rules || ''
+        };
+        const scriptLeakageResult = carryoverGuard?.evaluateScriptLeakage
+            ? carryoverGuard.evaluateScriptLeakage(sourceText, target, targetLang, guardOptions)
+            : null;
+        if (scriptLeakageResult?.issues?.length) {
+            issues.push(...scriptLeakageResult.issues.map(issue => issue.message || issue).filter(Boolean));
+        }
+        const carryoverResult = carryoverGuard?.evaluateCarryover
+            ? carryoverGuard.evaluateCarryover(sourceText, target, targetLang, guardOptions)
+            : null;
+        if (carryoverResult?.issues?.length) {
+            issues.push(...carryoverResult.issues.map(issue => issue.message || issue).filter(Boolean));
+        }
 
-        if (targetLang === 'ko') {
-            if (hasChineseHan) issues.push('目标韩文中混入中文汉字');
-            if (hasJapaneseKana) issues.push('目标韩文中混入日文假名');
-            if (!hasHangul && /[\p{L}]/u.test(target)) issues.push('目标韩文疑似未翻译成韩文');
-        } else if (['en', 'fr', 'de', 'es', 'pt', 'ru', 'th', 'vi', 'id', 'it', 'ar', 'tr', 'hi', 'fil', 'ms', 'nl', 'pl', 'uk', 'fa', 'ur', 'bn', 'my', 'km', 'lo'].includes(targetLang) && hasChineseHan) {
-            issues.push(`目标${getTranslateLanguageName(targetLang)}中混入中文`);
-        } else if (targetLang === 'ru') {
+        if (targetLang === 'ru' && !carryoverResult?.issues?.length) {
             const sourceTokens = new Set(extractLatinTokensForQa(sourceText).map(normalizeLatinTokenForQa));
             const leakedTokens = extractLatinTokensForQa(target)
                 .filter(token => !isAllowedRussianLatinToken(token, sourceTokens));
             if (leakedTokens.length) {
-                issues.push(`目标俄语中混入英文：${[...new Set(leakedTokens)].slice(0, 6).join(', ')}，需确认是否为固定专名`);
+                issues.push(`英文专名需确认：${[...new Set(leakedTokens)].slice(0, 6).join(', ')}`);
             }
         }
 
-        return issues;
+        return [...new Set(issues)];
     }
 
     function isTranslationQaPassed(qaStatus) {
@@ -8561,11 +10110,19 @@ function initTranslateTool() {
             /缺少格式\/占位符/,
             /多出格式\/占位符/,
             /格式\/占位符顺序不一致/,
+            /受保护UI标记缺失或被翻译/,
             /数字不一致/,
+            /折扣语义不一致/,
+            /折扣翻译缺失/,
             /术语未遵守/,
+            /玩法名疑似沿用英文/,
+            /目标译文疑似照抄英文参考/,
+            /目标译文仍含英文/,
+            /疑似照抄英文参考术语/,
             /混入中文/,
             /混入英文/,
             /混入日文/,
+            /目标.+中混入/,
             /疑似未翻译/,
             /繁简转换不完整/,
             /繁中关键语义缺失/,
@@ -8579,6 +10136,7 @@ function initTranslateTool() {
     }
 
     function getTranslationReportStatus(translatedText, qaStatus) {
+        if (isMissingTranslationResult(translatedText)) return 'missing';
         if (isTranslateFailureText(translatedText)) return 'failed';
         if (!isTranslationQaPassed(qaStatus)) return 'qa_failed';
         return 'success';
@@ -8586,6 +10144,7 @@ function initTranslateTool() {
 
     function isFailedTranslationReportEntry(entry) {
         if (!entry) return false;
+        if (entry.manualResolutionValid === true) return false;
         const status = String(entry.status || '').trim().toLowerCase();
         if (status && status !== 'success') return true;
         if (isTranslateFailureText(entry.translatedText)) return true;
@@ -8609,7 +10168,7 @@ function initTranslateTool() {
         const issueText = getTranslationReportIssueText(entry);
         if (status === 'missing') return true;
         if (/报告缺失|未返回结果|没有出现在导入报告|missing/i.test(issueText)) return true;
-        return !entry.translatedText && Boolean(entry.sourceText || entry.taskKey || entry.rowNumber);
+        return isMissingTranslationResult(entry.translatedText) && Boolean(entry.sourceText || entry.taskKey || entry.rowNumber);
     }
 
     function isLengthSoftRiskTranslationReportEntry(entry) {
@@ -8622,7 +10181,7 @@ function initTranslateTool() {
         const issueText = getTranslationReportIssueText(entry);
         if (status === 'failed' || status === 'error') return true;
         if (isTranslateFailureText(entry.translatedText)) return true;
-        if (/模型翻译失败|输出被截断|返回空译文|请求超时|限流|网络异常|通道异常|格式\/占位符|缺少格式|多出格式|数字不一致|术语未遵守|混入中文|混入英文|混入日文|疑似未翻译|繁简转换不完整|繁中关键语义缺失|逐字空格/.test(issueText)) {
+        if (/模型翻译失败|输出被截断|返回空译文|请求超时|限流|网络异常|通道异常|格式\/占位符|缺少格式|多出格式|数字不一致|折扣语义不一致|折扣翻译缺失|术语未遵守|玩法名疑似沿用英文|目标译文疑似照抄英文参考|目标译文仍含英文|疑似照抄英文参考术语|混入中文|混入英文|混入日文|目标.+中混入|疑似未翻译|繁简转换不完整|繁中关键语义缺失|逐字空格|用户要求重新翻译|修订译文为空|硬错误不能直接接受/.test(issueText)) {
             return true;
         }
         const targetLang = translationRunReport?.targetLang || targetLangSelect?.value || '';
@@ -8635,6 +10194,45 @@ function initTranslateTool() {
         if (isHardTranslationReportEntry(entry)) return 'hard';
         if (isLengthSoftRiskTranslationReportEntry(entry)) return 'length';
         return 'soft';
+    }
+
+    function isActualTranslationFailureReportEntry(entry) {
+        if (!entry) return false;
+        const status = String(entry.status || '').trim().toLowerCase();
+        return status === 'failed' ||
+            status === 'error' ||
+            isMarkedTranslationFailure(entry.translatedText);
+    }
+
+    function getTranslationReportDisplayStatus(entry) {
+        if (entry?.manualResolutionValid && entry?.revisionApplied) {
+            return '人工修订 · 质检通过';
+        }
+        if (entry?.manualResolutionValid && entry?.userDecision === 'accept_current') {
+            return '人工已确认 · 接受现译';
+        }
+        const kind = classifyTranslationReportEntry(entry);
+        if (kind === 'missing') return '未返回译文';
+        if (kind === 'hard') {
+            return isActualTranslationFailureReportEntry(entry)
+                ? '翻译失败'
+                : '已翻译 · 硬质检未通过';
+        }
+        if (kind === 'length') return '已翻译 · 长度需确认';
+        if (kind === 'soft') return '已翻译 · 需人工确认';
+        return '已翻译 · 质检通过';
+    }
+
+    function getTranslationQaDisplayText(entry) {
+        const qaStatus = String(entry?.qaStatus || '');
+        if (!qaStatus) return '';
+        if (isMissingTranslationReportEntry(entry)) {
+            return qaStatus.replace(/^需确认[:：]\s*/, '阻断：');
+        }
+        if (isHardTranslationReportEntry(entry)) {
+            return qaStatus.replace(/^需确认[:：]\s*/, '阻断：');
+        }
+        return qaStatus;
     }
 
     function getTranslationReportIssueGroups(entries = translationRunReport?.entries || []) {
@@ -8657,26 +10255,82 @@ function initTranslateTool() {
     function getTranslationReportIssueSummary(entries = translationRunReport?.entries || []) {
         const groups = getTranslationReportIssueGroups(entries);
         const softRisk = groups.length.length + groups.soft.length;
+        const actualFailed = groups.hard.filter(isActualTranslationFailureReportEntry).length;
+        const hardQa = Math.max(0, groups.hard.length - actualFailed);
+        const failedOrMissing = actualFailed + groups.missing.length;
+        const autoRepairable = failedOrMissing + hardQa;
+        const totalIssues = autoRepairable + softRisk;
+        const success = Math.max(0, (entries || []).length - totalIssues);
         return {
+            success,
             hard: groups.hard.length,
             missing: groups.missing.length,
             length: groups.length.length,
             soft: groups.soft.length,
             softRisk,
-            retryable: groups.hard.length + groups.missing.length,
-            totalFailed: groups.hard.length + groups.missing.length + softRisk
+            actualFailed,
+            failedOrMissing,
+            hardQa,
+            autoRepairable,
+            totalIssues,
+            retryable: autoRepairable,
+            totalFailed: totalIssues
+        };
+    }
+
+    function getTranslationDeliveryGate(entries = translationRunReport?.entries || []) {
+        const policy = globalThis.NexusTranslationDeliveryPolicy;
+        if (policy?.buildDeliveryGate) {
+            return policy.buildDeliveryGate(entries, classifyTranslationReportEntry);
+        }
+        const blockingEntries = (entries || []).filter(entry => {
+            const kind = classifyTranslationReportEntry(entry);
+            return kind === 'missing' || kind === 'hard';
+        });
+        return {
+            ready: blockingEntries.length === 0,
+            blockingCount: blockingEntries.length,
+            blockingEntries
         };
     }
 
     function formatTranslationReportIssueSummary(summary) {
         if (!summary) return '';
         const parts = [
-            `真实失败 ${summary.hard || 0}`,
-            `缺失 ${summary.missing || 0}`,
-            `QA软风险 ${summary.softRisk || 0}`
+            `翻译失败/未返回 ${summary.failedOrMissing || 0}`,
+            `硬质检未通过 ${summary.hardQa || 0}`,
+            `软性需确认 ${summary.softRisk || 0}`
         ];
         if (summary.length) parts.push(`超长 ${summary.length}`);
         return parts.join(' / ');
+    }
+
+    function getTranslationIssueIdentity(item = {}) {
+        const taskKey = item.retryOfTaskKey || item.taskKey;
+        if (taskKey) return `task:${taskKey}`;
+        const sourceFile = item.sourceFile || item.source?.fileName || '';
+        const sheetName = item.sheetName || item.source?.sheetName || '';
+        const rowNumber = item.rowNumber || item.originalRowNumber || (Number.isInteger(item.rowIndex) ? item.rowIndex + 1 : '');
+        const column = item.column || (Number.isInteger(item.colIndex) ? item.colIndex + 1 : '');
+        const model = item.model || item.profile?.model || item.profile?.name || '';
+        const sourceText = item.sourceText || item.text || '';
+        return `fallback:${[sourceFile, sheetName, rowNumber, column, model, sourceText]
+            .map(value => String(value ?? '').trim())
+            .join('\u001f')}`;
+    }
+
+    function getUniqueRepairableTranslationIssueCount(
+        entries = translationRunReport?.entries || [],
+        tasks = failedTranslationTasks
+    ) {
+        const identities = new Set();
+        getDefaultRetryableTranslationReportEntries(entries).forEach(entry => {
+            identities.add(getTranslationIssueIdentity(entry));
+        });
+        (tasks || []).forEach(task => {
+            identities.add(getTranslationIssueIdentity(task));
+        });
+        return identities.size;
     }
 
     function getDefaultRetryableTranslationReportEntries(entries = translationRunReport?.entries || []) {
@@ -8718,8 +10372,14 @@ function initTranslateTool() {
         const target = String(translatedText || '');
         issues.push(...getFormatTokenIssues(sourceText, target));
 
-        const sourceNumbers = extractNumberTokens(sourceText);
-        const targetNumbers = new Set(extractNumberTokens(target));
+        const discountQa = evaluateNexusDiscountTranslation(sourceText, target, targetLang);
+        if (!discountQa.sourceAmbiguous) {
+            issues.push(...(discountQa.issues || []).map(issue => issue.message || issue).filter(Boolean));
+        }
+        const sourceForNumberQa = maskNexusDiscountRanges(sourceText, discountQa.sourceRanges);
+        const targetForNumberQa = maskNexusDiscountRanges(target, discountQa.targetRanges);
+        const sourceNumbers = extractNumberTokens(sourceForNumberQa);
+        const targetNumbers = new Set(extractNumberTokens(targetForNumberQa));
         const missingNumbers = sourceNumbers.filter(number => !targetNumbers.has(number));
         if (missingNumbers.length) issues.push(`数字不一致：${[...new Set(missingNumbers)].join(', ')}`);
 
@@ -8738,7 +10398,10 @@ function initTranslateTool() {
             });
         }
 
-        issues.push(...getTargetLanguageLeakageIssues(sourceText, target, targetLang));
+        issues.push(...getTargetLanguageLeakageIssues(sourceText, target, targetLang, {
+            ...context,
+            glossaryTerms
+        }));
         issues.push(...getAbnormalSpacingIssues(target, targetLang));
         if (isTranslateCompletenessCheckEnabled()) {
             issues.push(...getTranslationCompletenessIssues(sourceText, target, targetLang, context));
@@ -8747,31 +10410,75 @@ function initTranslateTool() {
         if (lengthIssue) issues.push(lengthIssue);
 
         if (isTranslateFailureText(target)) issues.push('模型翻译失败');
-        return issues.length ? `需确认：${issues.join('；')}` : '通过';
+        const uniqueIssues = [...new Set(issues)].filter(Boolean);
+        return uniqueIssues.length ? `需确认：${uniqueIssues.join('；')}` : '通过';
     }
 
     function updateTranslationRunActions() {
         const hasReport = Boolean(translationRunReport);
         const issueSummary = getTranslationReportIssueSummary();
         const reportFailureCount = issueSummary.totalFailed;
-        const reportRepairableCount = issueSummary.retryable;
-        const retryableCount = Math.max(failedTranslationTasks.length, reportRepairableCount);
+        const retryableCount = getUniqueRepairableTranslationIssueCount();
         const hasFailures = retryableCount > 0;
+        const deliveryGate = getTranslationDeliveryGate();
+        const manualExportKinds = globalThis.NexusTranslationDeliveryPolicy?.getManualExportKinds
+            ? globalThis.NexusTranslationDeliveryPolicy.getManualExportKinds(deliveryGate)
+            : (deliveryGate.ready ? ['translated', 'report'] : ['translated_unverified', 'report']);
+        if (translateDownloadTitle) {
+            translateDownloadTitle.textContent = deliveryGate.ready
+                ? '交付版已就绪'
+                : '需要修复后交付';
+        }
+        renderTranslationResultBreakdown();
+        if (downloadBtn) {
+            downloadBtn.style.display = deliveryGate.ready && hasReport ? 'inline-flex' : 'none';
+            downloadBtn.disabled = Boolean(activeTranslateRunId);
+            downloadBtn.classList.add('primary');
+            downloadBtn.classList.remove('secondary');
+            downloadBtn.title = '硬错误已清零，可以保存交付版译文。';
+            if (translateDownloadBtnLabel) {
+                translateDownloadBtnLabel.textContent = '下载交付版';
+            }
+        }
+        if (translateDownloadUnverifiedBtn) {
+            const canExportUnverified = hasReport && manualExportKinds.includes('translated_unverified');
+            translateDownloadUnverifiedBtn.style.display = canExportUnverified ? 'inline-flex' : 'none';
+            translateDownloadUnverifiedBtn.disabled = Boolean(activeTranslateRunId);
+            translateDownloadUnverifiedBtn.textContent = canExportUnverified
+                ? `导出当前译文（未验证 · ${deliveryGate.blockingCount}）`
+                : '导出当前译文（未验证）';
+            translateDownloadUnverifiedBtn.title = canExportUnverified
+                ? `当前仍有 ${deliveryGate.blockingCount} 条阻断问题。导出的文件会命名为 *_translated_unverified.xlsx，不能作为交付版。`
+                : '';
+        }
+        if (!hasReport || deliveryGate.ready) {
+            hideUnverifiedTranslationExportConfirmation();
+        } else if (translateUnverifiedExportMessage) {
+            translateUnverifiedExportMessage.textContent =
+                `当前仍有 ${deliveryGate.blockingCount} 条阻断问题。导出文件会命名为 *_translated_unverified.xlsx，第一页会标注“未验证译文，请勿直接交付”。`;
+        }
         if (downloadReportBtn) downloadReportBtn.style.display = hasReport ? 'inline-flex' : 'none';
-        if (downloadFinalReportBtn) downloadFinalReportBtn.style.display = hasReport ? 'inline-flex' : 'none';
+        if (downloadFinalReportBtn) {
+            downloadFinalReportBtn.style.display = hasReport ? 'inline-flex' : 'none';
+            downloadFinalReportBtn.textContent = deliveryGate.ready ? '下载翻译报告' : '下载问题报告';
+        }
         if (translateRetryImportShortcutBtn) {
             translateRetryImportShortcutBtn.style.display = hasReport || downloadSection.style.display !== 'none'
                 ? 'inline-flex'
                 : 'none';
-            translateRetryImportShortcutBtn.title = '导入某个语言的 translation_report.xlsx 或带翻译报告分页的 translated.xlsx，工具会复用成功项，只补跑失败/缺失项。';
+            translateRetryImportShortcutBtn.title = '导入 translation_report.xlsx 或带翻译报告分页的 translated.xlsx；通过项继续复用，仅重新处理翻译失败、缺失和硬质检问题。';
         }
         if (retryFailedBtn) {
             retryFailedBtn.style.display = hasFailures ? 'inline-flex' : 'none';
             retryFailedBtn.disabled = Boolean(activeTranslateRunId);
-            retryFailedBtn.textContent = retryableCount > 0 ? `补跑失败翻译（${retryableCount}）` : '补跑失败翻译';
+            retryFailedBtn.classList.toggle('primary', hasFailures);
+            retryFailedBtn.classList.toggle('secondary', !hasFailures);
+            retryFailedBtn.textContent = retryableCount > 0
+                ? `一键修复并生成交付版（${retryableCount}）`
+                : '一键修复并生成交付版';
             retryFailedBtn.title = reportFailureCount > retryableCount
-                ? `报告内共有 ${formatTranslationReportIssueSummary(issueSummary)}；默认只补真实失败/缺失，QA软风险不自动消耗 API。`
-                : '补跑真实失败和缺失项；QA软风险请人工确认或使用专门入口处理。';
+                ? `报告内共有 ${formatTranslationReportIssueSummary(issueSummary)}；只自动修复明确问题，软性需确认会保留当前译文。硬错误清零后才生成交付版。`
+                : '自动修复翻译失败、结果缺失和硬质检问题；只有复检通过后才生成交付版。';
         }
         if (translateCompactLongImportedBtn && !importedTranslateProgressState?.entries?.length) {
             const lengthCount = Number(issueSummary.length || 0);
@@ -8824,26 +10531,59 @@ function initTranslateTool() {
         translationExpectedTaskMap = new Map();
         tasks.forEach(task => {
             if (!task?.taskKey) return;
-            translationExpectedTaskMap.set(task.taskKey, createTranslationTaskSnapshot(task));
+            translationExpectedTaskMap.set(task.taskKey, {
+                snapshot: createTranslationTaskSnapshot(task),
+                task
+            });
         });
     }
 
     function ensureTranslationReportCoversExpectedTasks(reason = '本轮预期任务未写入结果，可能通道中断、取消或结果未提交') {
         if (!translationRunReport || translationExpectedTaskMap.size === 0) return;
         const entries = Array.isArray(translationRunReport.entries) ? translationRunReport.entries : [];
-        const existingKeys = new Set(entries.map(entry => entry.taskKey).filter(Boolean));
-        translationExpectedTaskMap.forEach((snapshot, taskKey) => {
-            if (existingKeys.has(taskKey)) return;
-            entries.push({
+        const entriesByKey = new Map(entries.filter(entry => entry?.taskKey).map(entry => [entry.taskKey, entry]));
+        translationExpectedTaskMap.forEach((expectedTask, taskKey) => {
+            const snapshot = expectedTask?.snapshot || expectedTask;
+            const task = expectedTask?.task || null;
+            const existingEntry = entriesByKey.get(taskKey);
+            if (existingEntry) {
+                if (isBlankTranslationResult(existingEntry.translatedText)) {
+                    const failureText = makeTranslateFailureText(snapshot.sourceText, '未返回结果');
+                    if (task) writeTranslationResult(task, failureText, existingEntry.qaStatus || '未返回结果');
+                    Object.assign(existingEntry, snapshot, {
+                        status: 'missing',
+                        translatedText: failureText,
+                        qaStatus: existingEntry.qaStatus || '未返回结果',
+                        completenessRisk: existingEntry.completenessRisk || '',
+                        actionSuggestion: '建议补译',
+                        error: existingEntry.error || reason,
+                        userDecision: '',
+                        revisedText: '',
+                        decisionNote: '',
+                        manualResolutionValid: false,
+                        revisionApplied: false
+                    });
+                }
+                return;
+            }
+            const failureText = makeTranslateFailureText(snapshot.sourceText, '未返回结果');
+            if (task) writeTranslationResult(task, failureText, '未返回结果');
+            const missingEntry = {
                 ...snapshot,
                 status: 'missing',
-                translatedText: '',
+                translatedText: failureText,
                 qaStatus: '未返回结果',
                 completenessRisk: '',
                 actionSuggestion: '建议补译',
-                error: reason
-            });
-            existingKeys.add(taskKey);
+                error: reason,
+                userDecision: '',
+                revisedText: '',
+                decisionNote: '',
+                manualResolutionValid: false,
+                revisionApplied: false
+            };
+            entries.push(missingEntry);
+            entriesByKey.set(taskKey, missingEntry);
         });
         translationRunReport.entries = entries;
     }
@@ -8928,7 +10668,7 @@ function initTranslateTool() {
         if (next.total > 0 && next.completed >= next.total) {
             next.status = next.failed > 0 ? 'warning' : 'done';
             next.message = next.failed > 0
-                ? `已完成，失败/需确认 ${next.failed} 个`
+                ? `已完成，发现问题 ${next.failed} 个`
                 : '已完成全部翻译';
         } else if (!['retrying', 'paused', 'failed', 'warning'].includes(next.status)) {
             next.status = 'running';
@@ -8968,7 +10708,7 @@ function initTranslateTool() {
             const label = getTranslateChannelStatusLabel(state.status);
             const modelText = getModelDisplayName(state.profile?.provider, state.profile?.model);
             const failureText = state.failed > 0
-                ? ` · 失败/需确认 ${state.failed}${state.qaFailed > 0 ? `（QA ${state.qaFailed}）` : ''}`
+                ? ` · 发现问题 ${state.failed}${state.qaFailed > 0 ? `（质检 ${state.qaFailed}）` : ''}`
                 : '';
             const lastText = state.updatedAt && ['running', 'retrying'].includes(state.status)
                 ? ` · 最后更新 ${formatTranslateDuration(Date.now() - state.updatedAt)} 前`
@@ -9008,7 +10748,7 @@ function initTranslateTool() {
         setInspectorField('inspectorEstimateBadge', activeTranslateRunId ? '计时中' : (hasTiming ? '已计时' : '待开始'));
         setInspectorField('inspectorEstimateTime', getTranslateElapsedText());
         setInspectorField('inspectorTaskBatches', `${translateRunSummaryState.completed}/${translateRunSummaryState.total}`);
-        setInspectorField('inspectorTaskFailures', failures > 0 ? `异常 ${failures} 个` : (running || paused ? '暂无异常' : '运行中显示'));
+        setInspectorField('inspectorTaskFailures', failures > 0 ? `问题 ${failures} 个` : (running || paused ? '暂无问题' : '运行中显示'));
     }
 
     function updateTranslateRunSummary(completed, total, phase = '') {
@@ -9027,7 +10767,7 @@ function initTranslateTool() {
         if (progressInfo && progressSection.style.display !== 'none') {
             const statusPrefix = isPaused ? '翻译已暂停' : (translateRunSummaryState.phase || '正在翻译');
             const languageText = getTranslateLanguageRunHeadline();
-            progressInfo.textContent = `${statusPrefix}${languageText ? `：${languageText}` : ''}...（已完成 ${translateRunSummaryState.completed}/${translateRunSummaryState.total} 个，用时 ${getTranslateElapsedText()}${failures ? `，失败/需确认 ${failures} 个` : ''}${activeText ? `，${activeText}` : ''}）`;
+            progressInfo.textContent = `${statusPrefix}${languageText ? `：${languageText}` : ''}...（已完成 ${translateRunSummaryState.completed}/${translateRunSummaryState.total} 个，用时 ${getTranslateElapsedText()}${failures ? `，发现问题 ${failures} 个` : ''}${activeText ? `，${activeText}` : ''}）`;
         }
         renderTranslateLanguageRunStatus();
         updateTranslateInspectorRuntime();
@@ -9054,15 +10794,17 @@ function initTranslateTool() {
             : (Array.isArray(progress?.translationRunReport?.entries) ? progress.translationRunReport.entries : []);
         const entriesByKey = new Map();
         rawEntries.forEach(entry => {
-            if (!entry?.taskKey) return;
-            entriesByKey.set(entry.taskKey, { ...entry });
+            const compactEntry = compactTranslationProgressEntry(entry);
+            if (!compactEntry) return;
+            entriesByKey.set(compactEntry.taskKey, compactEntry);
         });
         return [...entriesByKey.values()];
     }
 
     function countTranslationProgressEntries(entries = [...translationProgressTasks.values()]) {
         return entries.reduce((counts, entry) => {
-            if (entry.status === 'failed' || entry.status === 'qa_failed' || isTranslateFailureText(entry.translatedText)) {
+            const status = String(entry?.status || '').trim().toLowerCase();
+            if (['failed', 'missing', 'error', 'qa_failed'].includes(status) || isTranslateFailureText(entry?.translatedText)) {
                 counts.failCount++;
             } else {
                 counts.successCount++;
@@ -9130,23 +10872,35 @@ function initTranslateTool() {
         if (/疑似内容流失/.test(text)) risks.push('疑似内容流失');
         if (/繁简转换不完整/.test(text)) risks.push('繁简转换不完整');
         if (/繁中关键语义缺失/.test(text)) risks.push('繁中关键语义缺失');
-        if (/混入英文|混入中文|疑似照抄英文/.test(text)) risks.push('语言混入风险');
+        if (/混入英文|混入中文|目标.+中混入|疑似照抄英文|目标译文仍含英文|玩法名疑似沿用英文|英文玩法名需确认|英文专名需确认|英文参考短语需确认|英文参考词需确认|源文英文专名需确认|游戏借词|英文词需确认|与中文原文高度一致/.test(text)) {
+            risks.push('语言混入风险');
+        }
+        if (/受保护UI标记缺失或被翻译/.test(text)) risks.push('等级/UI 标记不一致');
         if (/译文明显短于参考译文/.test(text)) risks.push('明显短于参考译文');
         if (/括号\/引号结构/.test(text)) risks.push('结构信息可能缺失');
         return [...new Set(risks)].join('；');
     }
 
     function getTranslationActionSuggestion(status, qaStatus = '') {
-        if (status === 'failed') return '建议补译';
+        if (status === 'failed' || status === 'missing') return '建议重新翻译';
         if (/译文长度超出建议/.test(String(qaStatus || ''))) return '可二次精简；精简失败则保留原译文人工确认';
-        const completenessRisk = getTranslationCompletenessRiskLabel(qaStatus);
-        if (completenessRisk) return '建议复查原文和译文，确认后只补译该行';
-        if (status === 'qa_failed') return '建议人工确认或补译';
+        if (status === 'qa_failed') {
+            const hardQa = isHardTranslationReportEntry({
+                status,
+                translatedText: '已有译文',
+                qaStatus
+            });
+            if (hardQa) return '阻断交付：必须重新翻译或填写修订译文';
+            const completenessRisk = getTranslationCompletenessRiskLabel(qaStatus);
+            if (completenessRisk) return '建议复查原文和译文；确认可用后选择“接受现译”';
+            return '保留当前译文，建议人工确认';
+        }
         return '';
     }
 
     function buildTranslationReportEntry(task, translated, qaStatus = '') {
-        const status = getTranslationReportStatus(translated, qaStatus);
+        const normalizedTranslated = normalizeTranslateResultText(translated, task.text);
+        const status = getTranslationReportStatus(normalizedTranslated, qaStatus);
         const qaTerms = task.glossaryTerms || [];
         const completenessRisk = getTranslationCompletenessRiskLabel(qaStatus);
         return {
@@ -9160,12 +10914,19 @@ function initTranslateTool() {
             model: task.profile?.model || '',
             sourceText: task.text,
             referenceText: task.referenceText || '',
-            translatedText: translated,
+            translatedText: normalizedTranslated,
             glossary: qaTerms.map(formatTranslateGlossaryTerm).join('; '),
             qaStatus,
             completenessRisk,
             actionSuggestion: getTranslationActionSuggestion(status, qaStatus),
-            error: status === 'failed' ? translated : (status === 'qa_failed' ? qaStatus : '')
+            error: status === 'failed' || status === 'missing'
+                ? normalizedTranslated
+                : (status === 'qa_failed' ? qaStatus : ''),
+            userDecision: '',
+            revisedText: '',
+            decisionNote: '',
+            manualResolutionValid: false,
+            revisionApplied: false
         };
     }
 
@@ -9212,28 +10973,79 @@ function initTranslateTool() {
         renderColumnList();
     }
 
-    function restoreCompletedTranslationTasks(tasks, savedEntries) {
+    function restoreCompletedTranslationTasks(tasks, savedEntries, targetLang = '') {
         const taskKeys = new Set(tasks.map(task => task.taskKey));
         const entries = savedEntries.filter(entry => taskKeys.has(entry.taskKey));
-        translationProgressTasks = new Map(entries.map(entry => [entry.taskKey, entry]));
         const entriesByKey = new Map(entries.map(entry => [entry.taskKey, entry]));
+        const completedTaskKeys = new Set();
+        translationProgressTasks = new Map();
         const restoredReportEntries = [];
 
         tasks.forEach(task => {
             const entry = entriesByKey.get(task.taskKey);
             if (!entry) return;
-            const translated = entry.translatedText || makeTranslateFailureText(task.text);
-            writeTranslationResult(task, translated, entry.qaStatus || '');
-            restoredReportEntries.push(buildTranslationReportEntry(task, translated, entry.qaStatus || ''));
+            const savedStatus = String(entry.status || '').trim().toLowerCase();
+            const canRestoreAsCompleted =
+                !['failed', 'missing', 'error'].includes(savedStatus) &&
+                !isTranslateFailureText(entry.translatedText);
+            if (!canRestoreAsCompleted) return;
+
+            const translated = normalizeTranslateResultText(entry.translatedText, task.text);
+            const currentQaStatus = summarizeTranslationQa(
+                task.text,
+                translated,
+                task.glossaryTerms || [],
+                targetLang || translationRunReport?.targetLang || targetLangSelect?.value || '',
+                task
+            );
+            const reportEntry = buildTranslationReportEntry(task, translated, currentQaStatus);
+            const decisionPolicy = globalThis.NexusTranslationDeliveryPolicy;
+            const userDecision = decisionPolicy?.normalizeDecision
+                ? decisionPolicy.normalizeDecision(entry.userDecision)
+                : (entry.userDecision || '');
+            const currentKind = classifyTranslationReportEntry(reportEntry);
+            const manualResolutionValid = decisionPolicy?.isManualResolutionValid
+                ? decisionPolicy.isManualResolutionValid(
+                    userDecision,
+                    currentKind,
+                    isTranslationQaPassed(currentQaStatus)
+                )
+                : (
+                    (userDecision === 'accept_current' && ['success', 'soft', 'length'].includes(currentKind)) ||
+                    (userDecision === 'use_revision' && isTranslationQaPassed(currentQaStatus))
+                );
+            Object.assign(reportEntry, {
+                userDecision,
+                revisedText: entry.revisedText || '',
+                decisionNote: entry.decisionNote || '',
+                manualResolutionValid,
+                revisionApplied: userDecision === 'use_revision' && Boolean(entry.revisionApplied)
+            });
+            if (userDecision === 'must_retry') {
+                reportEntry.status = 'qa_failed';
+                reportEntry.qaStatus = appendTranslationQaIssue(reportEntry.qaStatus, '用户要求重新翻译');
+                reportEntry.completenessRisk = '用户要求重新翻译';
+                reportEntry.actionSuggestion = '阻断交付：重新翻译该行';
+                reportEntry.error = reportEntry.qaStatus;
+            } else if (reportEntry.manualResolutionValid) {
+                reportEntry.status = 'success';
+            }
+            writeTranslationResult(task, translated, reportEntry.qaStatus);
+            restoredReportEntries.push(reportEntry);
+            const compactEntry = compactTranslationProgressEntry(reportEntry);
+            if (compactEntry) translationProgressTasks.set(task.taskKey, compactEntry);
+            if (!isRepairableTranslationReportEntry(reportEntry)) {
+                completedTaskKeys.add(task.taskKey);
+            }
         });
         if (translationRunReport) {
             translationRunReport.entries = restoredReportEntries;
         }
 
-        const counts = countTranslationProgressEntries(entries);
+        const counts = countTranslationProgressEntries([...translationProgressTasks.values()]);
         successCount = counts.successCount;
         failCount = counts.failCount;
-        return tasks.filter(task => !entriesByKey.has(task.taskKey));
+        return tasks.filter(task => !completedTaskKeys.has(task.taskKey));
     }
 
     function normalizeTranslateImportKeyPart(value) {
@@ -9306,10 +11118,39 @@ function initTranslateTool() {
         return null;
     }
 
-    function buildImportedTranslationRestoreEntries(tasks = [], targetLang = '') {
+    function buildImportedTranslationRestoreEntries(tasks = [], targetLang = '', options = {}) {
         const state = importedTranslateProgressState;
         if (!state?.entries?.length) {
             return { entries: [], matched: 0, unmatched: 0, skippedTargetMismatch: 0 };
+        }
+        if (state.targetLang && targetLang && state.targetLang !== targetLang) {
+            return {
+                entries: [],
+                matched: 0,
+                unmatched: 0,
+                skippedTargetMismatch: state.entries.length
+            };
+        }
+
+        const reviewedStateEntries = targetLang
+            ? (state.entries || []).map(entry => buildReviewedImportedTranslationEntry(entry, targetLang))
+            : (state.entries || []);
+        if (targetLang) {
+            const issueSummary = getTranslationReportIssueSummary(reviewedStateEntries);
+            state.entries = reviewedStateEntries;
+            state.targetLang = state.targetLang || targetLang;
+            state.reviewedAt = Date.now();
+            state.issueSummary = issueSummary;
+            state.failedOrMissingCount = issueSummary.retryable;
+            state.reusableEntries = reviewedStateEntries.filter(isReusableImportedTranslationEntry);
+            state.suspiciousEntries = reviewedStateEntries.filter(entry =>
+                entry.status === 'missing' ||
+                (
+                    entry.status === 'qa_failed' &&
+                    entry.translatedText &&
+                    !isTranslateFailureText(entry.translatedText)
+                )
+            );
         }
 
         const taskByKey = new Map(tasks.map(task => [task.taskKey, task]));
@@ -9319,10 +11160,14 @@ function initTranslateTool() {
         const entries = [];
         let unmatched = 0;
         let skippedTargetMismatch = 0;
-        const restoreCandidates = (state.entries || []).filter(entry => {
+        const includeQaFailed = Boolean(options.includeQaFailed);
+        const restoreCandidates = reviewedStateEntries.filter(entry => {
             if (!entry?.translatedText || isTranslateFailureText(entry.translatedText)) return false;
             const kind = classifyTranslationReportEntry(entry);
-            return kind === 'success' || kind === 'length' || kind === 'soft';
+            return includeQaFailed ||
+                kind === 'success' ||
+                kind === 'length' ||
+                kind === 'soft';
         });
 
         restoreCandidates.forEach(entry => {
@@ -9338,12 +11183,17 @@ function initTranslateTool() {
             usedTaskKeys.add(task.taskKey);
             entries.push({
                 taskKey: task.taskKey,
-                status: entry.status || 'success',
+                status: entry.manualResolutionValid ? 'success' : (entry.status || 'success'),
                 translatedText: entry.translatedText,
-                qaStatus: entry.qaStatus || '通过',
+                qaStatus: entry.qaStatus || '',
                 completenessRisk: entry.completenessRisk || '',
                 actionSuggestion: entry.actionSuggestion || '',
-                error: ''
+                error: '',
+                userDecision: entry.userDecision || '',
+                revisedText: entry.revisedText || '',
+                decisionNote: entry.decisionNote || '',
+                manualResolutionValid: Boolean(entry.manualResolutionValid),
+                revisionApplied: Boolean(entry.revisionApplied)
             });
         });
 
@@ -9356,61 +11206,154 @@ function initTranslateTool() {
     }
 
     function buildReviewedImportedTranslationEntry(entry, targetLang = '') {
-        if (!isReusableImportedTranslationEntry(entry)) return { ...entry };
-        const issues = [
-            ...getFormatTokenIssues(entry.sourceText || '', entry.translatedText || ''),
-            ...getTargetLanguageLeakageIssues(entry.sourceText || '', entry.translatedText || '', targetLang),
-            ...getAbnormalSpacingIssues(entry.translatedText || '', targetLang),
-            ...getTranslationCompletenessIssues(entry.sourceText || '', entry.translatedText || '', targetLang, {
-                referenceText: entry.referenceText || ''
-            })
-        ];
-        const lengthIssue = getTranslationLengthIssue(entry.sourceText || '', entry.translatedText || '', targetLang, {
-            referenceText: entry.referenceText || ''
-        });
-        if (lengthIssue) issues.push(lengthIssue);
-        const sourceNumbers = extractNumberTokens(entry.sourceText || '');
-        const targetNumbers = new Set(extractNumberTokens(entry.translatedText || ''));
-        const missingNumbers = sourceNumbers.filter(number => !targetNumbers.has(number));
-        if (missingNumbers.length) issues.push(`数字不一致：${[...new Set(missingNumbers)].join(', ')}`);
+        const policy = globalThis.NexusTranslationDeliveryPolicy;
+        const selection = policy?.selectImportedTranslation
+            ? policy.selectImportedTranslation(entry)
+            : {
+                decision: '',
+                candidateText: entry?.translatedText || '',
+                revisionApplied: false,
+                forceRetry: false,
+                acceptRequested: false,
+                decisionError: ''
+            };
+        const baseEntry = {
+            ...entry,
+            userDecision: selection.decision || '',
+            translatedText: selection.candidateText,
+            manualResolutionValid: false,
+            revisionApplied: Boolean(selection.revisionApplied)
+        };
 
-        const uniqueIssues = [...new Set(issues)].filter(Boolean);
-        if (!uniqueIssues.length) {
+        if (selection.decisionError) {
+            const qaStatus = `需确认：${selection.decisionError}`;
             return {
-                ...entry,
-                status: 'success',
-                qaStatus: entry.qaStatus || '通过',
-                completenessRisk: '',
-                actionSuggestion: ''
+                ...baseEntry,
+                status: 'qa_failed',
+                qaStatus,
+                completenessRisk: '人工处理决定无效',
+                actionSuggestion: '阻断交付：补充修订译文，或把处理决定改为“必须重译”',
+                error: qaStatus
             };
         }
 
-        const qaStatus = `需确认：${uniqueIssues.join('；')}`;
-        return {
-            ...entry,
-            status: 'qa_failed',
-            qaStatus,
-            completenessRisk: getTranslationCompletenessRiskLabel(qaStatus) || '译后复查风险',
-            actionSuggestion: getTranslationActionSuggestion('qa_failed', qaStatus),
-            error: qaStatus
-        };
+        if (selection.forceRetry) {
+            const qaStatus = '需确认：用户要求重新翻译';
+            return {
+                ...baseEntry,
+                status: 'qa_failed',
+                qaStatus,
+                completenessRisk: '用户要求重新翻译',
+                actionSuggestion: '阻断交付：重新翻译该行',
+                error: qaStatus
+            };
+        }
+
+        const importedStatus = normalizeImportedTranslationStatus(baseEntry);
+        if (
+            !baseEntry.translatedText ||
+            (
+                !selection.revisionApplied &&
+                (
+                    ['failed', 'missing'].includes(importedStatus) ||
+                    isTranslateFailureText(baseEntry.translatedText)
+                )
+            )
+        ) {
+            return { ...baseEntry, status: importedStatus };
+        }
+        const sourceText = entry.sourceText || '';
+        const referenceText = entry.referenceText || '';
+        const translatedText = baseEntry.translatedText || '';
+        const currentTerms = getRelevantTranslateGlossaryTerms(
+            [sourceText, referenceText],
+            getSelectedTranslateGlossaryTerms(),
+            targetLang,
+            24
+        );
+        const qaStatus = summarizeTranslationQa(
+            sourceText,
+            translatedText,
+            currentTerms,
+            targetLang,
+            {
+                referenceText,
+                glossaryTerms: currentTerms,
+                projectRules: currentProject?.rules || ''
+            }
+        );
+        let reviewedEntry;
+        if (isTranslationQaPassed(qaStatus)) {
+            reviewedEntry = {
+                ...baseEntry,
+                status: 'success',
+                qaStatus: '通过',
+                completenessRisk: '',
+                actionSuggestion: '',
+                error: ''
+            };
+        } else {
+            reviewedEntry = {
+                ...baseEntry,
+                status: 'qa_failed',
+                qaStatus,
+                completenessRisk: getTranslationCompletenessRiskLabel(qaStatus) || '译后复查风险',
+                actionSuggestion: getTranslationActionSuggestion('qa_failed', qaStatus),
+                error: qaStatus
+            };
+        }
+
+        if (selection.acceptRequested) {
+            const kind = classifyTranslationReportEntry(reviewedEntry);
+            const canAccept = policy?.canAcceptCurrentKind
+                ? policy.canAcceptCurrentKind(kind)
+                : ['success', 'soft', 'length'].includes(kind);
+            if (canAccept) {
+                return {
+                    ...reviewedEntry,
+                    status: 'success',
+                    manualResolutionValid: true,
+                    completenessRisk: reviewedEntry.completenessRisk || '',
+                    actionSuggestion: '人工已确认接受现译',
+                    error: ''
+                };
+            }
+            const blockedQa = appendTranslationQaIssue(
+                reviewedEntry.qaStatus,
+                '硬错误不能直接接受，必须重译或提供修订译文'
+            );
+            return {
+                ...reviewedEntry,
+                status: 'qa_failed',
+                qaStatus: blockedQa,
+                manualResolutionValid: false,
+                actionSuggestion: '阻断交付：改为“必须重译”，或填写修订译文后选择“使用修订译文”',
+                error: blockedQa
+            };
+        }
+
+        if (selection.revisionApplied && isTranslationQaPassed(reviewedEntry.qaStatus)) {
+            reviewedEntry.manualResolutionValid = true;
+            reviewedEntry.actionSuggestion = '人工修订已通过复检';
+        }
+        return reviewedEntry;
     }
 
     function reviewImportedTranslationCompleteness() {
         const state = importedTranslateProgressState;
         if (!state?.entries?.length) {
             alert('请先导入之前下载的翻译报告或带“翻译报告”分页的译文文件。');
-            return;
+            return false;
         }
         const currentTargetLang = targetLangSelect?.value || document.getElementById('targetLang')?.value || '';
         const targetLang = state.targetLang || currentTargetLang;
         if (!targetLang) {
             alert('请先选择目标语言，工具需要知道按哪种语言规则复查。');
-            return;
+            return false;
         }
         if (state.targetLang && currentTargetLang && state.targetLang !== currentTargetLang) {
             const confirmed = confirm(`导入报告疑似为 ${getTranslateLanguageName(state.targetLang)}，当前页面选择的是 ${getTranslateLanguageName(currentTargetLang)}。\n\n将按导入报告语言复查，是否继续？`);
-            if (!confirmed) return;
+            if (!confirmed) return false;
         }
 
         const reviewedEntries = state.entries.map(entry => buildReviewedImportedTranslationEntry(entry, targetLang));
@@ -9451,10 +11394,11 @@ function initTranslateTool() {
         updateTranslateProgressImportStatus();
         if (suspiciousEntries.length) {
             const missingText = reportMissingEntries.length ? `，其中 ${reportMissingEntries.length} 条是报告缺失任务` : '';
-            setStatus('warning', '复查完成，发现可疑译文', `共 ${suspiciousEntries.length} 条疑似漏译/不完整${missingText}。可点击“只补译可疑行”低成本补跑。`);
+            setStatus('warning', '复查完成，发现可疑译文', `共 ${suspiciousEntries.length} 条疑似漏译/不完整${missingText}。可直接补译可疑行，也可在“定向重译问题类型”里只勾选混入中文等类型。`);
         } else {
             setStatus('success', '复查完成', '未发现明显漏译或内容不完整风险。');
         }
+        return true;
     }
 
     function importedEntryMatchesTask(entry, task) {
@@ -9512,12 +11456,12 @@ function initTranslateTool() {
                 glossary: '',
                 qaStatus: '报告缺失：该任务没有出现在导入报告中',
                 completenessRisk: '报告缺失',
-                actionSuggestion: '补跑该行',
+                actionSuggestion: '重新处理该行',
                 error: '导入报告缺少该任务记录'
             }));
     }
 
-    function initializeTranslateOutputFromImportedReport(tasks = [], targetLang = '') {
+    function initializeTranslateOutputFromImportedReport(tasks = [], targetLang = '', options = {}) {
         translateSources.forEach(source => {
             source.outputRows = (source.rows || []).map(row => Array.isArray(row) ? [...row] : []);
             source.outputHeader = source.outputRows[0] || [];
@@ -9536,28 +11480,31 @@ function initTranslateTool() {
         };
         translationProgressTasks = new Map();
         failedTranslationTasks = [];
-        const restored = buildImportedTranslationRestoreEntries(tasks, targetLang);
+        const restored = buildImportedTranslationRestoreEntries(tasks, targetLang, options);
         if (restored.entries.length) {
-            restoreCompletedTranslationTasks(tasks, restored.entries);
+            restoreCompletedTranslationTasks(tasks, restored.entries, targetLang);
         }
         return restored;
     }
 
     async function retrySuspiciousImportedTranslations() {
         const state = importedTranslateProgressState;
-        if (!state?.suspiciousEntries?.length) {
-            alert('没有需要补译的可疑行。请先导入报告并点击“复查已完成译文”。');
+        const retryPreview = getImportedIssueRetryPreview(state);
+        if (!retryPreview.entries.length) {
+            alert(retryPreview.custom
+                ? '所选问题类型没有可重译的行。请换一个报告问题类型，或先点击“复查已完成译文”。'
+                : '没有需要补译的可疑行。请先导入报告并点击“复查已完成译文”，或在“定向重译问题类型”里勾选要处理的问题。');
             return;
         }
         if (!sheetData || !translateSources.length) {
-            alert('请先上传与报告对应的原文件，再补译可疑行。');
+            alert('请先上传与报告对应的原文件，再补译报告问题行。');
             return;
         }
         if (selectedColumns.length === 0) {
             columnSelectSection.style.display = 'block';
             renderColumnList();
             columnSelectSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            alert('请先选择要翻译的原文列，工具需要用它定位可疑行。');
+            alert('请先选择要翻译的原文列，工具需要用它定位报告问题行。');
             return;
         }
         const activeProfiles = getSelectedTranslateProfiles();
@@ -9574,7 +11521,7 @@ function initTranslateTool() {
         const allTasks = collectTranslationTasks(activeProfiles);
         const retryTasks = [];
         const usedTaskKeys = new Set();
-        state.suspiciousEntries.forEach(entry => {
+        retryPreview.entries.forEach(entry => {
             const task = findTaskForImportedTranslationEntry(entry, allTasks);
             if (!task || usedTaskKeys.has(task.taskKey)) return;
             retryTasks.push(task);
@@ -9582,15 +11529,27 @@ function initTranslateTool() {
         });
 
         if (!retryTasks.length) {
-            setStatus('error', '未定位到可疑行', '请确认当前上传文件、工作表、所选列与导入报告来自同一次翻译。');
+            setStatus('error', '未定位到报告问题行', '请确认当前上传文件、工作表、所选列与导入报告来自同一次翻译。');
             return;
         }
 
         initializeTranslateOutputFromImportedReport(allTasks, targetLang);
         failedTranslationTasks = retryTasks;
         updateTranslationRunActions();
-        setStatus('processing', '已准备可疑行补译', `定位到 ${retryTasks.length}/${state.suspiciousEntries.length} 条可疑行，将复用其余成功译文。`);
+        const retryScope = retryPreview.custom
+            ? `所选问题类型（${formatImportedIssueFilterSelection(retryPreview)}）`
+            : '可疑行';
+        setStatus('processing', `已准备${retryScope}补译`, `定位到 ${retryTasks.length}/${retryPreview.entries.length} 条报告问题行，将复用其余成功译文。`);
         await retryFailedTranslations({ skipConfirm: true, deferAutoQaRepair: true });
+    }
+
+    async function handleTranslatePrimaryAction() {
+        const retryPreview = getImportedIssueRetryPreview(importedTranslateProgressState);
+        if (retryPreview.custom) {
+            await retrySuspiciousImportedTranslations();
+            return;
+        }
+        await startTranslate();
     }
 
     function appendTranslationQaIssue(qaStatus, issue) {
@@ -9616,7 +11575,7 @@ function initTranslateTool() {
         return issues.some(issue => !/译文长度超出建议/.test(issue));
     }
 
-    function upsertTranslationRunReportEntry(task, translated, qaStatus = '') {
+    function upsertTranslationRunReportEntry(task, translated, qaStatus = '', options = {}) {
         translationRunReport = translationRunReport || {
             createdAt: new Date().toISOString(),
             sourceName: originalFileName,
@@ -9632,6 +11591,40 @@ function initTranslateTool() {
             entry.taskKey === task.taskKey ||
             importedEntryMatchesTask(entry, task)
         );
+        const existingEntry = existingIndex >= 0 ? entries[existingIndex] : null;
+        if (options.preserveResolution && existingEntry) {
+            const decisionPolicy = globalThis.NexusTranslationDeliveryPolicy;
+            const userDecision = decisionPolicy?.normalizeDecision
+                ? decisionPolicy.normalizeDecision(existingEntry.userDecision)
+                : (existingEntry.userDecision || '');
+            const currentKind = classifyTranslationReportEntry(reportEntry);
+            const manualResolutionValid = decisionPolicy?.isManualResolutionValid
+                ? decisionPolicy.isManualResolutionValid(
+                    userDecision,
+                    currentKind,
+                    isTranslationQaPassed(reportEntry.qaStatus)
+                )
+                : (
+                    (userDecision === 'accept_current' && ['success', 'soft', 'length'].includes(currentKind)) ||
+                    (userDecision === 'use_revision' && isTranslationQaPassed(reportEntry.qaStatus))
+                );
+            Object.assign(reportEntry, {
+                userDecision,
+                revisedText: existingEntry.revisedText || '',
+                decisionNote: existingEntry.decisionNote || '',
+                manualResolutionValid,
+                revisionApplied: userDecision === 'use_revision' && Boolean(existingEntry.revisionApplied)
+            });
+            if (userDecision === 'must_retry') {
+                reportEntry.status = 'qa_failed';
+                reportEntry.qaStatus = appendTranslationQaIssue(reportEntry.qaStatus, '用户要求重新翻译');
+                reportEntry.completenessRisk = '用户要求重新翻译';
+                reportEntry.actionSuggestion = '阻断交付：重新翻译该行';
+                reportEntry.error = reportEntry.qaStatus;
+            } else if (manualResolutionValid) {
+                reportEntry.status = 'success';
+            }
+        }
         if (existingIndex >= 0) entries[existingIndex] = reportEntry;
         else entries.push(reportEntry);
         translationRunReport.entries = entries;
@@ -9669,9 +11662,43 @@ function initTranslateTool() {
                 return;
             }
             usedTaskKeys.add(task.taskKey);
-            const qaStatus = entry.qaStatus || summarizeTranslationQa(task.text, entry.translatedText, task.glossaryTerms || [], targetLang, task);
-            writeTranslationResult(task, entry.translatedText, qaStatus);
-            upsertTranslationRunReportEntry(task, entry.translatedText, qaStatus);
+            const qaStatus = summarizeTranslationQa(task.text, entry.translatedText, task.glossaryTerms || [], targetLang, task);
+            const restoredReportEntry = upsertTranslationRunReportEntry(task, entry.translatedText, qaStatus);
+            const decisionPolicy = globalThis.NexusTranslationDeliveryPolicy;
+            const userDecision = decisionPolicy?.normalizeDecision
+                ? decisionPolicy.normalizeDecision(entry.userDecision)
+                : (entry.userDecision || '');
+            const currentKind = classifyTranslationReportEntry(restoredReportEntry);
+            const manualResolutionValid = decisionPolicy?.isManualResolutionValid
+                ? decisionPolicy.isManualResolutionValid(
+                    userDecision,
+                    currentKind,
+                    isTranslationQaPassed(qaStatus)
+                )
+                : (
+                    (userDecision === 'accept_current' && ['success', 'soft', 'length'].includes(currentKind)) ||
+                    (userDecision === 'use_revision' && isTranslationQaPassed(qaStatus))
+                );
+            Object.assign(restoredReportEntry, {
+                userDecision,
+                revisedText: entry.revisedText || '',
+                decisionNote: entry.decisionNote || '',
+                manualResolutionValid,
+                revisionApplied: userDecision === 'use_revision' && Boolean(entry.revisionApplied)
+            });
+            if (userDecision === 'must_retry') {
+                restoredReportEntry.status = 'qa_failed';
+                restoredReportEntry.qaStatus = appendTranslationQaIssue(restoredReportEntry.qaStatus, '用户要求重新翻译');
+                restoredReportEntry.completenessRisk = '用户要求重新翻译';
+                restoredReportEntry.actionSuggestion = '阻断交付：重新翻译该行';
+                restoredReportEntry.error = restoredReportEntry.qaStatus;
+            } else if (restoredReportEntry.manualResolutionValid) {
+                restoredReportEntry.status = 'success';
+            }
+            writeTranslationResult(task, entry.translatedText, restoredReportEntry.qaStatus);
+            const compactEntry = compactTranslationProgressEntry(restoredReportEntry);
+            if (compactEntry) translationProgressTasks.set(task.taskKey, compactEntry);
+            queueTranslationTaskProgress(restoredReportEntry);
             matched++;
         });
 
@@ -9926,23 +11953,36 @@ function initTranslateTool() {
             downloadSection.style.display = 'block';
             updateTranslationRunActions();
 
+            const deliveryGate = getTranslationDeliveryGate();
             let autoSaveMessage = '';
             try {
                 const savedPaths = await autoSaveTranslationOutputs();
-                autoSaveMessage = savedPaths.length ? `；已自动保存：${savedPaths.join('；')}` : '';
+                autoSaveMessage = deliveryGate.ready
+                    ? (savedPaths.length ? `；已自动保存：${savedPaths.join('；')}` : '')
+                    : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版${savedPaths.length ? `；问题报告已保存：${savedPaths.join('；')}` : ''}`;
             } catch (saveError) {
                 console.warn('超长精简结果自动保存失败:', saveError);
-                autoSaveMessage = '；自动保存失败，请点击下载按钮手动保存';
+                autoSaveMessage = deliveryGate.ready
+                    ? '；自动保存失败，请点击下载按钮手动保存'
+                    : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版；问题报告自动保存失败`;
             }
-            setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}超长精简完成：采纳 ${accepted} 条，保留原译文 ${keptOriginal} 条。`);
+            setTranslateDownloadLanguageSummary(
+                deliveryGate.ready
+                    ? `${getTranslateLanguageName(targetLang)}超长精简完成：采纳 ${accepted} 条，保留原译文 ${keptOriginal} 条；交付版可用。`
+                    : `${getTranslateLanguageName(targetLang)}超长精简完成，但仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版。`
+            );
             setStatus(
-                keptOriginal > 0 ? 'warning' : 'success',
-                '超长译文精简完成',
+                keptOriginal > 0 || !deliveryGate.ready ? 'warning' : 'success',
+                deliveryGate.ready ? '超长译文精简完成' : '精简完成，仍有阻断问题',
                 `已处理 ${completed}/${compactJobs.length} 条；采纳 ${accepted} 条，保留原译文 ${keptOriginal} 条。${autoSaveMessage}`
             );
+            if (keptOriginal > 0 || !deliveryGate.ready) {
+                finishInspectorTaskTimer('warning', deliveryGate.ready ? '超长译文精简完成，有内容待确认' : '精简完成，仍有阻断问题');
+            }
         } catch (error) {
             if (error.name === 'AbortError' || error.message === 'TRANSLATION_CANCELLED') {
                 setStatus('warning', '超长精简已取消', '已保留当前已处理的译文，可下载当前进度或重新导入报告继续。');
+                finishInspectorTaskTimer('warning', '超长精简已取消');
             } else {
                 recordClientError('compact-long-translation', error);
                 setStatus('error', '超长精简失败', error?.message || '未知错误');
@@ -10033,8 +12073,15 @@ function initTranslateTool() {
         const cols = ensureTranslateOutputColumn(task);
         const outputRowIndex = task.originalRowIndex ?? task.rowIndex;
         const row = outputRows[outputRowIndex] || [];
-        row[cols.translationCol] = translated;
-        if (cols.qaCol >= 0) row[cols.qaCol] = qaStatus;
+        const normalizedTranslated = normalizeTranslateResultText(translated, task.text);
+        row[cols.translationCol] = normalizedTranslated;
+        if (cols.qaCol >= 0) {
+            row[cols.qaCol] = getTranslationQaDisplayText({
+                status: getTranslationReportStatus(normalizedTranslated, qaStatus),
+                translatedText: normalizedTranslated,
+                qaStatus
+            });
+        }
         outputRows[outputRowIndex] = row;
         translatedWorkbook = null;
     }
@@ -10062,9 +12109,17 @@ function initTranslateTool() {
 
     function buildTranslationReportRows() {
         ensureTranslationReportCoversExpectedTasks();
-        const rows = [[
+        const targetLang = translationRunReport?.targetLang || targetLangSelect?.value || '';
+        const rows = [
+            ['翻译报告元数据'],
+            ['目标语言代码', targetLang],
+            ['目标语言', getTranslateLanguageName(targetLang) || targetLang],
+            ['生成时间', new Date().toISOString()],
+            [],
+            [
             '任务Key',
-            '状态',
+            '处理状态',
+            '机器状态',
             '来源文件',
             '工作表',
             '原始行号',
@@ -10078,12 +12133,17 @@ function initTranslateTool() {
             '译后检测',
             '完整性风险',
             '处理建议',
-            '错误'
-        ]];
+            '错误',
+            '处理决定（可选）',
+            '修订译文（可选）',
+            '处理备注（可选）'
+            ]
+        ];
 
         (translationRunReport?.entries || []).forEach(entry => {
             rows.push([
                 entry.taskKey || '',
+                getTranslationReportDisplayStatus(entry),
                 entry.status || '',
                 entry.sourceFile || '',
                 entry.sheetName || '',
@@ -10095,28 +12155,78 @@ function initTranslateTool() {
                 entry.referenceText || '',
                 entry.translatedText || '',
                 entry.glossary || '',
-                entry.qaStatus || '',
+                getTranslationQaDisplayText(entry),
                 entry.completenessRisk || getTranslationCompletenessRiskLabel(entry.qaStatus || ''),
                 entry.actionSuggestion || getTranslationActionSuggestion(entry.status || '', entry.qaStatus || ''),
-                entry.error || ''
+                entry.error || '',
+                globalThis.NexusTranslationDeliveryPolicy?.getDecisionLabel
+                    ? globalThis.NexusTranslationDeliveryPolicy.getDecisionLabel(entry.userDecision)
+                    : (entry.userDecision || ''),
+                entry.revisedText || '',
+                entry.decisionNote || ''
             ]);
         });
 
-        if (failedTranslationTasks.length) {
+        const retryableEntries = [];
+        const seenRetryableEntries = new Set();
+        getDefaultRetryableTranslationReportEntries().forEach(entry => {
+            const identity = getTranslationIssueIdentity(entry);
+            if (seenRetryableEntries.has(identity)) return;
+            seenRetryableEntries.add(identity);
+            retryableEntries.push(entry);
+        });
+
+        if (retryableEntries.length) {
             rows.push([]);
-            rows.push(['失败任务', '任务Key', '来源文件', '工作表', '原始行号', '列', '通道', '模型', '原文', '参考译文']);
-            failedTranslationTasks.forEach(task => {
+            rows.push([
+                '需重新处理任务',
+                `共 ${retryableEntries.length} 条；可能是翻译失败、未返回译文，或已有译文但硬质检未通过`
+            ]);
+            rows.push([
+                '任务Key',
+                '处理状态',
+                '机器状态',
+                '来源文件',
+                '工作表',
+                '原始行号',
+                '列',
+                '通道',
+                '模型',
+                '原文',
+                '参考译文',
+                '当前译文',
+                '质检原因',
+                '处理建议',
+                '处理决定（可选）',
+                '修订译文（可选）',
+                '处理备注（可选）'
+            ]);
+            retryableEntries.forEach(entry => {
+                const qaReason =
+                    (!isTranslationQaPassed(entry.qaStatus) ? getTranslationQaDisplayText(entry) : '') ||
+                    entry.error ||
+                    entry.completenessRisk ||
+                    '';
                 rows.push([
-                    'failed',
-                    task.taskKey || '',
-                    task.source?.fileName || '',
-                    task.source?.sheetName || '',
-                    task.originalRowNumber || '',
-                    task.colIndex + 1,
-                    task.profile?.name || '',
-                    task.profile?.model || '',
-                    task.text || '',
-                    task.referenceText || ''
+                    entry.taskKey || '',
+                    getTranslationReportDisplayStatus(entry),
+                    entry.status || '',
+                    entry.sourceFile || '',
+                    entry.sheetName || '',
+                    entry.rowNumber || '',
+                    entry.column || '',
+                    entry.profile || '',
+                    entry.model || '',
+                    entry.sourceText || '',
+                    entry.referenceText || '',
+                    entry.translatedText || '',
+                    qaReason,
+                    entry.actionSuggestion || getTranslationActionSuggestion(entry.status || '', entry.qaStatus || ''),
+                    globalThis.NexusTranslationDeliveryPolicy?.getDecisionLabel
+                        ? globalThis.NexusTranslationDeliveryPolicy.getDecisionLabel(entry.userDecision)
+                        : (entry.userDecision || ''),
+                    entry.revisedText || '',
+                    entry.decisionNote || ''
                 ]);
             });
         }
@@ -10169,24 +12279,43 @@ function initTranslateTool() {
     function buildTranslationReportWorkbook() {
         const workbook = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(buildTranslationReportRows()), '翻译报告');
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+            ['怎么处理', '填写方式', '重新导入后的结果'],
+            ['在哪里填写', '顶部主表或下方“需重新处理任务”清单都可以', '工具会按任务合并读取，不会丢失处理决定'],
+            ['让工具自动修复', '在“处理决定（可选）”填写：必须重译', '该行进入一键修复队列'],
+            ['使用人工修改', '填写“修订译文（可选）”，并在处理决定填写：使用修订译文', '先按当前规则复检；通过后直接写入结果'],
+            ['确认专名可保留', '仅对软性需确认填写：接受现译', '记录确认并复用；混入中文、明确英文残留、缺失等硬错误不能这样放行'],
+            ['补充上下文', '可在“处理备注（可选）”填写原因', '随报告保留，方便后续审计'],
+            [],
+            ['重要', '阻断问题未清零时，工具不会自动生成正式交付版。', '如确需查看或人工修改，可在工具中主动导出 *_translated_unverified.xlsx；该文件不是交付版。']
+        ]), '处理说明');
         return workbook;
     }
 
     async function autoSaveTranslationOutputs() {
         const savedPaths = [];
-        const workbook = translatedWorkbook || buildTranslationWorkbook();
-        if (workbook) {
-            translatedWorkbook = workbook;
-            savedPaths.push(await saveWorkbookFile(workbook, getTranslationOutputFileName('translated')));
-            translatedWorkbook = null;
-            await waitForBrowserFrame();
+        ensureTranslationReportCoversExpectedTasks();
+        const deliveryGate = getTranslationDeliveryGate();
+        const autoSaveKinds = globalThis.NexusTranslationDeliveryPolicy?.getAutoSaveKinds
+            ? globalThis.NexusTranslationDeliveryPolicy.getAutoSaveKinds(deliveryGate)
+            : (deliveryGate.ready ? ['translated', 'report'] : ['report']);
+        if (autoSaveKinds.includes('translated')) {
+            const workbook = translatedWorkbook || buildTranslationWorkbook();
+            if (workbook) {
+                translatedWorkbook = workbook;
+                savedPaths.push(await saveWorkbookFile(workbook, getTranslationOutputFileName('translated')));
+                translatedWorkbook = null;
+                await waitForBrowserFrame();
+            }
         }
-        if (translationRunReport) {
+        if (translationRunReport && autoSaveKinds.includes('report')) {
             const reportWorkbook = buildTranslationReportWorkbook();
             savedPaths.push(await saveWorkbookFile(reportWorkbook, getTranslationOutputFileName('translation_report')));
             await waitForBrowserFrame();
         }
-        return savedPaths.filter(Boolean);
+        const resultPaths = savedPaths.filter(Boolean);
+        resultPaths.deliveryGate = deliveryGate;
+        return resultPaths;
     }
 
     function buildFailedTranslationRetryPlan(activeProfiles, sourceTasks = failedTranslationTasks) {
@@ -10243,8 +12372,8 @@ function initTranslateTool() {
         if (!sheetData || !translateSources.length || selectedColumns.length === 0) {
             setStatus(
                 'warning',
-                '无法恢复失败补跑任务',
-                '当前报告里有失败/需确认项，但页面缺少原文件或原文列选择。请先重新上传同一份原文件并选择原文列，再点击补跑。'
+                '无法恢复待处理任务',
+                '当前报告里有可自动处理项，但页面缺少原文件或原文列选择。请重新上传同一份原文件并选择原文列，再开始重译。'
             );
             return [];
         }
@@ -10256,7 +12385,10 @@ function initTranslateTool() {
         failedEntries.forEach(entry => {
             const task = findTaskForImportedTranslationEntry(entry, allTasks);
             if (!task || usedTaskKeys.has(task.taskKey)) return;
-            restoredTasks.push(task);
+            restoredTasks.push({
+                ...task,
+                retryOfTaskKey: entry.taskKey || task.taskKey
+            });
             usedTaskKeys.add(task.taskKey);
         });
 
@@ -10265,11 +12397,11 @@ function initTranslateTool() {
             if (restoredTasks.length < failedEntries.length) {
                 setStatus(
                     'warning',
-                    '已恢复部分失败补跑任务',
-                    `报告中有 ${formatTranslationReportIssueSummary(issueSummary)}；默认补跑 ${failedEntries.length} 个真实失败/缺失项，当前文件和列可定位 ${restoredTasks.length} 个。未定位项请确认原文件、工作表、原文列和目标语言没有变化。`
+                    '已恢复部分待处理任务',
+                    `报告中有 ${formatTranslationReportIssueSummary(issueSummary)}；共有 ${failedEntries.length} 个可自动处理项，当前文件和列可定位 ${restoredTasks.length} 个。未定位项请确认原文件、工作表、原文列和目标语言没有变化。`
                 );
             } else {
-                setStatus('processing', '已准备失败补跑任务', `已从翻译报告恢复 ${restoredTasks.length} 个真实失败/缺失项。QA软风险不会默认补跑。`);
+                setStatus('processing', '已准备硬问题重译任务', `已从翻译报告恢复 ${restoredTasks.length} 个翻译失败、结果缺失或硬质检问题；软性需确认不会自动重译。`);
             }
             updateTranslationRunActions();
         }
@@ -10282,8 +12414,8 @@ function initTranslateTool() {
         if (!activeProfiles.length) {
             setStatus(
                 'error',
-                '未选择可用补跑通道',
-                '补跑会使用当前勾选的翻译模型通道。请先勾选至少一个可用通道后再补跑。',
+                '未选择可用重译通道',
+                '重译会使用当前勾选的翻译模型通道。请先勾选至少一个可用通道后再处理硬问题。',
                 revealApiConfigPanel,
                 '去配置'
             );
@@ -10297,19 +12429,19 @@ function initTranslateTool() {
             const reportRepairableCount = issueSummary.retryable;
             setStatus(
                 reportFailureCount > 0 && reportRepairableCount === 0 ? 'success' : 'warning',
-                reportFailureCount > 0 && reportRepairableCount === 0 ? '没有需要自动补跑的硬问题' : '没有可补跑的失败翻译',
+                reportFailureCount > 0 && reportRepairableCount === 0 ? '没有需要自动重译的硬问题' : '没有可重新处理的硬问题',
                 reportFailureCount > 0 && reportRepairableCount === 0
-                    ? `报告里还有 ${formatTranslationReportIssueSummary(issueSummary)}，但没有真实失败/缺失。超长行可点“精简超长译文”，其他 QA软风险建议下载报告人工确认。`
+                    ? `报告里还有 ${formatTranslationReportIssueSummary(issueSummary)}，但没有可自动处理项。超长行可点“精简超长译文”，其他软性问题建议下载报告人工确认。`
                     : (translationRunReport
-                        ? '当前翻译报告里没有可定位的失败/需确认项。可以先下载翻译报告查看异常行，或重新上传同一份原文件后再试。'
-                        : '当前没有翻译报告或失败任务记录。')
+                        ? '当前翻译报告里没有可定位的硬问题。可以先下载报告查看问题行，或重新上传同一份原文件后再试。'
+                        : '当前没有翻译报告或待处理任务记录。')
             );
             return;
         }
 
         const retryPlan = buildFailedTranslationRetryPlan(activeProfiles, retryTasks);
         if (!options.skipConfirm) {
-            const confirmed = confirm(`将补跑 ${retryPlan.length} 个真实失败/缺失翻译。\n\n补跑规则：使用文本翻译里当前勾选的模型通道；勾选多个通道时会轮询分配，不再强制沿用报告里的原失败通道。\n\nQA软风险和超长行不会在这里自动补跑；超长行请使用“精简超长译文”。\n\n${summarizeRetryPlan(retryPlan)}\n\n确定开始补跑吗？`);
+            const confirmed = confirm(`将重新翻译 ${retryPlan.length} 个硬问题，包括翻译失败、结果缺失和硬质检未通过。\n\n处理规则：使用文本翻译里当前勾选的模型通道；勾选多个通道时会轮询分配，不再强制沿用原通道。\n\n软性需确认和超长行不会在这里自动重译；超长行请使用“精简超长译文”。\n\n${summarizeRetryPlan(retryPlan)}\n\n确定开始重译吗？`);
             if (!confirmed) return;
         }
 
@@ -10318,6 +12450,7 @@ function initTranslateTool() {
             return {
                 ...task,
                 profile,
+                retryOfTaskKey: task.retryOfTaskKey || task.taskKey,
                 taskKey: buildTranslationTaskKey(task.source, task.rowIndex, task.colIndex, profile, task.referenceColIndex, targetLang),
                 glossaryTerms: getRelevantTranslateGlossaryTerms([task.text, task.referenceText], getSelectedTranslateGlossaryTerms(), targetLang, 24)
             };
@@ -10326,7 +12459,8 @@ function initTranslateTool() {
         updateTranslationRunActions();
         try {
             const result = await startTranslate({
-                deferAutoQaRepair: Boolean(options.deferAutoQaRepair)
+                deferAutoQaRepair: Boolean(options.deferAutoQaRepair),
+                suppressAutoSave: Boolean(options.suppressAutoSave)
             });
             return result;
         } finally {
@@ -10356,9 +12490,9 @@ function initTranslateTool() {
         }
 
         const autoRetryText = isTranslateAutoRetryMultiTargetEnabled()
-            ? '\n\n已开启“多语言自动补跑失败项”：每种语言完成后若有真实失败/硬问题，会额外补跑一次再进入下一语言。'
+            ? '\n\n已开启“多语言自动重译硬问题”：每种语言完成后若有翻译失败、结果缺失或硬质检问题，会额外重译一次再进入下一语言。'
             : '';
-        const confirmed = confirm(`将按顺序翻译 ${targetLangs.length} 种目标语言：${targetLangs.map(getTranslateLanguageName).join('、')}。\n\n每完成一种语言都会自动保存独立的译文文件和报告，避免把所有语言集中到一个大表里。${autoRetryText}\n\n是否开始？`);
+        const confirmed = confirm(`将按顺序翻译 ${targetLangs.length} 种目标语言：${targetLangs.map(getTranslateLanguageName).join('、')}。\n\n每种语言都会保存独立报告；只有硬错误清零时才保存交付版译文，避免把有问题的文件误用于交付。${autoRetryText}\n\n是否开始？`);
         if (!confirmed) return { status: 'cancelled' };
 
         const originalTargetLang = targetLangSelect?.value || targetLangs[0];
@@ -10393,11 +12527,11 @@ function initTranslateTool() {
                     currentIndex: index,
                     status: 'running'
                 });
-                setTranslateDownloadLanguageSummary(`正在翻译 ${getTranslateLanguageName(targetLang)}（${index + 1}/${targetLangs.length}），完成后会自动保存该语言文件。`);
+                setTranslateDownloadLanguageSummary(`正在翻译 ${getTranslateLanguageName(targetLang)}（${index + 1}/${targetLangs.length}），复检通过后会自动保存交付版。`);
                 setStatus(
                     'processing',
                     `多语言翻译 ${index + 1}/${targetLangs.length}`,
-                    `正在处理 ${getTranslateLanguageName(targetLang)}。该语言完成后会自动保存，再继续下一种语言。`
+                    `正在处理 ${getTranslateLanguageName(targetLang)}。硬错误清零后保存交付版；否则只保存问题报告，再继续下一种语言。`
                 );
                 const result = await startTranslate({
                     skipMultiTarget: true,
@@ -10405,7 +12539,7 @@ function initTranslateTool() {
                     multiTargetIndex: index,
                     multiTargetTotal: targetLangs.length
                 });
-                if (result?.status !== 'success' || isTranslationCancelled) {
+                if (!['success', 'needs_action'].includes(result?.status) || isTranslationCancelled) {
                     stopped = true;
                     markTranslateLanguageFailed(targetLang);
                     break;
@@ -10414,17 +12548,17 @@ function initTranslateTool() {
                 let repairableCount = Number(result.repairableCount || 0);
                 let failureCount = Number(result.failCount || result.failureCount || 0);
                 if (repairableCount > 0 && isTranslateAutoRetryMultiTargetEnabled()) {
-                    setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}首次完成，有 ${repairableCount} 个可补跑项，正在自动补跑一次。`);
+                    setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}首次完成，有 ${repairableCount} 个可自动处理的硬问题，正在重译一次。`);
                     setStatus(
                         'processing',
-                        `自动补跑 ${getTranslateLanguageName(targetLang)}`,
-                        `将只补跑 ${repairableCount} 个真实失败/硬问题项，成功译文会继续复用。`
+                        `自动重译 ${getTranslateLanguageName(targetLang)} 的硬问题`,
+                        `将只重新处理 ${repairableCount} 个翻译失败、结果缺失或硬质检问题，通过译文继续复用。`
                     );
                     const retryResult = await retryFailedTranslations({
                         skipConfirm: true,
                         deferAutoQaRepair: false
                     });
-                    if (retryResult?.status === 'success') {
+                    if (['success', 'needs_action'].includes(retryResult?.status)) {
                         repairableCount = Number(retryResult.repairableCount || 0);
                         failureCount = Number(retryResult.failCount || retryResult.failureCount || failureCount);
                     } else {
@@ -10434,10 +12568,10 @@ function initTranslateTool() {
                 if (repairableCount > 0) {
                     retryTargets.push({ targetLang, repairableCount, failureCount });
                     markTranslateLanguageFailed(targetLang);
-                    setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}已完成并自动保存，但有 ${repairableCount} 个可补跑项。多语言队列进度：${completedTargets}/${targetLangs.length}`);
+                    setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}仍有 ${repairableCount} 个阻断问题，未生成交付版；问题报告已保存。多语言队列进度：${completedTargets}/${targetLangs.length}`);
                 } else {
                     markTranslateLanguageCompleted(targetLang);
-                    setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}已完成并自动保存。多语言队列进度：${completedTargets}/${targetLangs.length}`);
+                    setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}硬错误已清零，交付版和报告已保存。多语言队列进度：${completedTargets}/${targetLangs.length}`);
                 }
             }
         } finally {
@@ -10451,18 +12585,31 @@ function initTranslateTool() {
             clearTranslationProgress();
             updateTranslateLanguageRunState({
                 currentIndex: -1,
-                status: 'success'
+                status: retryTargets.length ? 'needs_action' : 'success'
             });
             const retryText = retryTargets.length
-                ? ` 其中 ${retryTargets.map(item => `${getTranslateLanguageName(item.targetLang)} ${item.repairableCount} 项`).join('、')} 可补跑。点击“导入报告补跑”，逐个导入对应语言的 *_translation_report.xlsx 后开始翻译即可。`
+                ? ` 其中 ${retryTargets.map(item => `${getTranslateLanguageName(item.targetLang)} ${item.repairableCount} 项`).join('、')} 仍阻断交付，只保存了问题报告。点击“导入报告继续处理”，逐个导入对应语言的 *_translation_report.xlsx 即可。`
                 : '';
-            setTranslateDownloadLanguageSummary(`多语言翻译已完成：${targetLangs.map(getTranslateLanguageName).join('、')}。每种语言已分别保存译文文件和报告。${retryText}`);
+            setTranslateDownloadLanguageSummary(
+                retryTargets.length
+                    ? `多语言队列已处理完成：${targetLangs.map(getTranslateLanguageName).join('、')}。仅硬错误清零的语言生成了交付版。${retryText}`
+                    : `多语言翻译已完成：${targetLangs.map(getTranslateLanguageName).join('、')}。每种语言已分别保存交付版和报告。`
+            );
             setStatus(
                 retryTargets.length ? 'warning' : 'success',
-                retryTargets.length ? '多语言翻译完成，有语言需要补跑' : '多语言翻译完成',
-                `已处理 ${completedTargets}/${targetLangs.length} 种目标语言，每种语言已分别保存译文文件和报告。${retryText}`
+                retryTargets.length ? '多语言队列完成，有语言未生成交付版' : '多语言翻译完成',
+                retryTargets.length
+                    ? `已处理 ${completedTargets}/${targetLangs.length} 种目标语言；有阻断问题的语言只保存报告。${retryText}`
+                    : `已处理 ${completedTargets}/${targetLangs.length} 种目标语言，每种语言已分别保存交付版和报告。`
             );
-            return { status: 'success', completedTargets, retryTargets };
+            if (retryTargets.length) {
+                finishInspectorTaskTimer('warning', '多语言队列完成，仍有阻断问题');
+            }
+            return {
+                status: retryTargets.length ? 'needs_action' : 'success',
+                completedTargets,
+                retryTargets
+            };
         }
 
         updateTranslateLanguageRunState({
@@ -10470,6 +12617,7 @@ function initTranslateTool() {
         });
         setTranslateDownloadLanguageSummary(`多语言翻译已停止：已完成 ${completedTargets}/${targetLangs.length} 种语言。`);
         setStatus('warning', '多语言翻译已停止', `已完成 ${completedTargets}/${targetLangs.length} 种目标语言。未完成语言可以稍后重新勾选后继续。`);
+        finishInspectorTaskTimer('warning', '多语言翻译已停止');
         return { status: 'cancelled', completedTargets };
     }
 
@@ -10514,6 +12662,19 @@ function initTranslateTool() {
             alert('请先上传并成功载入要翻译的文件');
             if (options.outputSuffix !== undefined) activeTranslationOutputSuffix = previousOutputSuffix;
             return { status: 'blocked', reason: 'no-file' };
+        }
+
+        if (
+            !retryTasks &&
+            importedTranslateProgressState?.entries?.length &&
+            !importedTranslateProgressState.reviewedAt
+        ) {
+            const reviewCompleted = reviewImportedTranslationCompleteness();
+            if (!reviewCompleted) {
+                if (options.outputSuffix !== undefined) activeTranslationOutputSuffix = previousOutputSuffix;
+                return { status: 'cancelled', reason: 'import-review-cancelled' };
+            }
+            targetLang = targetLangSelect?.value || targetLang;
         }
 
         let resumeProgress = null;
@@ -10605,7 +12766,7 @@ function initTranslateTool() {
                 failed: [],
                 status: 'running'
             });
-            setTranslateDownloadLanguageSummary(`正在翻译 ${getTranslateLanguageName(targetLang)}，完成后会生成该语言译文文件和报告。`);
+            setTranslateDownloadLanguageSummary(`正在翻译 ${getTranslateLanguageName(targetLang)}；硬错误清零后生成交付版，否则只生成问题报告。`);
         }
         hideStatus();
 
@@ -10667,9 +12828,15 @@ function initTranslateTool() {
             translateRunConsistencyTerms = targetLang === 'zh-TW'
                 ? []
                 : buildTranslateRunConsistencyTerms(allTranslationTasks);
+            const translateConsistencyExamplePool = targetLang === 'zh-TW'
+                ? null
+                : buildTranslateConsistencyExamplePool(translationRunReport?.entries || [], targetLang);
             allTranslationTasks.forEach(task => {
                 task.consistencyTerms = translateRunConsistencyTerms.length
                     ? getRelevantTranslateConsistencyTerms([task.text, task.referenceText], translateRunConsistencyTerms, TRANSLATE_CONSISTENCY_TASK_TERM_LIMIT)
+                    : [];
+                task.consistencyExamples = translateConsistencyExamplePool
+                    ? getRelevantTranslateConsistencyExamples(task, translateConsistencyExamplePool)
                     : [];
             });
             setExpectedTranslationTasks(allTranslationTasks);
@@ -10700,7 +12867,12 @@ function initTranslateTool() {
             function seedTranslationMemoryFromProgress(tasks) {
                 tasks.forEach(task => {
                     const entry = translationProgressTasks.get(task.taskKey);
-                    if (!entry?.translatedText || entry.status === 'failed' || isTranslateFailureText(entry.translatedText)) return;
+                    if (
+                        !entry?.translatedText ||
+                        String(entry.status || '').toLowerCase() !== 'success' ||
+                        !isTranslationQaPassed(entry.qaStatus) ||
+                        isTranslateFailureText(entry.translatedText)
+                    ) return;
                     translationMemory.set(buildTranslationMemoryKey(task), entry.translatedText);
                 });
             }
@@ -10718,7 +12890,11 @@ function initTranslateTool() {
                     restoreEntriesByKey.set(entry.taskKey, entry);
                 });
                 if (restoreEntriesByKey.size > 0) {
-                    translationTasks = restoreCompletedTranslationTasks(allTranslationTasks, [...restoreEntriesByKey.values()]);
+                    translationTasks = restoreCompletedTranslationTasks(
+                        allTranslationTasks,
+                        [...restoreEntriesByKey.values()],
+                        targetLang
+                    );
                 }
                 const restoredCounts = countTranslationProgressEntries([...translationProgressTasks.values()]);
                 translateCount = restoredCounts.successCount + restoredCounts.failCount;
@@ -10736,7 +12912,7 @@ function initTranslateTool() {
                 completed: 0,
                 total: totalTasks,
                 phase: retryTasks
-                    ? `${runLanguageLabel}补跑准备中`
+                    ? `${runLanguageLabel}硬问题重译准备中`
                     : (deferAutoQaRepairForRun ? `${runLanguageLabel}快速翻译准备中` : `${runLanguageLabel}翻译准备中`)
             };
             updateTranslateRunSummary(0, totalTasks, translateRunSummaryState.phase);
@@ -10760,7 +12936,8 @@ function initTranslateTool() {
                     translationRunReport.successCount = restoredCounts.successCount;
                     translationRunReport.failCount = restoredCounts.failCount;
                 }
-                if (failedTranslationTasks.length > 0) {
+                const deliveryGate = getTranslationDeliveryGate();
+                if (!deliveryGate.ready) {
                     await flushTranslationTaskProgress();
                     await saveCurrentTranslationProgress(1);
                 } else {
@@ -10769,24 +12946,68 @@ function initTranslateTool() {
                 document.getElementById('translatedCount').textContent = translateCount;
                 updateTranslationRunActions();
                 let autoSaveMessage = '';
-                try {
-                    const savedPaths = await autoSaveTranslationOutputs();
-                    autoSaveMessage = savedPaths.length ? `；已自动保存：${savedPaths.join('；')}` : '';
-                } catch (saveError) {
-                    console.warn('自动保存翻译结果失败:', saveError);
-                    autoSaveMessage = '；自动保存失败，请点击下载按钮手动保存';
+                if (options.suppressAutoSave) {
+                    autoSaveMessage = deliveryGate.ready
+                        ? '；交付版已生成，请点击下载按钮保存'
+                        : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版`;
+                } else {
+                    try {
+                        const savedPaths = await autoSaveTranslationOutputs();
+                        autoSaveMessage = deliveryGate.ready
+                            ? (savedPaths.length ? `；已自动保存：${savedPaths.join('；')}` : '')
+                            : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版${savedPaths.length ? `；问题报告已保存：${savedPaths.join('；')}` : ''}`;
+                    } catch (saveError) {
+                        console.warn('自动保存翻译结果失败:', saveError);
+                        autoSaveMessage = deliveryGate.ready
+                            ? '；自动保存失败，请点击下载按钮手动保存'
+                            : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版；问题报告自动保存失败`;
+                    }
                 }
-                markTranslateLanguageCompleted(targetLang);
+                const issueSummary = getTranslationReportIssueSummary();
+                runReportFailureCount = issueSummary.totalFailed;
+                runRepairableCount = deliveryGate.blockingCount;
+                const hasRepairableFailures = !deliveryGate.ready;
+                if (hasRepairableFailures) markTranslateLanguageFailed(targetLang);
+                else markTranslateLanguageCompleted(targetLang);
+                if (!options.skipMultiTarget) {
+                    updateTranslateLanguageRunState({
+                        currentIndex: -1,
+                        status: hasRepairableFailures ? 'needs_action' : 'success'
+                    });
+                }
                 const restoredCompleteText = resumeProgress
                     ? '已恢复上次结果，没有剩余需要翻译的文本。'
                     : (importedRestoreSummary.matched > 0
                         ? `已复用导入报告 ${importedRestoreSummary.matched} 条，没有剩余需要翻译的文本。`
                         : '没有需要翻译的有效文本。');
-                setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}已完成。${restoredCompleteText}`);
-                updateTranslateRunSummary(0, 0, `${runLanguageLabel}翻译完成`);
-                setStatus('success', `${runLanguageLabel}翻译完成`, `${restoredCompleteText}${autoSaveMessage}`);
-                runOutcome = 'success';
-                return { status: 'success', targetLang, successCount, failCount };
+                const repairableText = hasRepairableFailures
+                    ? `仍有 ${runRepairableCount} 个翻译失败、结果缺失或硬质检问题可自动处理。`
+                    : '';
+                setTranslateDownloadLanguageSummary(
+                    `${getTranslateLanguageName(targetLang)}已恢复。${restoredCompleteText}${repairableText}`
+                );
+                updateTranslateRunSummary(
+                    0,
+                    0,
+                    hasRepairableFailures ? `${runLanguageLabel}已恢复，有可自动处理项` : `${runLanguageLabel}翻译完成`
+                );
+                setStatus(
+                    hasRepairableFailures ? 'warning' : 'success',
+                    hasRepairableFailures ? `${runLanguageLabel}仍有阻断问题，未生成交付版` : `${runLanguageLabel}翻译完成`,
+                    `${restoredCompleteText}${repairableText}${autoSaveMessage}`
+                );
+                if (hasRepairableFailures) {
+                    finishInspectorTaskTimer('warning', `${runLanguageLabel}仍有阻断问题`);
+                }
+                runOutcome = hasRepairableFailures ? 'needs_action' : 'success';
+                return {
+                    status: runOutcome,
+                    targetLang,
+                    successCount,
+                    failCount,
+                    failureCount: runReportFailureCount,
+                    repairableCount: runRepairableCount
+                };
             }
 
             const runProfiles = getProfilesFromTranslationTasks(translationTasks);
@@ -10797,7 +13018,7 @@ function initTranslateTool() {
             updateTranslateRunSummary(0, totalTasks, `${runLanguageLabel}通道预检中`);
             setStatus(
                 'processing',
-                retryTasks ? `正在检查 ${runLanguageLabel} 补跑通道...` : `正在检查 ${runLanguageLabel} 翻译通道...`,
+                retryTasks ? `正在检查 ${runLanguageLabel} 重译通道...` : `正在检查 ${runLanguageLabel} 翻译通道...`,
                 `${runProfiles.length} 个通道参与，会先确认 Key、Base URL 和模型权限；预检失败时不会启动批量翻译${consistencyMemoryStatus}。`
             );
             await preflightTranslateProfiles(runProfiles, sourceLang, targetLang, runSignal);
@@ -10808,7 +13029,7 @@ function initTranslateTool() {
                 0,
                 totalTasks,
                 retryTasks
-                    ? `${runLanguageLabel}补跑运行中`
+                    ? `${runLanguageLabel}硬问题重译中`
                     : (deferAutoQaRepairForRun ? `${runLanguageLabel}快速翻译运行中` : `${runLanguageLabel}翻译运行中`)
             );
             const importReuseStatus = importedRestoreSummary.matched > 0
@@ -10822,17 +13043,30 @@ function initTranslateTool() {
                 : '';
             setStatus(
                 'processing',
-                retryTasks ? `正在补跑 ${runLanguageLabel} 失败翻译...` : (deferAutoQaRepairForRun ? `${runLanguageLabel}快速翻译中` : `${runLanguageLabel}翻译中`),
+                retryTasks ? `正在重译 ${runLanguageLabel} 硬问题...` : (deferAutoQaRepairForRun ? `${runLanguageLabel}快速翻译中` : `${runLanguageLabel}翻译中`),
                 `本轮 ${totalTasks} 个任务，已启用 ${translateChannelProgressState.size} 个通道${consistencyMemoryStatus}${translateRunModeStatus}${importReuseStatus}${importMismatchStatus}。通道状态会在进度面板实时更新。`
             );
 
             function commitTranslateResult(task, translated, qaStatusOverride = null) {
                 throwIfTranslationCancelled(runId);
+                const normalizedTranslated = normalizeTranslateResultText(translated, task.text);
                 const qaTerms = task.glossaryTerms || [];
                 const qaStatus = qaStatusOverride ?? (translatePostCheckInput?.checked
-                    ? summarizeTranslationQa(task.text, translated, qaTerms, targetLang, task)
+                    ? summarizeTranslationQa(task.text, normalizedTranslated, qaTerms, targetLang, task)
                     : '');
-                const status = getTranslationReportStatus(translated, qaStatus);
+                const status = getTranslationReportStatus(normalizedTranslated, qaStatus);
+                const previousTaskKeys = new Set([task.taskKey, task.retryOfTaskKey].filter(Boolean));
+                previousTaskKeys.forEach(previousTaskKey => {
+                    const previousEntry = translationProgressTasks.get(previousTaskKey);
+                    if (!previousEntry) return;
+                    const previousCounts = countTranslationProgressEntries([previousEntry]);
+                    successCount = Math.max(0, successCount - previousCounts.successCount);
+                    failCount = Math.max(0, failCount - previousCounts.failCount);
+                    translationProgressTasks.delete(previousTaskKey);
+                });
+                if (task.retryOfTaskKey && task.retryOfTaskKey !== task.taskKey) {
+                    deleteTranslationTaskProgress(task.retryOfTaskKey);
+                }
                 if (status !== 'success') {
                     failCount++;
                     runFailCount++;
@@ -10840,20 +13074,25 @@ function initTranslateTool() {
                     successCount++;
                     runSuccessCount++;
                 }
-                writeTranslationResult(task, translated, qaStatus);
+                writeTranslationResult(task, normalizedTranslated, qaStatus);
                 translateCount++;
                 completedCount++;
 
                 translationRunReport = translationRunReport || { entries: [] };
-                const reportEntry = buildTranslationReportEntry(task, translated, qaStatus);
+                const reportEntry = buildTranslationReportEntry(task, normalizedTranslated, qaStatus);
                 const compactEntry = compactTranslationProgressEntry(reportEntry);
                 translationProgressTasks.set(task.taskKey, compactEntry || reportEntry);
                 queueTranslationTaskProgress(reportEntry);
-                translationRunReport.entries.push(reportEntry);
-                if (status === 'success') rememberSuccessfulTranslation(task, translated);
+                const reportEntries = translationRunReport.entries || [];
+                const replaceableTaskKeys = new Set([task.taskKey, task.retryOfTaskKey].filter(Boolean));
+                const existingReportIndex = reportEntries.findIndex(entry => replaceableTaskKeys.has(entry.taskKey));
+                if (existingReportIndex >= 0) reportEntries[existingReportIndex] = reportEntry;
+                else reportEntries.push(reportEntry);
+                translationRunReport.entries = reportEntries;
+                if (status === 'success') rememberSuccessfulTranslation(task, normalizedTranslated);
 
                 if (shouldRenderTranslationPreview(status, completedCount)) {
-                    addTranslationItem(translationList, task.text, translated, task.rowIndex, task.colIndex, task.profile, targetLang);
+                    addTranslationItem(translationList, task.text, normalizedTranslated, task.rowIndex, task.colIndex, task.profile, targetLang);
                 }
 
                 const progress = Math.round((completedCount / totalTasks) * 100);
@@ -10863,7 +13102,7 @@ function initTranslateTool() {
                     completedCount,
                     totalTasks,
                     retryTasks
-                        ? `${runLanguageLabel}补跑运行中`
+                        ? `${runLanguageLabel}硬问题重译中`
                         : (deferAutoQaRepairForRun ? `${runLanguageLabel}快速翻译运行中` : `${runLanguageLabel}翻译运行中`)
                 );
 
@@ -10885,6 +13124,20 @@ function initTranslateTool() {
                     if (status !== 'success') failed++;
                 });
                 return { committed, failed };
+            }
+
+            async function processLocalDiscountTask(task) {
+                const localTranslation = getNexusStandaloneDiscountTranslation(task?.text, targetLang);
+                if (localTranslation == null) return null;
+                throwIfTranslationCancelled(runId);
+                updateTranslateChannelProgress(task.profile, {
+                    status: 'running',
+                    message: '本地折扣规则，无需 AI'
+                });
+                const result = await prepareTranslationForCommit(task, localTranslation);
+                const status = commitTranslateResult(task, result.translated, result.qaStatus);
+                recordChannelOutcome(task, status === 'failed' || status === 'missing');
+                return status;
             }
 
             const channelFailureStreaks = new Map();
@@ -10953,7 +13206,24 @@ function initTranslateTool() {
             async function prepareTranslationForCommit(task, translated) {
                 let nextTranslated = applyLocalTranslationFixes(task.text, translated, targetLang);
                 if (!translatePostCheckInput?.checked) {
-                    return { translated: nextTranslated, qaStatus: '' };
+                    /*
+                     * Monetary semantics and cross-language carryover remain
+                     * protected even when the broader post-check switch is
+                     * off. These guards are local and deterministic; they
+                     * never make an API request.
+                     */
+                    const baselineIssues = [
+                        ...getNexusDiscountQaIssues(task.text, nextTranslated, targetLang),
+                        ...getTargetLanguageLeakageIssues(task.text, nextTranslated, targetLang, {
+                            ...task,
+                            glossaryTerms: task.glossaryTerms || []
+                        })
+                    ];
+                    const uniqueBaselineIssues = [...new Set(baselineIssues)].filter(Boolean);
+                    return {
+                        translated: nextTranslated,
+                        qaStatus: uniqueBaselineIssues.length ? `需确认：${uniqueBaselineIssues.join('；')}` : ''
+                    };
                 }
 
                 let qaStatus = summarizeTranslationQa(task.text, nextTranslated, task.glossaryTerms || [], targetLang, task);
@@ -11019,6 +13289,9 @@ function initTranslateTool() {
                 }
                 throwIfTranslationCancelled(runId);
 
+                const localDiscountStatus = await processLocalDiscountTask(task);
+                if (localDiscountStatus !== null) return localDiscountStatus;
+
                 updateTranslateChannelProgress(task.profile, {
                     status: 'running',
                     message: '准备单条翻译'
@@ -11064,7 +13337,7 @@ function initTranslateTool() {
                 throwIfTranslationCancelled(runId);
                 const result = await prepareTranslationForCommit(task, translated);
                 const status = commitTranslateResult(task, result.translated, result.qaStatus);
-                recordChannelOutcome(task, status === 'failed');
+                recordChannelOutcome(task, status === 'failed' || status === 'missing');
                 return status;
             }
 
@@ -11083,7 +13356,13 @@ function initTranslateTool() {
                     message: `准备批量 ${tasks.length} 条`
                 });
                 const uncachedTasks = [];
+                let localDiscountFailureCount = 0;
                 for (const task of tasks) {
+                    const localDiscountStatus = await processLocalDiscountTask(task);
+                    if (localDiscountStatus !== null) {
+                        if (localDiscountStatus !== 'success') localDiscountFailureCount++;
+                        continue;
+                    }
                     if (task.passthrough) {
                         updateTranslateChannelProgress(task.profile, {
                             status: 'running',
@@ -11115,7 +13394,14 @@ function initTranslateTool() {
                     }
                     uncachedTasks.push(task);
                 }
-                if (!uncachedTasks.length) return { completed: tasks.length, failed: 0, shouldSlowDown: false, reason: '复用缓存翻译' };
+                if (!uncachedTasks.length) {
+                    return {
+                        completed: tasks.length,
+                        failed: localDiscountFailureCount,
+                        shouldSlowDown: localDiscountFailureCount > 0,
+                        reason: localDiscountFailureCount > 0 ? '本地折扣规则检测到需确认项' : '复用缓存翻译'
+                    };
+                }
 
                 await waitForTranslateChannelRecovery(profile);
                 const representativeTasks = [];
@@ -11135,7 +13421,7 @@ function initTranslateTool() {
                 });
 
                 if (representativeTasks.length <= 1) {
-                    let failedInSingleMode = 0;
+                    let failedInSingleMode = localDiscountFailureCount;
                     for (const task of uncachedTasks) {
                         const status = await processTranslateTask(task);
                         if (status !== 'success') failedInSingleMode++;
@@ -11175,12 +13461,12 @@ function initTranslateTool() {
                 throwIfTranslationCancelled(runId);
 
                 if (translations && translations.length === representativeTasks.length) {
-                    let failedInBatch = 0;
+                    let failedInBatch = localDiscountFailureCount;
                     for (const [index, task] of representativeTasks.entries()) {
                         const translated = translations[index] || makeTranslateFailureText(task.text);
                         const result = await prepareTranslationForCommit(task, translated);
                         const status = commitTranslateResult(task, result.translated, result.qaStatus);
-                        recordChannelOutcome(task, status === 'failed');
+                        recordChannelOutcome(task, status === 'failed' || status === 'missing');
                         if (status !== 'success') failedInBatch++;
                         const memoryKey = buildTranslationMemoryKey(task);
                         for (const duplicateTask of (duplicateTasksByMemoryKey.get(memoryKey) || [])) {
@@ -11200,7 +13486,7 @@ function initTranslateTool() {
                     status: 'retrying',
                     message: `${batchFailureSummary ? `批量失败：${batchFailureSummary}，` : '批量返回异常，'}已降级单条补跑`
                 });
-                let failedInFallback = 0;
+                let failedInFallback = localDiscountFailureCount;
                 for (const task of uncachedTasks) {
                     const status = await processTranslateTask(task);
                     if (status !== 'success') failedInFallback++;
@@ -11456,6 +13742,7 @@ function initTranslateTool() {
             translationRunReport.failCount = failCount;
             ensureTranslationReportCoversExpectedTasks();
             const reportFailureCount = getTranslationReportFailureEntries().length;
+            const finalIssueSummary = getTranslationReportIssueSummary();
             runReportFailureCount = reportFailureCount;
             const latestEntryByTask = new Map();
             (translationRunReport.entries || []).forEach(entry => {
@@ -11465,47 +13752,70 @@ function initTranslateTool() {
                 const entry = latestEntryByTask.get(task.taskKey);
                 return entry && isRepairableTranslationReportEntry(entry);
             });
-            runRepairableCount = failedTranslationTasks.length;
+            const deliveryGate = getTranslationDeliveryGate();
+            runRepairableCount = deliveryGate.blockingCount;
             await flushTranslationTaskProgress();
-            if (failedTranslationTasks.length > 0) {
+            if (!deliveryGate.ready) {
                 await saveCurrentTranslationProgress(1);
             } else {
                 clearTranslationProgress();
             }
             document.getElementById('translatedCount').textContent = translateCount;
             updateTranslationRunActions();
-            if (failedTranslationTasks.length > 0) {
+            if (!deliveryGate.ready) {
                 markTranslateLanguageFailed(targetLang);
             } else {
                 markTranslateLanguageCompleted(targetLang);
             }
-            const finishPhase = failedTranslationTasks.length > 0
-                ? `${runLanguageLabel}完成，有可补跑项`
+            if (!options.skipMultiTarget) {
+                updateTranslateLanguageRunState({
+                    currentIndex: -1,
+                    status: deliveryGate.ready ? 'success' : 'needs_action'
+                });
+            }
+            const finishPhase = !deliveryGate.ready
+                ? `${runLanguageLabel}仍有阻断问题，未生成交付版`
                 : (reportFailureCount > 0
-                    ? `${runLanguageLabel}完成，有需确认项`
-                    : (retryTasks ? `${runLanguageLabel}补跑完成` : `${runLanguageLabel}翻译完成`));
+                    ? `${runLanguageLabel}完成，有软性问题待确认`
+                    : (retryTasks ? `${runLanguageLabel}修复完成` : `${runLanguageLabel}翻译完成`));
             updateTranslateRunSummary(totalTasks, totalTasks, finishPhase);
 
-            const statusTitle = retryTasks ? `${runLanguageLabel}失败翻译补跑完成！` : `${runLanguageLabel}翻译完成！`;
+            const statusTitle = !deliveryGate.ready
+                ? `${runLanguageLabel}仍有阻断问题，未生成交付版`
+                : (retryTasks ? `${runLanguageLabel}修复完成` : `${runLanguageLabel}翻译完成`);
             let autoSaveMessage = '';
-            try {
-                const savedPaths = await autoSaveTranslationOutputs();
-                autoSaveMessage = savedPaths.length ? `；已自动保存：${savedPaths.join('；')}` : '';
-            } catch (saveError) {
-                console.warn('自动保存翻译结果失败:', saveError);
-                recordClientError('translation-auto-save', saveError, { targetLang });
-                autoSaveMessage = '；自动保存失败，请点击下载按钮手动保存';
+            if (options.suppressAutoSave) {
+                autoSaveMessage = deliveryGate.ready
+                    ? '；交付版已生成，请点击下载按钮保存'
+                    : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版`;
+            } else {
+                try {
+                    const savedPaths = await autoSaveTranslationOutputs();
+                    autoSaveMessage = deliveryGate.ready
+                        ? (savedPaths.length ? `；已自动保存：${savedPaths.join('；')}` : '')
+                        : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版${savedPaths.length ? `；问题报告已保存：${savedPaths.join('；')}` : ''}`;
+                } catch (saveError) {
+                    console.warn('自动保存翻译结果失败:', saveError);
+                    recordClientError('translation-auto-save', saveError, { targetLang });
+                    autoSaveMessage = deliveryGate.ready
+                        ? '；自动保存失败，请点击下载按钮手动保存'
+                        : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版；问题报告自动保存失败`;
+                }
             }
-            const followUpMessage = failedTranslationTasks.length > 0
-                ? '可以先下载报告查看异常项，或点击补跑失败翻译。'
+            const followUpMessage = !deliveryGate.ready
+                ? '请点击“一键修复并生成交付版”；系统只处理阻断问题，复检清零后才会输出文件。'
                 : (reportFailureCount > 0
-                    ? '剩余为软风险/需人工确认项，建议下载翻译报告查看；不会自动继续消耗 API。'
-                    : '译文文件和报告已准备好。');
-            setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}已完成：本次成功 ${runSuccessCount} 个，失败/需确认 ${runFailCount} 个。${followUpMessage}`);
-            setStatus('success', statusTitle, `本次成功 ${runSuccessCount} 个，失败/需确认 ${runFailCount} 个；累计成功 ${successCount} 个，失败/需确认 ${failCount} 个${autoSaveMessage}`, function() {
+                    ? '剩余为软性需确认项；可在报告中填写处理决定，重新导入后会保留该决定。'
+                    : '交付版和报告已准备好。');
+            const issueSummaryText = formatTranslationReportIssueSummary(finalIssueSummary);
+            setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}已完成：本轮通过质检 ${runSuccessCount} 个，发现问题 ${runFailCount} 个；当前报告为 ${issueSummaryText}。${followUpMessage}`);
+            setStatus(deliveryGate.ready ? 'success' : 'warning', statusTitle, `本轮通过质检 ${runSuccessCount} 个，发现问题 ${runFailCount} 个；当前报告为 ${issueSummaryText}${autoSaveMessage}`, function() {
                 document.getElementById('translate-tool').scrollIntoView({ behavior: 'smooth' });
             });
-            runOutcome = 'success';
+            if (!deliveryGate.ready) {
+                finishInspectorTaskTimer('warning', statusTitle);
+            }
+            runOutcome = deliveryGate.ready ? 'success' : 'needs_action';
 
         } catch (error) {
             if (isTranslationCancelled || error.name === 'AbortError' || error.message === 'TRANSLATION_CANCELLED') {
@@ -11516,6 +13826,29 @@ function initTranslateTool() {
                 updateTranslateRunSummary(translateRunSummaryState.completed, translateRunSummaryState.total, `${runLanguageLabel}已取消`);
                 setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}翻译已取消，未完成的语言不会继续执行。`);
                 setStatus('warning', `${runLanguageLabel}翻译已取消`, '已停止后续请求。现在可以重新选择模型、调整配置，或上传新的文件。');
+                finishInspectorTaskTimer('warning', `${runLanguageLabel}翻译已取消`);
+            } else if (error.isPreflightFailure) {
+                const quotaDepleted = isApiQuotaDepletedError(error);
+                const phase = quotaDepleted
+                    ? `${runLanguageLabel}未开始：API 额度已用尽`
+                    : `${runLanguageLabel}未开始：通道预检失败`;
+                const actionText = quotaDepleted
+                    ? '当前 API 通道没有可用额度。本次没有发送任何待翻译文本，也没有改写导入报告。请充值/恢复额度，或切换到其他有额度的通道后再次点击重译。'
+                    : '本次没有发送任何待翻译文本，也没有改写导入报告。请检查 Key、Base URL 和模型权限，或切换可用通道后重试。';
+                console.error('Translate preflight failed:', error);
+                recordClientError('startTranslate-preflight', error, { targetLang, runLanguageLabel });
+                runOutcome = 'preflight_failed';
+                markTranslateLanguageFailed(targetLang);
+                updateTranslateRunSummary(0, totalTasks, phase);
+                updateTranslationRunActions();
+                setTranslateDownloadLanguageSummary(`${phase}。${actionText}`);
+                setStatus(
+                    'error',
+                    phase,
+                    `${actionText} 详细原因：${error.message || '未知错误'}`,
+                    revealApiConfigPanel,
+                    quotaDepleted ? '充值或切换通道' : '检查通道'
+                );
             } else {
                 console.error('Translate error:', error);
                 recordClientError('startTranslate', error, { targetLang, runLanguageLabel });
@@ -11600,6 +13933,19 @@ function initTranslateTool() {
     }
 
     async function downloadTranslated() {
+        ensureTranslationReportCoversExpectedTasks();
+        const deliveryGate = getTranslationDeliveryGate();
+        if (!deliveryGate.ready) {
+            setTranslateDownloadLanguageSummary(
+                `仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版。请先点击“一键修复并生成交付版”；如需查看当前结果，可主动导出未验证版。`
+            );
+            setStatus(
+                'warning',
+                '阻断问题未清零，不能下载交付版',
+                `当前还有 ${deliveryGate.blockingCount} 条翻译失败、结果缺失或硬质检问题。未验证版可供查看和人工修改，但不能直接交付。`
+            );
+            return;
+        }
         const workbook = translatedWorkbook || buildTranslationWorkbook();
         if (!workbook) {
             alert('没有可下载的翻译结果');
@@ -11613,13 +13959,113 @@ function initTranslateTool() {
             const savedPath = await saveWorkbookFile(workbook, fileName, {
                 onProgress: (_phase, message) => setTranslateDownloadLanguageSummary(message)
             });
-            setTranslateDownloadLanguageSummary(`翻译文件已保存：${savedPath}`);
-            setStatus('success', '翻译文件已保存', savedPath);
+            setTranslateDownloadLanguageSummary(`交付版已保存：${savedPath}`);
+            setStatus('success', '交付版已保存', savedPath);
         } catch (error) {
             console.error('保存翻译文件失败:', error);
             recordClientError('translation-file-download', error);
             setTranslateDownloadLanguageSummary('翻译文件保存失败，请稍后重试。');
             setStatus('error', '翻译文件保存失败', error.message || String(error));
+        }
+    }
+
+    function hideUnverifiedTranslationExportConfirmation() {
+        if (translateUnverifiedExportConfirm) {
+            translateUnverifiedExportConfirm.style.display = 'none';
+        }
+    }
+
+    function showUnverifiedTranslationExportConfirmation() {
+        ensureTranslationReportCoversExpectedTasks();
+        const deliveryGate = getTranslationDeliveryGate();
+        if (deliveryGate.ready) {
+            hideUnverifiedTranslationExportConfirmation();
+            void downloadTranslated();
+            return;
+        }
+        if (!translationRunReport) {
+            setStatus('warning', '暂无可导出的当前译文', '请先完成翻译或导入翻译报告。');
+            return;
+        }
+        if (translateUnverifiedExportMessage) {
+            translateUnverifiedExportMessage.textContent =
+                `当前仍有 ${deliveryGate.blockingCount} 条阻断问题。导出文件会命名为 *_translated_unverified.xlsx，第一页会标注“未验证译文，请勿直接交付”。`;
+        }
+        if (translateUnverifiedExportConfirm) {
+            translateUnverifiedExportConfirm.style.display = 'grid';
+        }
+        translateConfirmUnverifiedExportBtn?.focus();
+    }
+
+    function buildUnverifiedTranslationWorkbook(deliveryGate = getTranslationDeliveryGate()) {
+        const workbook = buildTranslationWorkbook();
+        if (!workbook) return null;
+
+        const issueSummary = getTranslationReportIssueSummary();
+        const languageCode = translationRunReport?.targetLang || targetLangSelect?.value || '';
+        const languageName = getTranslateLanguageName(languageCode) || languageCode || '未指定';
+        const noticeSheetName = '未验证说明';
+        const noticeRows = [
+            ['未验证译文，请勿直接交付'],
+            [],
+            ['文件状态', `包含 ${deliveryGate.blockingCount} 条阻断问题，尚未达到正式交付条件`],
+            ['目标语言', languageName],
+            ['生成时间', new Date().toLocaleString('zh-CN')],
+            ['翻译失败 / 未返回', issueSummary.failedOrMissing || 0],
+            ['硬质检未通过', issueSummary.hardQa || 0],
+            ['软性需确认', issueSummary.softRisk || 0],
+            [],
+            ['正式交付条件', '翻译失败、结果缺失和硬质检问题全部清零'],
+            ['建议操作', '返回工具点击“一键修复并生成交付版”，或在翻译报告中填写修订译文后重新导入'],
+            ['数据说明', '后续数据工作表是当前译文快照；“翻译报告”工作表列出了具体问题和位置'],
+            ['文件命名', '*_translated_unverified.xlsx 只用于查看、人工修改或内部确认，不等同于 *_translated.xlsx 交付版']
+        ];
+        const noticeSheet = XLSX.utils.aoa_to_sheet(noticeRows);
+        noticeSheet['!cols'] = [{ wch: 20 }, { wch: 90 }];
+        XLSX.utils.book_append_sheet(workbook, noticeSheet, noticeSheetName);
+        workbook.SheetNames = [
+            noticeSheetName,
+            ...workbook.SheetNames.filter(sheetName => sheetName !== noticeSheetName)
+        ];
+        return workbook;
+    }
+
+    async function downloadUnverifiedTranslation() {
+        ensureTranslationReportCoversExpectedTasks();
+        const deliveryGate = getTranslationDeliveryGate();
+        if (deliveryGate.ready) {
+            hideUnverifiedTranslationExportConfirmation();
+            await downloadTranslated();
+            return;
+        }
+
+        const workbook = buildUnverifiedTranslationWorkbook(deliveryGate);
+        if (!workbook) {
+            setStatus('warning', '没有可导出的当前译文', '请先完成翻译或导入包含当前译文的翻译报告。');
+            return;
+        }
+
+        const fileName = getTranslationOutputFileName('translated_unverified');
+        try {
+            if (translateConfirmUnverifiedExportBtn) translateConfirmUnverifiedExportBtn.disabled = true;
+            setTranslateDownloadLanguageSummary('正在保存未验证译文到下载目录...');
+            const savedPath = await saveWorkbookFile(workbook, fileName, {
+                onProgress: (_phase, message) => setTranslateDownloadLanguageSummary(message)
+            });
+            hideUnverifiedTranslationExportConfirmation();
+            setTranslateDownloadLanguageSummary(`未验证译文已保存：${savedPath}。该文件仍有 ${deliveryGate.blockingCount} 条阻断问题，不能直接交付。`);
+            setStatus(
+                'warning',
+                '未验证译文已保存（请勿直接交付）',
+                `${savedPath}；当前仍有 ${deliveryGate.blockingCount} 条阻断问题。`
+            );
+        } catch (error) {
+            console.error('保存未验证译文失败:', error);
+            recordClientError('translation-unverified-file-download', error);
+            setTranslateDownloadLanguageSummary('未验证译文保存失败，请稍后重试。');
+            setStatus('error', '未验证译文保存失败', error.message || String(error));
+        } finally {
+            if (translateConfirmUnverifiedExportBtn) translateConfirmUnverifiedExportBtn.disabled = false;
         }
     }
 
@@ -11654,6 +14100,7 @@ function initTranslateTool() {
         document.getElementById('translateTotalCols').textContent = '-';
         document.getElementById('translateProgressFill').style.width = '0%';
         document.getElementById('translateProgressInfo').textContent = '';
+        resetTranslateDiscountCheck();
 
         fileInfo.style.display = 'none';
         columnSelectSection.style.display = 'none';
@@ -11854,13 +14301,19 @@ function initTranslateTool() {
         return `[翻译失败${reason ? `：${reason}` : ''}] ${text}`;
     }
 
+    function normalizeTranslateResultText(text, sourceText = '', reason = '返回空译文') {
+        if (!isBlankTranslationResult(text)) return String(text ?? '');
+        return makeTranslateFailureText(sourceText, reason);
+    }
+
     function isTranslateFailureText(text) {
-        return String(text || '').startsWith('[翻译失败');
+        return isBlankTranslationResult(text) || isMarkedTranslationFailure(text);
     }
 
     function summarizeTranslateError(error) {
         const message = String(error?.message || error || '').trim();
         if (!message) return '未知错误';
+        if (isApiQuotaDepletedError(error)) return 'API 额度已用尽';
         if (error?.isOutputTruncated || /finish_reason:\s*(length|MAX_TOKENS|max_tokens)|被截断|incomplete|max_output/i.test(message)) return '输出被截断，已提高输出上限重试';
         if (/timeout|timed out|abort/i.test(message)) return '请求超时';
         if (/429|rate limit|too many requests|限流|频率/i.test(message)) return '限流或请求过快';
@@ -11898,7 +14351,7 @@ function initTranslateTool() {
         const sourceName = context.sourceColumnName || '主源列';
         const referenceName = context.referenceColumnName || '参考列';
         const nonEnglishCopyGuard = targetLang && targetLang !== 'en'
-            ? `目标语言不是英文时，参考列里的英文只能用于理解含义、术语和语气，必须翻译成${getTranslateLanguageName(targetLang)}；除品牌名、代码、占位符、硬性术语外，不要把英文单词直接混进最终译文。`
+            ? `目标语言不是英文时，参考列里的英文只能用于理解含义、术语和语气，必须翻译成${getTranslateLanguageName(targetLang)}；除品牌名、代码、受保护UI标记、占位符、目标语硬性术语或项目规则明确要求保留的英文外，不要把英文单词直接混进最终译文。参考列中的玩法名、系统名、技能名、物品名、资源名、模式名和活动名都不能自动视为官方英文名；目标语言使用非拉丁文字时，即使只有一个英文造词也要本地化或按目标语习惯音译，不能原样复制。`
             : '';
         return `\n双语参考：主源列「${sourceName}」用于理解原意；参考列「${referenceName}」是已确认或可参考的本地化译文，用于参考术语、语气、UI长度和简短表达。若普通术语表的英文参考与行内参考译文不同，以行内参考译文作为当前上下文优先参考；若主源文本与参考译文明显冲突，以主源文本含义为准，但保持参考译文的本地化风格。${nonEnglishCopyGuard}`;
     }
@@ -11935,7 +14388,7 @@ ${JSON.stringify(texts)}`;
         };
     }
 
-    function buildBatchTranslatePromptParts(textsOrTasks, sourceLang, targetLang, rules, glossaryTerms = [], consistencyTerms = []) {
+    function buildBatchTranslatePromptParts(textsOrTasks, sourceLang, targetLang, rules, glossaryTerms = [], consistencyTerms = [], consistencyExamples = []) {
         if (targetLang === 'zh-TW') {
             return buildTraditionalChineseBatchTranslatePromptParts(textsOrTasks, sourceLang, rules);
         }
@@ -12017,10 +14470,26 @@ ${JSON.stringify(texts)}`;
             return row;
         });
         const glossarySection = buildTranslateGlossaryPromptSection(glossaryTerms, targetLang);
-        const consistencySection = buildTranslateConsistencyPromptSection(consistencyTerms);
+        const consistencySection = buildTranslateConsistencyPromptSection(consistencyTerms, consistencyExamples);
+        const discountInstructions = items
+            .map(item => ({
+                id: item.id,
+                instruction: buildNexusDiscountPromptInstruction(item.text, targetLang)
+            }))
+            .filter(item => item.instruction);
+        const discountSection = discountInstructions.length
+            ? `\n折扣保护（金额敏感，逐条执行；本段规则优先于普通数字保留要求）：\n${discountInstructions.map(item => `条目 ${item.id}：${item.instruction}`).join('\n')}\n`
+            : '';
         const compactStyleInstruction = getTranslateCompactStyleInstruction(targetLang);
+        const referenceUiInstruction = globalThis.NexusProtectedUiTokenPolicy?.buildPromptInstruction
+            ? globalThis.NexusProtectedUiTokenPolicy.buildPromptInstruction(
+                '',
+                items.map(item => item.referenceText).filter(Boolean).join('\n'),
+                { projectRules: rules || currentProject?.rules || '' }
+            )
+            : '';
         const nonEnglishReferenceCopyGuard = targetLang !== 'en'
-            ? ` If referenceText contains English, use it only for meaning, terminology, tone, and length. The final translation must be in ${langNames[targetLang] || targetLang}; do not copy English words into the final translation except brands, code, placeholders, or hard glossary terms.`
+            ? ` If referenceText contains English, use it only for meaning, terminology, tone, and length. The final translation must be in ${langNames[targetLang] || targetLang}; do not copy English words into the final translation except brands, code, placeholders, recognized uppercase game/UI abbreviations such as ATK, DEF, HP, MP, EXP and LV, target-language hard glossary terms, or English explicitly retained by project rules. English gameplay, system, skill, item, resource, mode, and activity names are not automatically official retained names. For a non-Latin target language, localize or transliterate even a single coined English word instead of copying it.`
             : '';
         const batchLengthRequirement = targetLang === 'zh-TW'
             ? '繁中目标不提供 maxVisibleLength；这是完整繁简转换任务，不是摘要或压缩。不得为了项目字数/字符规则删除“补偿、排名、奖励、人数、次数、已满、不足、列表、领取、关卡”等核心信息。'
@@ -12028,11 +14497,13 @@ ${JSON.stringify(texts)}`;
         const sourceCopyGuard = targetLang === 'zh-TW'
             ? '不要保留未转换的简体字；必须输出繁体中文。'
             : '除品牌名/代码/固定专名外，不要保留主源中文片段；';
+        const targetLanguagePurityInstruction =
+            `最终译文必须严格使用${langNames[targetLang] || targetLang}，不得误用或混入其他语言；即使另一种语言使用相同字母或文字系统也不例外，受保护占位符、品牌、代码和公认游戏/UI缩写除外。`;
         const systemPrompt = `You are a batch game localization translation engine. Translate every item in texts into ${langNames[targetLang] || targetLang}.
 CRITICAL OUTPUT FORMAT: return ONLY a JSON array of translated strings, exactly the same length and order as texts. Example: ["Админ системы","Админ гильдии"]. Never return objects. Never return id/text/sourceText/referenceText/maxVisibleLength/glossary. Never echo the input JSON. No explanation. No Markdown.
 你是批量游戏本地化翻译引擎。将 texts 中的游戏文本逐条翻译成${langNames[targetLang] || targetLang}。
 只返回 JSON 字符串数组，数组长度必须等于 texts 数量，顺序必须一致。不要返回对象数组，不要返回 id/text/sourceText/referenceText/maxVisibleLength/glossary，不要回显输入 JSON。不要解释，不要输出思考过程，不要 Markdown。
-要求：完整翻译；保留 __PH_1__ 这类受保护占位符、数字、HTML/颜色/outline 标签；语言自然简洁；如果原文包含字面量 \\n，译文也必须保留对应受保护占位符，不要改成真实换行；${sourceCopyGuard}${batchLengthRequirement}${compactStyleInstruction}${hasReference ? ` 如果条目包含 referenceText，必须以 sourceText 理解原意，并参考 referenceText 的术语、语气、UI长度和简短表达；当普通术语表英文参考与 referenceText 不同时，以 referenceText 作为当前上下文优先参考；两者冲突时以 sourceText 含义为准。${nonEnglishReferenceCopyGuard}` : ''}${hasItemGlossary ? ' 如果条目包含 glossary，=> 是目标语硬性术语必须使用，≈ 是概念参考不能直接照抄为最终译文。' : ''}
+要求：完整翻译；保留 __PH_1__ 这类受保护占位符或UI标记、数字、HTML/颜色/outline 标签；语言自然简洁；${targetLanguagePurityInstruction}如果原文包含字面量 \\n，译文也必须保留对应受保护占位符，不要改成真实换行；${sourceCopyGuard}${batchLengthRequirement}${compactStyleInstruction}${referenceUiInstruction ? ` ${referenceUiInstruction}` : ''}${hasReference ? ` 如果条目包含 referenceText，必须以 sourceText 理解原意，并参考 referenceText 的术语、语气、UI长度和简短表达；当普通术语表英文参考与 referenceText 不同时，以 referenceText 作为当前上下文优先参考；两者冲突时以 sourceText 含义为准。${nonEnglishReferenceCopyGuard}` : ''}${hasItemGlossary ? ' 如果条目包含 glossary，=> 是目标语硬性术语必须使用，≈ 是概念参考不能直接照抄为最终译文。' : ''}${discountSection}
 项目规则：${compactRules || '按通用游戏本地化规范执行'}${glossarySection}${consistencySection}`;
         const userPrompt = `texts:
 ${JSON.stringify(payload)}`;
@@ -12044,8 +14515,8 @@ ${JSON.stringify(payload)}`;
         };
     }
 
-    function buildBatchTranslatePrompt(texts, sourceLang, targetLang, rules, glossaryTerms = [], consistencyTerms = []) {
-        const { systemPrompt, userPrompt } = buildBatchTranslatePromptParts(texts, sourceLang, targetLang, rules, glossaryTerms, consistencyTerms);
+    function buildBatchTranslatePrompt(texts, sourceLang, targetLang, rules, glossaryTerms = [], consistencyTerms = [], consistencyExamples = []) {
+        const { systemPrompt, userPrompt } = buildBatchTranslatePromptParts(texts, sourceLang, targetLang, rules, glossaryTerms, consistencyTerms, consistencyExamples);
         return `${systemPrompt}\n\n${userPrompt}`;
     }
 
@@ -12084,7 +14555,7 @@ ${text}`;
                     const protectedContext = createPlaceholderProtectionContext({
                         text: task.text,
                         referenceText: task.referenceText || ''
-                    });
+                    }, { projectRules: rules });
                     return {
                         ...task,
                         text: protectedContext.fields.text,
@@ -12099,7 +14570,16 @@ ${text}`;
                     tasks.flatMap(task => task.consistencyTerms || []),
                     TRANSLATE_CONSISTENCY_PROMPT_TERM_LIMIT
                 );
-                const promptParts = buildBatchTranslatePromptParts(protectedTasks, sourceLang, targetLang, rules, [], batchConsistencyTerms);
+                const batchConsistencyExamples = tasks.flatMap(task => task.consistencyExamples || []);
+                const promptParts = buildBatchTranslatePromptParts(
+                    protectedTasks,
+                    sourceLang,
+                    targetLang,
+                    rules,
+                    [],
+                    batchConsistencyTerms,
+                    batchConsistencyExamples
+                );
                 const content = apiConfig.provider === 'youdaoTranslate'
                     ? await translateWithYoudaoLlm(
                         promptParts.userPrompt,
@@ -12138,7 +14618,9 @@ ${text}`;
                 const restoredTranslations = translations.map((translation, index) =>
                     restoreProtectedPlaceholders(translation, protectedTasks[index]?.placeholderReplacements || [])
                 );
-                if (restoredTranslations.every(Boolean)) return restoredTranslations;
+                if (restoredTranslations.every(translation => !isBlankTranslationResult(translation))) {
+                    return restoredTranslations;
+                }
                 throw new Error('批量翻译返回空译文');
             } catch (error) {
                 if (signal?.aborted || error.name === 'AbortError' || error.message === 'TRANSLATION_CANCELLED') {
@@ -12186,7 +14668,7 @@ ${text}`;
                 const protectedContext = createPlaceholderProtectionContext({
                     text,
                     referenceText: context.referenceText || ''
-                });
+                }, { projectRules: rules });
                 const protectedText = protectedContext.fields.text;
                 const protectedReferenceText = protectedContext.fields.referenceText;
                 const nextContext = {
@@ -12198,7 +14680,8 @@ ${text}`;
                         [text, context.referenceText],
                         context.consistencyTerms?.length ? context.consistencyTerms : translateRunConsistencyTerms,
                         TRANSLATE_CONSISTENCY_TASK_TERM_LIMIT
-                    )
+                    ),
+                    consistencyExamples: context.consistencyExamples || []
                 };
 
                 if (apiConfig.provider === 'youdaoTranslate') {
@@ -12206,8 +14689,13 @@ ${text}`;
 ${buildTranslateReferenceInstruction(nextContext, targetLang)}
 ${buildTranslateLengthInstruction(text, targetLang, context)}
 ${buildTranslateGlossaryPromptSection(glossaryTerms, targetLang)}
-${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [])}`, apiConfig, signal);
-                    return restoreProtectedPlaceholders(cleanTranslationResponse(translated), protectedContext.replacements);
+${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nextContext.consistencyExamples || [])}`, apiConfig, signal);
+                    const restoredTranslation = restoreProtectedPlaceholders(
+                        cleanTranslationResponse(translated),
+                        protectedContext.replacements
+                    );
+                    if (isBlankTranslationResult(restoredTranslation)) throw new Error('返回空译文');
+                    return restoredTranslation;
                 }
 
                 const prompt = buildTranslatePrompt(protectedText, sourceLang, targetLang, rules, glossaryTerms, nextContext);
@@ -12232,8 +14720,12 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [])}`, 
                     API_REQUEST_TIMEOUT_MS,
                     { rejectTruncated: true }
                 );
-                let translated = cleanTranslationResponse(content);
-                return restoreProtectedPlaceholders(translated, protectedContext.replacements);
+                const translated = restoreProtectedPlaceholders(
+                    cleanTranslationResponse(content),
+                    protectedContext.replacements
+                );
+                if (isBlankTranslationResult(translated)) throw new Error('返回空译文');
+                return translated;
 
             } catch (error) {
                 if (signal?.aborted || error.name === 'AbortError' || error.message === 'TRANSLATION_CANCELLED') {
@@ -12266,7 +14758,7 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [])}`, 
             : buildTranslateGlossaryPromptSection((task.glossaryTerms || []).slice(0, 16), targetLang);
         const consistencySection = targetLang === 'zh-TW'
             ? ''
-            : buildTranslateConsistencyPromptSection(task.consistencyTerms || []);
+            : buildTranslateConsistencyPromptSection(task.consistencyTerms || [], task.consistencyExamples || []);
         const preferredLengthBudget = getTranslationPreferredLengthBudget(task.text, targetLang, task);
         const hardLengthBudget = getTranslationLengthBudget(task.text, targetLang, task);
         const compactStyleInstruction = getTranslateCompactStyleInstruction(targetLang);
@@ -12279,23 +14771,63 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [])}`, 
         const repairSourceCopyGuard = targetLang === 'zh-TW'
             ? '- 不要保留未转换的简体字；必须输出繁体中文。'
             : '- 不要保留主源中文原文片段，除非项目规则明确要求。';
+        const hardAllowedTerms = (task.glossaryTerms || [])
+            .filter(term => term?.constraint !== 'reference' && term?.target)
+            .map(term => term.target);
+        const carryoverResult = globalThis.NexusLanguageCarryoverGuard?.evaluateCarryover
+            ? globalThis.NexusLanguageCarryoverGuard.evaluateCarryover(task.text, currentTranslation, targetLang, {
+                referenceText: task.referenceText || '',
+                allowedTerms: hardAllowedTerms,
+                projectRules: rules || currentProject?.rules || ''
+            })
+            : null;
+        const blockedEnglishPhrases = [...new Set((carryoverResult?.issues || [])
+            .filter(issue => issue?.kind === 'block' && /^english_/.test(String(issue?.code || '')) && issue?.phrase)
+            .map(issue => issue.phrase))];
+        const hasEnglishCarryoverIssue = blockedEnglishPhrases.length > 0 ||
+            /玩法名疑似沿用英文|目标译文疑似照抄英文参考|目标译文仍含英文|疑似照抄英文参考术语/.test(String(qaStatus || ''));
+        const englishCarryoverRepairInstruction = hasEnglishCarryoverIssue
+            ? `- 检测到英文参考残留。除公认的全大写游戏/UI缩写（如 ATK、DEF、HP、MP、EXP、LV）、目标语硬性术语或项目规则明确要求保留英文外，必须把技能、物品、资源、玩法、系统、模式、活动等英文名称完整本地化为${targetLanguage}；单个英文造词也不能原样保留。${blockedEnglishPhrases.length ? `本次必须消除的英文：${blockedEnglishPhrases.join('、')}。` : ''}修复后重新通读，确保不再出现这些英文。`
+            : '';
+        const hasChineseCarryoverIssue = /混入中文|中文汉字/.test(String(qaStatus || ''));
+        const leakedChinesePhrases = hasChineseCarryoverIssue
+            ? [...new Set(String(currentTranslation || '').match(/[\u3400-\u9fff]+/g) || [])].slice(0, 12)
+            : [];
+        const chineseCarryoverRepairInstruction = hasChineseCarryoverIssue
+            ? `- 检测到目标译文混入中文。必须把所有中文片段完整翻成${targetLanguage}，包括【】、（）或名称中的皮肤名、技能名、玩法名和专名；括号可以保留，但括号内不能继续保留中文。${leakedChinesePhrases.length ? `本次必须消除的中文：${leakedChinesePhrases.join('、')}。` : ''}可以参考英文列理解名称含义，但最终整句不得含中文。`
+            : '';
+        const hasForeignScriptIssue = /目标.+中混入/.test(String(qaStatus || ''));
+        const foreignScriptRepairInstruction = hasForeignScriptIssue
+            ? `- 检测到译文混入了不属于${targetLanguage}的文字。必须把所有异种文字片段完整翻成${targetLanguage}；受保护的占位符、品牌、代码和公认游戏/UI缩写除外。`
+            : '';
+        const discountInstruction = buildNexusDiscountPromptInstruction(task.text, targetLang);
+        const protectedUiInstruction = globalThis.NexusProtectedUiTokenPolicy?.buildPromptInstruction
+            ? globalThis.NexusProtectedUiTokenPolicy.buildPromptInstruction(task.text, task.referenceText || '', {
+                projectRules: rules || currentProject?.rules || ''
+            })
+            : '';
         const protectedContext = createPlaceholderProtectionContext({
             sourceText: task.text,
             referenceText: task.referenceText || '',
             currentTranslation
-        });
+        }, { projectRules: rules });
         const repairInstruction = `修复下面的游戏本地化译文，目标语言必须是 ${targetLanguage}。只输出修复后的最终译文，不要解释。
 
 必须修复的问题：
 ${qaStatus || '译后检测未通过'}
 
 硬性要求：
-- 保留主源文本中的所有 __PH_1__ 这类受保护占位符，数量和顺序必须一致。
+- 保留主源文本中的所有 __PH_1__ 这类受保护占位符或UI标记，数量和顺序必须一致。
 - 如果主源文本包含受保护的换行占位符，译文也必须保留对应占位符，不要改成真实换行。
+${protectedUiInstruction ? `- ${protectedUiInstruction}` : ''}
 ${repairSourceCopyGuard}
+${chineseCarryoverRepairInstruction}
+${foreignScriptRepairInstruction}
+${englishCarryoverRepairInstruction}
 - 术语表若只有英文/旧译文参考，不能直接照抄为非英语目标译文；行内参考译文只用于理解语境和 UI 长度。
 ${repairLengthInstruction}
 ${compactStyleInstruction}
+${discountInstruction ? `- ${discountInstruction}` : ''}
 
 项目规则：${compactRules || '按通用游戏本地化规范执行'}${glossarySection}${consistencySection}
 
@@ -12312,7 +14844,12 @@ ${protectedContext.fields.currentTranslation}`;
 
                 if (apiConfig.provider === 'youdaoTranslate') {
                     const repaired = await translateWithYoudaoLlm(protectedContext.fields.sourceText, sourceLang, targetLang, `${repairInstruction}`, apiConfig, signal);
-                    return restoreProtectedPlaceholders(cleanTranslationResponse(repaired), protectedContext.replacements);
+                    const restoredRepair = restoreProtectedPlaceholders(
+                        cleanTranslationResponse(repaired),
+                        protectedContext.replacements
+                    );
+                    if (isBlankTranslationResult(restoredRepair)) throw new Error('修复返回空译文');
+                    return restoredRepair;
                 }
 
                 const content = await requestModelContent(
@@ -12336,7 +14873,12 @@ ${protectedContext.fields.currentTranslation}`;
                     API_REQUEST_TIMEOUT_MS,
                     { rejectTruncated: true }
                 );
-                return restoreProtectedPlaceholders(cleanTranslationResponse(content), protectedContext.replacements);
+                const restoredRepair = restoreProtectedPlaceholders(
+                    cleanTranslationResponse(content),
+                    protectedContext.replacements
+                );
+                if (isBlankTranslationResult(restoredRepair)) throw new Error('修复返回空译文');
+                return restoredRepair;
             } catch (error) {
                 if (signal?.aborted || error.name === 'AbortError' || error.message === 'TRANSLATION_CANCELLED') {
                     throw error;
@@ -12389,7 +14931,7 @@ ${protectedContext.fields.currentTranslation}`;
         const compactRules = buildCompactTranslateRules(rules, targetLang);
 
         const glossarySection = buildTranslateGlossaryPromptSection((glossaryTerms || []).slice(0, 24), targetLang);
-        const consistencySection = buildTranslateConsistencyPromptSection(context.consistencyTerms || []);
+        const consistencySection = buildTranslateConsistencyPromptSection(context.consistencyTerms || [], context.consistencyExamples || []);
         const referenceInstruction = buildTranslateReferenceInstruction(context, targetLang);
         const lengthInstruction = buildTranslateLengthInstruction(context.originalText || text, targetLang, {
             referenceText: context.originalReferenceText || context.referenceText || ''
@@ -12400,10 +14942,20 @@ ${protectedContext.fields.currentTranslation}`;
         const sourceCopyGuard = targetLang === 'zh-TW'
             ? '不要保留未转换的简体字；必须输出繁体中文。'
             : '除品牌名/代码/固定专名外，不要保留主源中文片段；';
+        const targetLanguagePurityInstruction =
+            `最终译文必须严格使用${langNames[targetLang] || targetLang}，不得误用或混入其他语言；即使另一种语言使用相同字母或文字系统也不例外，受保护占位符、品牌、代码和公认游戏/UI缩写除外。`;
+        const discountInstruction = buildNexusDiscountPromptInstruction(text, targetLang);
+        const protectedUiInstruction = globalThis.NexusProtectedUiTokenPolicy?.buildPromptInstruction
+            ? globalThis.NexusProtectedUiTokenPolicy.buildPromptInstruction(
+                context.originalText || text,
+                context.originalReferenceText || context.referenceText || '',
+                { projectRules: rules || currentProject?.rules || '' }
+            )
+            : '';
 
         return `将下面游戏文本翻译成${langNames[targetLang] || targetLang}。只返回译文。
 
-要求：完整翻译；保留 __PH_1__ 这类受保护占位符、数字、HTML/颜色/outline 标签；如果原文包含受保护的换行占位符，译文也必须保留对应占位符，不要改成真实换行；语言自然简洁；${sourceCopyGuard}不要解释，不要输出思考过程。${lengthInstruction}
+要求：完整翻译；保留 __PH_1__ 这类受保护占位符或UI标记、数字、HTML/颜色/outline 标签；如果原文包含受保护的换行占位符，译文也必须保留对应占位符，不要改成真实换行；语言自然简洁；${targetLanguagePurityInstruction}${sourceCopyGuard}${protectedUiInstruction ? `${protectedUiInstruction}` : ''}不要解释，不要输出思考过程。${lengthInstruction}${discountInstruction ? `\n\n${discountInstruction}` : ''}
 
 项目规则：${compactRules || '按通用游戏本地化规范执行'}${referenceInstruction}${glossarySection}${consistencySection}
 ${referenceBlock}`;
@@ -14568,6 +17120,7 @@ function initGlossaryOrganizeTool() {
     }
 
     function isTemporaryOrganizerApiError(error) {
+        if (isApiQuotaDepletedError(error)) return false;
         const text = `${error?.message || ''} ${error?.rawText || ''} ${JSON.stringify(error?.payload || '')}`;
         return error?.status === 429 ||
             error?.status === 500 ||
@@ -16559,6 +19112,7 @@ function initL10nCheckTool() {
     clearHistoryBtn.addEventListener('click', clearImportedHistoryResults);
     document.addEventListener('nexus:glossary-library-updated', renderL10nGlossaryList);
     document.addEventListener('nexus:api-profiles-updated', renderL10nProfileList);
+    document.addEventListener('nexus:api-runtime-health-updated', renderL10nProfileList);
     document.addEventListener('nexus:projects-updated', loadL10nProjects);
     initAutoSavePreference();
     loadL10nProjects();
@@ -16921,6 +19475,9 @@ function initL10nCheckTool() {
     function getFriendlyApiErrorMessage(error, profile) {
         const message = String(error?.message || '接口返回异常').replace(/\s+/g, ' ').trim();
         const profileLabel = profile?.name || (profile?.provider ? getPlatformName(profile.provider) : '模型通道');
+        if (isApiQuotaDepletedError(error)) {
+            return `${profileLabel}的 API 额度已用尽：${message}。请充值/恢复额度，或切换到其他有额度的通道。`;
+        }
         if (isTemporaryL10nApiError(error)) {
             return `${profileLabel}临时繁忙或限流：${message}。这通常不是 Key 填错，建议稍后点击“继续检测未完成部分”补跑。`;
         }
@@ -20463,6 +23020,7 @@ ${JSON.stringify(rows)}
     }
 
     function isTemporaryL10nApiError(error) {
+        if (isApiQuotaDepletedError(error)) return false;
         const text = `${error?.message || ''} ${error?.rawText || ''} ${JSON.stringify(error?.payload || '')}`;
         return error?.status === 429 ||
             error?.status === 500 ||
@@ -24642,6 +27200,7 @@ ${JSON.stringify(rows)}
     }
 
 function isTemporaryGlossaryApiError(error) {
+    if (isApiQuotaDepletedError(error)) return false;
     const text = `${error?.message || ''} ${error?.rawText || ''} ${JSON.stringify(error?.payload || '')}`;
     return error?.status === 429 ||
         error?.status === 500 ||

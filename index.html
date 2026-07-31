@@ -605,7 +605,7 @@
                                     </div>
                                 </div>
                                 <div class="translate-language-grid" id="translateTargetLangList"></div>
-                                <p class="setting-hint" id="translateLanguageRunHint">只勾选当前目标语言时按单语言翻译；勾选多个语言时会按语言逐个运行并分别自动保存。</p>
+                                <p class="setting-hint" id="translateLanguageRunHint">只勾选当前目标语言时按单语言翻译；多语言会逐个运行。每种语言保存报告，硬错误清零后才保存交付版。</p>
                             </div>
                         </details>
                         <details class="setting-row translate-collapsible-setting">
@@ -630,12 +630,22 @@
                                     </svg>
                                     导入翻译报告继续
                                 </label>
-                                <button class="action-btn secondary" id="translateReviewImportedProgressBtn" type="button">复查已完成译文</button>
+                                <button class="action-btn secondary" id="translateReviewImportedProgressBtn" type="button" style="display: none;">按当前语言检查旧译文</button>
                                 <button class="action-btn secondary" id="translateRetrySuspiciousBtn" type="button" style="display: none;">只补译可疑行</button>
                                 <button class="action-btn secondary" id="translateCompactLongImportedBtn" type="button" style="display: none;">精简超长译文</button>
                                 <button class="action-btn secondary" id="translateClearImportedProgressBtn" type="button" style="display: none;">清除导入</button>
                             </div>
-                            <div class="translate-import-status" id="translateProgressImportStatus">可导入之前下载的 translation_report.xlsx，或带“翻译报告”分页的 translated.xlsx；成功项会复用，失败/缺失项会继续翻译。</div>
+                            <div class="translate-import-status" id="translateProgressImportStatus">导入旧 translation_report.xlsx 后会按当前规则重检，并读取“必须重译 / 接受现译 / 使用修订译文”。硬错误清零后才生成交付版。</div>
+                            <details class="translate-collapsible-setting translate-import-filter-panel" id="translateImportIssueFilterPanel" style="display: none;">
+                                <summary class="translate-collapsible-summary">
+                                    <span>定向重译问题类型</span>
+                                    <small id="translateImportIssueFilterSummary">未选择时按可疑行处理</small>
+                                </summary>
+                                <div class="translate-collapsible-body translate-import-filter-body">
+                                    <p class="setting-hint">只勾选需要重新消耗 AI 的报告问题类型。例如只勾“混入中文”，就只重译这类行，其余译文继续复用。</p>
+                                    <div class="resource-check-list translate-issue-filter-list" id="translateImportIssueFilterList"></div>
+                                </div>
+                            </details>
                         </div>
                         <div class="setting-row">
                             <label>术语表约束</label>
@@ -687,8 +697,8 @@
                                 <label class="checkbox-setting" for="translateAutoRetryMultiTarget">
                                     <input type="checkbox" id="translateAutoRetryMultiTarget">
                                     <span>
-                                        <strong>多语言自动补跑失败项</strong>
-                                        <small>默认关闭。每种语言完成后若有真实失败/硬问题，会先补跑一次再进入下一语言。</small>
+                                        <strong>多语言自动重译硬问题</strong>
+                                        <small>默认关闭。每种语言完成后，只重新处理翻译失败、结果缺失和硬质检问题。</small>
                                     </span>
                                 </label>
                             </div>
@@ -703,6 +713,31 @@
                             </select>
                         </div>
                         <p class="model-hint">默认使用已选通道和推荐质量策略；需要多语言、多模型或额外精简时再展开对应区域。</p>
+                        <div class="translate-discount-guard-panel" id="translateDiscountGuardPanel">
+                            <div class="translate-discount-guard-head">
+                                <div>
+                                    <strong>折扣语义检查</strong>
+                                    <p>扫描当前文件中的折扣翻译；检查不调用 AI，也不会修改文件。</p>
+                                </div>
+                                <button class="action-btn tiny secondary" id="translateDiscountCheckBtn" type="button">检查折扣问题</button>
+                            </div>
+                            <div class="translate-discount-guard-result" id="translateDiscountCheckStatus" aria-live="polite">
+                                <strong>尚未检查</strong>
+                                <span>点击“检查折扣问题”查看当前文件是否存在折扣方向错误。</span>
+                            </div>
+                            <div class="translate-discount-guard-actions" id="translateDiscountCheckActions">
+                                <button class="action-btn primary" id="translateDiscountRepairBtn" type="button" style="display: none;">
+                                    一键修复并生成文件
+                                </button>
+                                <button class="action-btn secondary" id="translateDiscountDownloadBtn" type="button" style="display: none;">
+                                    下载修复后的文件
+                                </button>
+                            </div>
+                            <details class="translate-discount-guard-details" id="translateDiscountCheckDetails" style="display: none;">
+                                <summary id="translateDiscountCheckDetailsSummary">查看详情</summary>
+                                <div class="translate-discount-guard-details-body" id="translateDiscountCheckDetailsBody"></div>
+                            </details>
+                        </div>
                         <button class="action-btn primary" id="translateBtn">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M5 8l6 6"/>
@@ -789,35 +824,76 @@
                     </div>
 
                     <div class="download-panel" id="translateDownloadSection" style="display: none;">
-                        <h3>翻译完成</h3>
+                        <h3 id="translateDownloadTitle">处理结果</h3>
                         <div class="download-info">
                             <span id="translatedCount">0</span> 条文本已翻译
                         </div>
                         <p class="translate-download-language-summary" id="translateDownloadLanguageSummary"></p>
-                        <button class="action-btn primary" id="translateDownloadBtn">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                                <polyline points="7 10 12 15 17 10"/>
-                                <line x1="12" y1="15" x2="12" y2="3"/>
-                            </svg>
-                            下载翻译文件
-                        </button>
-                        <button class="action-btn secondary" id="translateRetryFailedBtn" style="display: none;">
-                            补跑失败翻译
-                        </button>
-                        <label class="action-btn secondary" id="translateRetryImportShortcutBtn" for="translateProgressImportInput" style="display: none;">
-                            导入报告补跑
-                        </label>
-                        <button class="action-btn secondary" id="translateDownloadFinalReportBtn" style="display: none;">
-                            下载翻译报告
-                        </button>
-                        <button class="action-btn secondary" id="translateResetBtn">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-                                <path d="M3 3v5h5"/>
-                            </svg>
-                            处理新文件
-                        </button>
+                        <div class="translate-result-breakdown" id="translateResultBreakdown" style="display: none;" aria-label="翻译结果分类">
+                            <div class="translate-result-metric pass">
+                                <span>质检通过</span>
+                                <strong id="translateResultPassedCount">0</strong>
+                            </div>
+                            <div class="translate-result-metric failed">
+                                <span>翻译失败 / 未返回</span>
+                                <strong id="translateResultFailedCount">0</strong>
+                            </div>
+                            <div class="translate-result-metric hard">
+                                <span>硬质检未通过</span>
+                                <strong id="translateResultHardQaCount">0</strong>
+                            </div>
+                            <div class="translate-result-metric soft">
+                                <span>软性需确认</span>
+                                <strong id="translateResultSoftCount">0</strong>
+                            </div>
+                        </div>
+                        <details class="translate-discount-guard-details translate-hard-qa-details" id="translateHardQaDetails" style="display: none;">
+                            <summary id="translateHardQaDetailsSummary">查看硬质检明细</summary>
+                            <div class="translate-discount-guard-details-body" id="translateHardQaDetailsBody"></div>
+                        </details>
+                        <div class="translate-delivery-actions">
+                            <button class="action-btn primary" id="translateDownloadBtn">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                    <polyline points="7 10 12 15 17 10"/>
+                                    <line x1="12" y1="15" x2="12" y2="3"/>
+                                </svg>
+                                <span id="translateDownloadBtnLabel">下载交付版</span>
+                            </button>
+                            <button class="action-btn secondary" id="translateRetryFailedBtn" style="display: none;">
+                                一键修复并生成交付版
+                            </button>
+                            <button class="action-btn unverified" id="translateDownloadUnverifiedBtn" type="button" style="display: none;">
+                                导出当前译文（未验证）
+                            </button>
+                            <label class="action-btn secondary" id="translateRetryImportShortcutBtn" for="translateProgressImportInput" style="display: none;">
+                                导入报告继续处理
+                            </label>
+                            <button class="action-btn secondary" id="translateDownloadFinalReportBtn" style="display: none;">
+                                下载翻译报告
+                            </button>
+                            <button class="action-btn secondary" id="translateResetBtn">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                    <path d="M3 3v5h5"/>
+                                </svg>
+                                处理新文件
+                            </button>
+                        </div>
+                        <div class="translate-unverified-confirm" id="translateUnverifiedExportConfirm" style="display: none;" role="alert">
+                            <div>
+                                <strong>这不是交付版</strong>
+                                <p id="translateUnverifiedExportMessage">当前译文仍包含阻断问题。导出的文件仅用于查看或人工修改。</p>
+                            </div>
+                            <div class="translate-unverified-confirm-actions">
+                                <button class="action-btn unverified" id="translateConfirmUnverifiedExportBtn" type="button">
+                                    确认导出未验证版
+                                </button>
+                                <button class="action-btn secondary" id="translateCancelUnverifiedExportBtn" type="button">
+                                    取消
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -2206,6 +2282,10 @@
         </div>
     </div>
 
+    <script src="discount-guard.js"></script>
+    <script src="protected-ui-token-policy.js"></script>
+    <script src="language-carryover-guard.js"></script>
+    <script src="translation-delivery-policy.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

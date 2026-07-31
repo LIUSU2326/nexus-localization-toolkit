@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const distDir = join(rootDir, 'dist');
-const entryFiles = ['index.html', 'styles.css', 'script.js'];
+const entryFiles = ['index.html', 'styles.css', 'discount-guard.js', 'protected-ui-token-policy.js', 'language-carryover-guard.js', 'translation-delivery-policy.js', 'script.js'];
 const requiredAssetDirs = ['vendor'];
 const optionalAssetDirs = ['assets', 'images', 'fonts'];
 

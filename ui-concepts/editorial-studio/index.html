@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NEXUS · 译文工作室概念稿</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Noto+Serif+SC:wght@500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="paper-texture" aria-hidden="true"></div>
+    <div class="application">
+      <aside class="sidebar" aria-label="主导航">
+        <a class="brand" href="#workspace" aria-label="Nexus 本地化工作台首页">
+          <span class="brand-mark">N</span>
+          <span>
+            <b>NEXUS</b>
+            <em>LOCALIZATION STUDIO</em>
+          </span>
+        </a>
+
+        <div class="edition">
+          <span>第 04 期 · 夏</span>
+          <button class="quiet-icon" type="button" title="切换项目">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5"/></svg>
+          </button>
+        </div>
+
+        <nav class="navigation">
+          <p class="nav-label">工作流</p>
+          <a href="#files"><span class="nav-index">01</span><span>稿件收录</span><i>12</i></a>
+          <a class="active" href="#workspace"><span class="nav-index">02</span><span>文本翻译</span><i>⌘2</i></a>
+          <a href="#review"><span class="nav-index">03</span><span>本地化检测</span><i>7</i></a>
+          <a href="#glossary"><span class="nav-index">04</span><span>术语编校</span><i>38</i></a>
+          <p class="nav-label secondary">工具箱</p>
+          <a href="#format"><span class="nav-index">↗</span><span>格式转换</span></a>
+          <a href="#replace"><span class="nav-index">↗</span><span>精准替换</span></a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <button class="studio-switcher" type="button">
+            <span class="avatar">Y</span>
+            <span><b>Yuan</b><small>编辑工作台</small></span>
+            <span class="more">•••</span>
+          </button>
+          <span class="version">NEXUS / 1.0.0</span>
+        </div>
+      </aside>
+
+      <main class="main" id="workspace">
+        <header class="utility-bar">
+          <div class="crumbs">
+            <span>椿丘工作室</span>
+            <span class="slash">/</span>
+            <strong>翻译台</strong>
+          </div>
+          <div class="utility-actions">
+            <button class="short-key" type="button" data-command>
+              <span class="command-glyph">⌘</span> 快捷操作 <kbd>K</kbd>
+            </button>
+            <button class="engine-trigger" type="button" data-open-engine>
+              <span class="engine-dot"></span>
+              AI 引擎
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5"/></svg>
+            </button>
+          </div>
+        </header>
+
+        <section class="manuscript-title">
+          <div class="chapter">CHAPTER 02 <span>·</span> TRANSLATION DESK</div>
+          <div class="title-row">
+            <div>
+              <h1>偏兵小镇 · <i>全文本</i></h1>
+              <p>游戏叙事本地化 / 简体中文 <span class="state-dot"></span> 已保存 14:32</p>
+            </div>
+            <div class="folio">
+              <span>选中行</span>
+              <b>111</b>
+              <small>/ 22,557</small>
+            </div>
+          </div>
+        </section>
+
+        <div class="workspace-grid">
+          <section class="translation-desk">
+            <header class="desk-header">
+              <div>
+                <span class="eyebrow">译文校对台</span>
+                <h2>逐行审阅，<em>让语气保持在场。</em></h2>
+              </div>
+              <div class="desk-tools">
+                <button class="outline-button" type="button" data-toggle-columns>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+                  版面
+                </button>
+                <button class="outline-button icon-only" type="button" title="筛选条件">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10m-7 6h4"/></svg>
+                </button>
+              </div>
+            </header>
+
+            <div class="translation-meta">
+              <div class="active-scope">
+                <span class="scope-label">正在处理</span>
+                <strong>需翻译 · 111 行</strong>
+                <button type="button" class="text-button">修改范围</button>
+              </div>
+              <div class="reading-modes" role="tablist" aria-label="翻译视图">
+                <button class="mode active" type="button" role="tab">对照</button>
+                <button class="mode" type="button" role="tab">译文</button>
+                <button class="mode" type="button" role="tab">原文</button>
+              </div>
+            </div>
+
+            <div class="manuscript-table" aria-label="翻译对照表">
+              <div class="table-head">
+                <span>行</span>
+                <span>英文原稿 <small>column 4</small></span>
+                <span>简体中文译稿 <small>column 3</small></span>
+                <span>校对</span>
+              </div>
+
+              <article class="translation-row selected">
+                <div class="row-number"><span>0504</span><i></i></div>
+                <p class="source">The old bell still rings when nobody is there.</p>
+                <div class="target"><p>即使空无一人，那口旧钟依然会响。</p><small>机器初译 · 待确认语气</small></div>
+                <div class="proof"><span class="flag amber">语气</span><button type="button" aria-label="打开行操作">···</button></div>
+              </article>
+
+              <article class="translation-row">
+                <div class="row-number"><span>0505</span><i></i></div>
+                <p class="source">You hear it most clearly just before dawn.</p>
+                <div class="target"><p>黎明前的那一刻，钟声最为清晰。</p><small>已匹配术语库</small></div>
+                <div class="proof"><span class="flag green">通过</span><button type="button" aria-label="打开行操作">···</button></div>
+              </article>
+
+              <article class="translation-row">
+                <div class="row-number"><span>0506</span><i></i></div>
+                <p class="source">Mara keeps the key below the red cup.</p>
+                <div class="target"><p>玛拉把钥匙藏在红色杯子下面。</p><small>人名保护 · glossary</small></div>
+                <div class="proof"><span class="flag green">通过</span><button type="button" aria-label="打开行操作">···</button></div>
+              </article>
+
+              <article class="translation-row">
+                <div class="row-number"><span>0507</span><i></i></div>
+                <p class="source">“Don’t call it a curse,” she said. “Call it a memory.”</p>
+                <div class="target empty"><p>等待译写</p><small>原句含引号与嵌套语气</small></div>
+                <div class="proof"><span class="flag coral">待译</span><button type="button" aria-label="打开行操作">···</button></div>
+              </article>
+
+              <article class="translation-row">
+                <div class="row-number"><span>0508</span><i></i></div>
+                <p class="source">The road narrows, and then forgets where it was going.</p>
+                <div class="target"><p>路越走越窄，最后竟忘了自己原本通向何方。</p><small>机器初译 · 待确认文风</small></div>
+                <div class="proof"><span class="flag amber">文风</span><button type="button" aria-label="打开行操作">···</button></div>
+              </article>
+            </div>
+
+            <footer class="table-footer">
+              <span><b>1–5</b> / 111 行</span>
+              <div class="page-buttons">
+                <button type="button" disabled>←</button>
+                <button type="button">→</button>
+              </div>
+              <button class="jump-button" type="button">跳至下一处待确认 <span>↓</span></button>
+            </footer>
+          </section>
+
+          <aside class="brief-rail">
+            <section class="rail-block file-card">
+              <div class="rail-topline"><span class="eyebrow">当前稿件</span><button class="dots" type="button">•••</button></div>
+              <div class="file-name">
+                <span class="file-icon">XL</span>
+                <div><strong>偏兵小镇-全文本.xlsx</strong><small>28.53 MB · Excel</small></div>
+              </div>
+              <dl class="file-stats">
+                <div><dt>总行数</dt><dd>22,557</dd></div>
+                <div><dt>可译</dt><dd>111</dd></div>
+                <div><dt>完成</dt><dd>69</dd></div>
+              </dl>
+            </section>
+
+            <section class="rail-block mapping-block">
+              <div class="rail-topline">
+                <span class="eyebrow">稿件结构</span>
+                <button class="text-button" type="button">编辑</button>
+              </div>
+              <div class="mapping-line">
+                <span class="mapping-no">04</span>
+                <span><b>英文原稿</b><small>源语言 · en</small></span>
+                <em>→</em>
+              </div>
+              <div class="mapping-line destination">
+                <span class="mapping-no">03</span>
+                <span><b>管理</b><small>目标语言 · zh-CN</small></span>
+                <em>✓</em>
+              </div>
+              <div class="rail-note">其余三列将保持原样导出。</div>
+            </section>
+
+            <section class="rail-block brief-block">
+              <div class="rail-topline"><span class="eyebrow">本轮编辑指令</span><button class="dots" type="button">•••</button></div>
+              <blockquote>保留小镇叙事中的留白感；角色语气克制，避免过度书面化。</blockquote>
+              <div class="brief-tags"><span>叙事</span><span>克制</span><span>简体中文</span></div>
+            </section>
+
+            <button class="glossary-link" type="button">
+              <span class="round-arrow">↗</span>
+              <span><b>术语编校册</b><small>38 条正在生效</small></span>
+              <i>→</i>
+            </button>
+          </aside>
+        </div>
+
+        <footer class="action-dock">
+          <div class="dock-copy">
+            <span class="status-ring"></span>
+            <p><strong>111 行</strong> 已准备就绪 <small>· 默认应用当前术语与编辑指令</small></p>
+          </div>
+          <div class="dock-actions">
+            <button class="save-draft" type="button">保存为草稿</button>
+            <button class="primary-action" type="button">
+              <span>开始译校</span>
+              <kbd>⌘↵</kbd>
+            </button>
+          </div>
+        </footer>
+      </main>
+    </div>
+
+    <div class="sheet-backdrop" data-close-engine></div>
+    <aside class="engine-sheet" aria-label="AI 引擎设置" aria-hidden="true">
+      <header>
+        <div>
+          <span class="eyebrow">AI WORKBENCH</span>
+          <h2>引擎与策略</h2>
+        </div>
+        <button class="sheet-close" type="button" data-close-engine aria-label="关闭 AI 设置">×</button>
+      </header>
+      <p class="sheet-intro">这是全局工作台设置，只在需要时出现，不占用译文的阅读空间。</p>
+      <label class="engine-choice selected">
+        <input type="radio" name="engine" checked />
+        <span class="engine-logo">✦</span>
+        <span><b>Google Gemini</b><small>gemini-3.1-flash-lite</small></span>
+        <i>已连接</i>
+      </label>
+      <label class="engine-choice">
+        <input type="radio" name="engine" />
+        <span class="engine-logo ink">O</span>
+        <span><b>OpenAI</b><small>gpt-5 mini</small></span>
+        <i>备用</i>
+      </label>
+      <div class="settings-rule"></div>
+      <div class="compact-field">
+        <span>并发数量</span>
+        <button type="button">3 <b>⌄</b></button>
+      </div>
+      <div class="compact-field">
+        <span>失败重试</span>
+        <button type="button">自动 · 2 次 <b>⌄</b></button>
+      </div>
+      <details class="advanced-settings">
+        <summary>高级连接配置 <span>+</span></summary>
+        <label>Base URL<input type="text" value="https://generativelanguage.googleapis.com" /></label>
+      </details>
+      <footer><button class="primary-action full-width" type="button" data-close-engine>应用至本轮</button></footer>
+    </aside>
+
+    <div class="command-toast" role="status" aria-live="polite">快捷操作面板将在正式版中打开</div>
+    <script src="./app.js"></script>
+  </body>
+</html>
