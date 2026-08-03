@@ -32,6 +32,12 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Generate TransMate brand icons
+        run: npm run icons
+
+      - name: Verify generated brand assets are committed
+        run: git diff --exit-code -- assets/transmate-app-icon.svg assets/transmate-logo.svg assets/transmate-logo-light.svg src-tauri/icons
+
       - name: Build Windows installer
         run: npm run desktop:build:windows
 

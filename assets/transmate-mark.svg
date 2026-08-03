@@ -1,24 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 228" role="img" aria-labelledby="title desc">
   <title id="title">TransMate 标志</title>
-  <desc id="desc">由渐变横笔、深色字母 T 和四角星组成的 TransMate 品牌标志。</desc>
+  <desc id="desc">依据品牌展示稿测量描摹的 TransMate 渐变 T 标志。</desc>
   <defs>
-    <linearGradient id="tm-gradient" x1="8" y1="14" x2="88" y2="31" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ff812c"/>
-      <stop offset="0.36" stop-color="#f04f87"/>
-      <stop offset="0.7" stop-color="#9856f6"/>
-      <stop offset="1" stop-color="#4767ff"/>
+    <linearGradient id="tm-gradient" x1="0" y1="23" x2="244" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff933b"/>
+      <stop offset="0.082" stop-color="#fe8b3e"/>
+      <stop offset="0.164" stop-color="#ff874a"/>
+      <stop offset="0.266" stop-color="#fb7a62"/>
+      <stop offset="0.389" stop-color="#ef6e85"/>
+      <stop offset="0.512" stop-color="#db64a5"/>
+      <stop offset="0.635" stop-color="#bd60ca"/>
+      <stop offset="0.758" stop-color="#9560e8"/>
+      <stop offset="0.881" stop-color="#666bfa"/>
+      <stop offset="1" stop-color="#5570fd"/>
     </linearGradient>
-    <linearGradient id="tm-ink" x1="33" y1="31" x2="55" y2="86" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#202a42"/>
-      <stop offset="1" stop-color="#121a2d"/>
+    <linearGradient id="tm-ink" x1="120" y1="69" x2="86" y2="227" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2c3448"/>
+      <stop offset="0.35" stop-color="#293045"/>
+      <stop offset="1" stop-color="#283044"/>
     </linearGradient>
-    <linearGradient id="tm-spark" x1="67" y1="60" x2="83" y2="80" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#4269ff"/>
-      <stop offset="0.5" stop-color="#9357f7"/>
-      <stop offset="1" stop-color="#ff6a76"/>
+    <linearGradient id="tm-spark" x1="224" y1="140" x2="204" y2="214" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4875ff"/>
+      <stop offset="0.18" stop-color="#4e77fc"/>
+      <stop offset="0.5" stop-color="#666afa"/>
+      <stop offset="0.74" stop-color="#a063e1"/>
+      <stop offset="1" stop-color="#fe7c69"/>
     </linearGradient>
   </defs>
-  <path fill="url(#tm-ink)" d="M38 29h23l-7.2 41.3C52 81.1 48 87 40 87H24.7l8.1-47.4C34 32.6 35.3 29 38 29Z"/>
-  <path fill="url(#tm-gradient)" d="M8 29c1.2-11.4 8.1-18 19.4-18H87c.9 0 1.6.8 1.4 1.8C86.8 23.5 78.7 29 67.7 29H39.8c-4.2 0-7 1.8-9.4 5.6L31.3 29H8Z"/>
-  <path fill="url(#tm-spark)" d="M75.2 57.5c1.1 5.1 3.8 7.7 8.9 8.8-5.1 1.1-7.8 3.8-8.9 8.9-1.1-5.1-3.8-7.8-8.9-8.9 5.1-1.1 7.8-3.7 8.9-8.8Z"/>
+  <path fill="url(#tm-ink)" d="M117 69h39l-32 136c-3 14-14 22-32 22H56L90 85c2-10 12-16 27-16Z"/>
+  <path fill="url(#tm-gradient)" d="M0 61C.4 27 16.6 0 43 0h200c1 0 2 1.1 1.5 2.5C241.5 35 222 61 192 61h-79c-10 0-18 4.5-24 15l3-15H0Z"/>
+  <path fill="url(#tm-spark)" d="M214 140c4 24 14 33 35 36-21 4-31 13-35 38-4-25-14-34-35-38 21-3 31-12 35-36Z"/>
 </svg>

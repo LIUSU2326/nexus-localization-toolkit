@@ -5,6 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "icons": "node scripts/generate-tauri-icon.js",
     "dev:web": "node scripts/dev-server.js",
     "build:web": "node scripts/build-web.js",
     "test": "node scripts/test-language-carryover-guard.mjs && node scripts/test-protected-ui-token-policy.mjs && node scripts/test-translation-delivery-policy.mjs && node scripts/test-translation-preflight-error.mjs && node scripts/test-translation-preflight-state.mjs",
@@ -13,15 +14,15 @@
     "test:delivery-policy": "node scripts/test-translation-delivery-policy.mjs",
     "test:translation-preflight": "node scripts/test-translation-preflight-error.mjs && node scripts/test-translation-preflight-state.mjs",
     "tauri": "tauri",
-    "desktop": "tauri dev",
-    "desktop:build:app": "tauri build --no-bundle",
-    "desktop:build": "tauri build",
-    "desktop:build:windows": "tauri build --bundles nsis"
+    "desktop": "npm run icons && tauri dev",
+    "desktop:build:app": "npm run icons && tauri build --no-bundle",
+    "desktop:build": "npm run icons && tauri build",
+    "desktop:build:windows": "npm run icons && tauri build --bundles nsis"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0"
+    "@tauri-apps/cli": "2.11.4"
   }
 }

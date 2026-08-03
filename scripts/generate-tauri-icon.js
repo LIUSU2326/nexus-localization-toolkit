@@ -1,465 +1,188 @@
-import { deflateSync } from 'node:zlib';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const iconDir = join(rootDir, 'src-tauri', 'icons');
-const sourceSize = 1024;
+const assetDir = join(rootDir, 'assets');
+const tauriDir = join(rootDir, 'src-tauri');
+const iconDir = join(tauriDir, 'icons');
+const tempIconDir = join(tauriDir, '.generated-icons');
+const markPath = join(assetDir, 'transmate-mark.svg');
+const appIconPath = join(assetDir, 'transmate-app-icon.svg');
+const logoPath = join(assetDir, 'transmate-logo.svg');
+const lightLogoPath = join(assetDir, 'transmate-logo-light.svg');
+const tauriCliPath = join(rootDir, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
 
-const pngTargets = [
-  { name: '32x32.png', size: 32 },
-  { name: '128x128.png', size: 128 },
-  { name: '128x128@2x.png', size: 256 },
-  { name: 'icon.png', size: 1024 }
+const expectedTempParent = resolve(tauriDir);
+if (resolve(dirname(tempIconDir)) !== expectedTempParent || basename(tempIconDir) !== '.generated-icons') {
+  throw new Error(`Refusing to use unexpected temporary icon directory: ${tempIconDir}`);
+}
+
+if (!existsSync(tauriCliPath)) {
+  throw new Error('Missing @tauri-apps/cli. Install dependencies before generating icons.');
+}
+
+const masterSvg = readFileSync(markPath, 'utf8');
+const defsMatch = masterSvg.match(/<defs>([\s\S]*?)<\/defs>/);
+const markPaths = [...masterSvg.matchAll(/<path\b[^>]*\/>/g)].map((match) => match[0]);
+
+if (!defsMatch || markPaths.length !== 3) {
+  throw new Error('transmate-mark.svg must contain one <defs> block and exactly three self-closing <path> elements.');
+}
+
+const markDefs = defsMatch[1].trim();
+const markMarkup = markPaths.join('\n    ');
+const monochromeMarkup = markPaths
+  .map((path) => path.replace(/fill="url\(#tm-(?:gradient|ink|spark)\)"/g, 'fill="#fff"'))
+  .join('\n    ');
+
+const appIconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">TransMate 应用图标</title>
+  <desc id="desc">白色圆角卡片中的 TransMate 渐变 T 标志。</desc>
+  <defs>
+    <filter id="card-shadow" x="-12%" y="-12%" width="124%" height="145%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#20283a" flood-opacity="0.10"/>
+    </filter>
+    <linearGradient id="card-surface" x1="28" y1="8" x2="104" y2="124" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#fbfbfd"/>
+    </linearGradient>
+    ${markDefs}
+  </defs>
+  <rect x="4" y="3" width="120" height="120" rx="26" fill="url(#card-surface)" filter="url(#card-shadow)"/>
+  <rect x="4.5" y="3.5" width="119" height="119" rx="25.5" fill="none" stroke="#f0f1f5"/>
+  <g transform="translate(24.5 27.8) scale(.317)">
+    ${markMarkup}
+  </g>
+</svg>
+`;
+
+const logoSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 116" role="img" aria-labelledby="title desc">
+  <title id="title">TransMate</title>
+  <desc id="desc">TransMate，AI 游戏本地化助手。</desc>
+  <defs>
+    ${markDefs}
+  </defs>
+  <g transform="translate(4 8) scale(.42)">
+    ${markMarkup}
+  </g>
+  <text x="112" y="58" fill="#20283d" font-family="Montserrat, 'Avenir Next', 'Trebuchet MS', sans-serif" font-size="48" font-style="italic" font-weight="800" letter-spacing="-2">TransMate</text>
+  <text x="116" y="88" fill="#747b8b" font-family="'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="500">AI 游戏本地化助手</text>
+</svg>
+`;
+
+const lightLogoSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 116" role="img" aria-labelledby="title desc">
+  <title id="title">TransMate 浅色标志</title>
+  <desc id="desc">适用于深色背景的 TransMate 标志。</desc>
+  <g transform="translate(4 8) scale(.42)">
+    ${monochromeMarkup}
+  </g>
+  <text x="112" y="58" fill="#fff" font-family="Montserrat, 'Avenir Next', 'Trebuchet MS', sans-serif" font-size="48" font-style="italic" font-weight="800" letter-spacing="-2">TransMate</text>
+  <text x="116" y="88" fill="#fff" fill-opacity=".78" font-family="'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="500">AI 游戏本地化助手</text>
+</svg>
+`;
+
+mkdirSync(assetDir, { recursive: true });
+mkdirSync(iconDir, { recursive: true });
+writeFileSync(appIconPath, appIconSvg);
+writeFileSync(logoPath, logoSvg);
+writeFileSync(lightLogoPath, lightLogoSvg);
+
+const requiredIcons = [
+  '32x32.png',
+  '128x128.png',
+  '128x128@2x.png',
+  'icon.png',
+  'icon.ico',
+  'icon.icns'
 ];
 
-const icoTargets = [16, 32, 64, 128, 256];
-const icnsTargets = [
-  { type: 'icp4', size: 16 },
-  { type: 'icp5', size: 32 },
-  { type: 'icp6', size: 64 },
-  { type: 'ic07', size: 128 },
-  { type: 'ic08', size: 256 },
-  { type: 'ic09', size: 512 },
-  { type: 'ic10', size: 1024 }
-];
+function writeDeterministicIcns(sourcePath, destinationPath) {
+  const source = readFileSync(sourcePath);
+  if (source.length < 8 || source.subarray(0, 4).toString('ascii') !== 'icns') {
+    throw new Error(`Invalid ICNS file generated at ${sourcePath}`);
+  }
+  if (source.readUInt32BE(4) !== source.length) {
+    throw new Error(`ICNS header length does not match file length in ${sourcePath}`);
+  }
 
-function crc32(buffer) {
-  let crc = 0xffffffff;
-  for (const byte of buffer) {
-    crc ^= byte;
-    for (let i = 0; i < 8; i += 1) {
-      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  const chunks = [];
+  let offset = 8;
+  while (offset < source.length) {
+    if (offset + 8 > source.length) {
+      throw new Error(`Truncated ICNS chunk header in ${sourcePath}`);
     }
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
 
-function pngChunk(type, data) {
-  const typeBuffer = Buffer.from(type);
-  const length = Buffer.alloc(4);
-  const crc = Buffer.alloc(4);
-  length.writeUInt32BE(data.length);
-  crc.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])));
-  return Buffer.concat([length, typeBuffer, data, crc]);
-}
+    const length = source.readUInt32BE(offset + 4);
+    if (length < 8 || offset + length > source.length) {
+      throw new Error(`Invalid ICNS chunk length in ${sourcePath}`);
+    }
 
-function pngFromRgba(width, height, rgba) {
-  const raw = Buffer.alloc((width * 4 + 1) * height);
-  for (let y = 0; y < height; y += 1) {
-    const rowStart = y * (width * 4 + 1);
-    raw[rowStart] = 0;
-    rgba.copy(raw, rowStart + 1, y * width * 4, (y + 1) * width * 4);
+    chunks.push(source.subarray(offset, offset + length));
+    offset += length;
   }
 
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(width, 0);
-  ihdr.writeUInt32BE(height, 4);
-  ihdr[8] = 8;
-  ihdr[9] = 6;
+  if (chunks.some((chunk) => chunk.subarray(0, 4).toString('ascii') === 'TOC ')) {
+    throw new Error(`Cannot reorder ICNS with a table-of-contents chunk: ${sourcePath}`);
+  }
 
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    pngChunk('IHDR', ihdr),
-    pngChunk('IDAT', deflateSync(raw)),
-    pngChunk('IEND', Buffer.alloc(0))
-  ]);
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function mix(a, b, t) {
-  return Math.round(a + (b - a) * t);
-}
-
-function colorMix(from, to, t, alpha = 255) {
-  return [
-    mix(from[0], to[0], t),
-    mix(from[1], to[1], t),
-    mix(from[2], to[2], t),
-    alpha
+  const canonicalOrder = [
+    'is32', 's8mk', 'il32', 'l8mk',
+    'icp4', 'icp5', 'icp6',
+    'ic07', 'ic08', 'ic09', 'ic10', 'ic11', 'ic12', 'ic13', 'ic14'
   ];
-}
-
-function blendPixel(buffer, width, height, x, y, color) {
-  if (x < 0 || y < 0 || x >= width || y >= height || color[3] <= 0) {
-    return;
-  }
-
-  const offset = (y * width + x) * 4;
-  const sourceA = color[3] / 255;
-  const targetA = buffer[offset + 3] / 255;
-  const outA = sourceA + targetA * (1 - sourceA);
-
-  if (outA <= 0) {
-    buffer[offset] = 0;
-    buffer[offset + 1] = 0;
-    buffer[offset + 2] = 0;
-    buffer[offset + 3] = 0;
-    return;
-  }
-
-  buffer[offset] = Math.round((color[0] * sourceA + buffer[offset] * targetA * (1 - sourceA)) / outA);
-  buffer[offset + 1] = Math.round((color[1] * sourceA + buffer[offset + 1] * targetA * (1 - sourceA)) / outA);
-  buffer[offset + 2] = Math.round((color[2] * sourceA + buffer[offset + 2] * targetA * (1 - sourceA)) / outA);
-  buffer[offset + 3] = Math.round(outA * 255);
-}
-
-function fillRoundedRect(buffer, width, height, x, y, rectWidth, rectHeight, radius, colorAt) {
-  const startX = Math.floor(x);
-  const endX = Math.ceil(x + rectWidth);
-  const startY = Math.floor(y);
-  const endY = Math.ceil(y + rectHeight);
-
-  for (let py = startY; py < endY; py += 1) {
-    for (let px = startX; px < endX; px += 1) {
-      const sampleX = px + 0.5;
-      const sampleY = py + 0.5;
-      const closestX = clamp(sampleX, x + radius, x + rectWidth - radius);
-      const closestY = clamp(sampleY, y + radius, y + rectHeight - radius);
-      const dx = sampleX - closestX;
-      const dy = sampleY - closestY;
-
-      if (dx * dx + dy * dy <= radius * radius) {
-        const color = typeof colorAt === 'function' ? colorAt(sampleX, sampleY) : colorAt;
-        blendPixel(buffer, width, height, px, py, color);
-      }
-    }
-  }
-}
-
-function drawSoftShadow(buffer, width, height, x, y, rectWidth, rectHeight, radius) {
-  for (let i = 32; i >= 1; i -= 1) {
-    const alpha = Math.round(1.45 * (1 - i / 34));
-    fillRoundedRect(
-      buffer,
-      width,
-      height,
-      x - i,
-      y + 14 - i,
-      rectWidth + i * 2,
-      rectHeight + i * 2,
-      radius + i,
-      [23, 33, 55, alpha]
-    );
-  }
-}
-
-function distanceToSegment(px, py, ax, ay, bx, by) {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const lengthSq = dx * dx + dy * dy;
-  if (lengthSq === 0) {
-    return Math.hypot(px - ax, py - ay);
-  }
-
-  const t = clamp(((px - ax) * dx + (py - ay) * dy) / lengthSq, 0, 1);
-  const closestX = ax + t * dx;
-  const closestY = ay + t * dy;
-  return Math.hypot(px - closestX, py - closestY);
-}
-
-function drawLine(buffer, width, height, ax, ay, bx, by, lineWidth, color) {
-  const half = lineWidth / 2;
-  const minX = Math.floor(Math.min(ax, bx) - half - 2);
-  const maxX = Math.ceil(Math.max(ax, bx) + half + 2);
-  const minY = Math.floor(Math.min(ay, by) - half - 2);
-  const maxY = Math.ceil(Math.max(ay, by) + half + 2);
-
-  for (let y = minY; y <= maxY; y += 1) {
-    for (let x = minX; x <= maxX; x += 1) {
-      const distance = distanceToSegment(x + 0.5, y + 0.5, ax, ay, bx, by);
-      if (distance <= half + 1) {
-        const edge = clamp(half + 1 - distance, 0, 1);
-        blendPixel(buffer, width, height, x, y, [color[0], color[1], color[2], Math.round(color[3] * edge)]);
-      }
-    }
-  }
-}
-
-function drawArc(buffer, width, height, cx, cy, rx, ry, start, end, lineWidth, color) {
-  const steps = 120;
-  let previous = null;
-  for (let i = 0; i <= steps; i += 1) {
-    const angle = start + ((end - start) * i) / steps;
-    const point = [cx + Math.cos(angle) * rx, cy + Math.sin(angle) * ry];
-    if (previous) {
-      drawLine(buffer, width, height, previous[0], previous[1], point[0], point[1], lineWidth, color);
-    }
-    previous = point;
-  }
-}
-
-function fillCircle(buffer, width, height, cx, cy, radius, color) {
-  const startX = Math.floor(cx - radius - 1);
-  const endX = Math.ceil(cx + radius + 1);
-  const startY = Math.floor(cy - radius - 1);
-  const endY = Math.ceil(cy + radius + 1);
-
-  for (let y = startY; y <= endY; y += 1) {
-    for (let x = startX; x <= endX; x += 1) {
-      const distance = Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
-      if (distance <= radius + 1) {
-        const edge = clamp(radius + 1 - distance, 0, 1);
-        blendPixel(buffer, width, height, x, y, [color[0], color[1], color[2], Math.round(color[3] * edge)]);
-      }
-    }
-  }
-}
-
-function pointInPolygon(x, y, points) {
-  let inside = false;
-  for (let i = 0, j = points.length - 1; i < points.length; j = i, i += 1) {
-    const [xi, yi] = points[i];
-    const [xj, yj] = points[j];
-    const intersects = ((yi > y) !== (yj > y))
-      && (x < ((xj - xi) * (y - yi)) / (yj - yi || Number.EPSILON) + xi);
-    if (intersects) inside = !inside;
-  }
-  return inside;
-}
-
-function fillPolygon(buffer, width, height, points, colorAt) {
-  const xs = points.map(([x]) => x);
-  const ys = points.map(([, y]) => y);
-  const minX = Math.max(0, Math.floor(Math.min(...xs)));
-  const maxX = Math.min(width - 1, Math.ceil(Math.max(...xs)));
-  const minY = Math.max(0, Math.floor(Math.min(...ys)));
-  const maxY = Math.min(height - 1, Math.ceil(Math.max(...ys)));
-
-  for (let y = minY; y <= maxY; y += 1) {
-    for (let x = minX; x <= maxX; x += 1) {
-      if (pointInPolygon(x + 0.5, y + 0.5, points)) {
-        const color = typeof colorAt === 'function' ? colorAt(x + 0.5, y + 0.5) : colorAt;
-        blendPixel(buffer, width, height, x, y, color);
-      }
-    }
-  }
-}
-
-function appendCubic(points, start, controlA, controlB, end, steps = 24) {
-  for (let i = 1; i <= steps; i += 1) {
-    const t = i / steps;
-    const inverse = 1 - t;
-    points.push([
-      inverse ** 3 * start[0]
-        + 3 * inverse ** 2 * t * controlA[0]
-        + 3 * inverse * t ** 2 * controlB[0]
-        + t ** 3 * end[0],
-      inverse ** 3 * start[1]
-        + 3 * inverse ** 2 * t * controlA[1]
-        + 3 * inverse * t ** 2 * controlB[1]
-        + t ** 3 * end[1]
-    ]);
-  }
-}
-
-function drawFourPointStar(buffer, width, height, cx, cy, outerRadius, innerRadius, colorAt) {
-  const points = [];
-  for (let i = 0; i < 8; i += 1) {
-    const angle = -Math.PI / 2 + (Math.PI / 4) * i;
-    const radius = i % 2 === 0 ? outerRadius : innerRadius;
-    points.push([cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius]);
-  }
-  fillPolygon(buffer, width, height, points, colorAt);
-}
-
-function drawArrow(buffer, width, height, ax, ay, bx, by, lineWidth, color, direction = 1) {
-  drawLine(buffer, width, height, ax, ay, bx, by, lineWidth, color);
-  const angle = Math.atan2(by - ay, bx - ax) + (direction < 0 ? Math.PI : 0);
-  const tipX = direction > 0 ? bx : ax;
-  const tipY = direction > 0 ? by : ay;
-  const wing = lineWidth * 2.4;
-  drawLine(buffer, width, height, tipX, tipY, tipX - Math.cos(angle - 0.72) * wing, tipY - Math.sin(angle - 0.72) * wing, lineWidth, color);
-  drawLine(buffer, width, height, tipX, tipY, tipX - Math.cos(angle + 0.72) * wing, tipY - Math.sin(angle + 0.72) * wing, lineWidth, color);
-}
-
-function drawLetterA(buffer, width, height, x, y, scale, color) {
-  drawLine(buffer, width, height, x, y + 110 * scale, x + 46 * scale, y, 15 * scale, color);
-  drawLine(buffer, width, height, x + 46 * scale, y, x + 94 * scale, y + 110 * scale, 15 * scale, color);
-  drawLine(buffer, width, height, x + 22 * scale, y + 64 * scale, x + 70 * scale, y + 64 * scale, 12 * scale, color);
-}
-
-function drawZhongGlyph(buffer, width, height, x, y, scale, color) {
-  drawLine(buffer, width, height, x + 20 * scale, y + 22 * scale, x + 92 * scale, y + 22 * scale, 12 * scale, color);
-  drawLine(buffer, width, height, x + 20 * scale, y + 22 * scale, x + 20 * scale, y + 82 * scale, 12 * scale, color);
-  drawLine(buffer, width, height, x + 92 * scale, y + 22 * scale, x + 92 * scale, y + 82 * scale, 12 * scale, color);
-  drawLine(buffer, width, height, x + 20 * scale, y + 82 * scale, x + 92 * scale, y + 82 * scale, 12 * scale, color);
-  drawLine(buffer, width, height, x + 56 * scale, y, x + 56 * scale, y + 108 * scale, 13 * scale, color);
-  drawLine(buffer, width, height, x + 20 * scale, y + 52 * scale, x + 92 * scale, y + 52 * scale, 12 * scale, color);
-}
-
-function createIcon(size) {
-  const buffer = Buffer.alloc(size * size * 4);
-  const scale = size / sourceSize;
-  const s = (value) => value * scale;
-
-  drawSoftShadow(buffer, size, size, s(96), s(86), s(832), s(832), s(194));
-  fillRoundedRect(buffer, size, size, s(96), s(76), s(832), s(832), s(194), [229, 232, 241, 255]);
-  fillRoundedRect(buffer, size, size, s(100), s(80), s(824), s(824), s(190), (x, y) => {
-    const light = clamp((x + y) / (size * 1.7), 0, 1);
-    return colorMix([255, 255, 255], [247, 248, 252], light, 255);
-  });
-
-  const markOriginX = 190;
-  const markOriginY = 176;
-  const markScale = 6.55;
-  const mapMarkPoint = ([x, y]) => [s(markOriginX + x * markScale), s(markOriginY + y * markScale)];
-
-  const gradientAt = (x) => {
-    const t = clamp((x - s(markOriginX + 8 * markScale)) / s(80 * markScale), 0, 1);
-    if (t < 0.36) return colorMix([255, 129, 44], [240, 79, 135], t / 0.36, 255);
-    if (t < 0.7) return colorMix([240, 79, 135], [152, 86, 246], (t - 0.36) / 0.34, 255);
-    return colorMix([152, 86, 246], [71, 103, 255], (t - 0.7) / 0.3, 255);
-  };
-
-  const stemShape = [[38, 29], [61, 29], [53.8, 70.3]];
-  appendCubic(stemShape, [53.8, 70.3], [52, 81.1], [48, 87], [40, 87]);
-  stemShape.push([24.7, 87], [32.8, 39.6]);
-  appendCubic(stemShape, [32.8, 39.6], [34, 32.6], [35.3, 29], [38, 29]);
-
-  fillPolygon(buffer, size, size, stemShape.map(mapMarkPoint), (_x, y) => {
-    const top = s(markOriginY + 29 * markScale);
-    const bottom = s(markOriginY + 87 * markScale);
-    const t = clamp((y - top) / (bottom - top), 0, 1);
-    return colorMix([33, 43, 67], [17, 25, 44], t, 255);
-  });
-
-  const topShape = [[8, 29]];
-  appendCubic(topShape, [8, 29], [9.2, 17.6], [16.1, 11], [27.4, 11]);
-  topShape.push([87, 11]);
-  appendCubic(topShape, [87, 11], [87.9, 11], [88.6, 11.8], [88.4, 12.8], 8);
-  appendCubic(topShape, [88.4, 12.8], [86.8, 23.5], [78.7, 29], [67.7, 29]);
-  topShape.push([39.8, 29]);
-  appendCubic(topShape, [39.8, 29], [35.6, 29], [32.8, 30.8], [30.4, 34.6], 12);
-  topShape.push([31.3, 29], [8, 29]);
-
-  fillPolygon(buffer, size, size, topShape.map(mapMarkPoint), (x) => gradientAt(x));
-
-  const starOriginX = 89.36;
-  const starOriginY = 84.34;
-  const starScale = 8.2;
-  const mapStarPoint = ([x, y]) => [s(starOriginX + x * starScale), s(starOriginY + y * starScale)];
-  const starShape = [[75.2, 57.5]];
-  appendCubic(starShape, [75.2, 57.5], [76.3, 62.6], [79, 65.2], [84.1, 66.3], 18);
-  appendCubic(starShape, [84.1, 66.3], [79, 67.4], [76.3, 70.1], [75.2, 75.2], 18);
-  appendCubic(starShape, [75.2, 75.2], [74.1, 70.1], [71.4, 67.4], [66.3, 66.3], 18);
-  appendCubic(starShape, [66.3, 66.3], [71.4, 65.2], [74.1, 62.6], [75.2, 57.5], 18);
-
-  fillPolygon(buffer, size, size, starShape.map(mapStarPoint), (_x, y) => {
-    const t = clamp((y - s(556)) / s(144), 0, 1);
-    if (t < 0.52) return colorMix([66, 105, 255], [147, 87, 247], t / 0.52, 255);
-    return colorMix([147, 87, 247], [255, 106, 118], (t - 0.52) / 0.48, 255);
-  });
-
-  return buffer;
-}
-
-function resizeNearestPowerOfTwo(source, sourceWidth, targetWidth) {
-  if (sourceWidth === targetWidth) {
-    return Buffer.from(source);
-  }
-
-  const factor = sourceWidth / targetWidth;
-  const target = Buffer.alloc(targetWidth * targetWidth * 4);
-
-  for (let y = 0; y < targetWidth; y += 1) {
-    for (let x = 0; x < targetWidth; x += 1) {
-      const startX = Math.floor(x * factor);
-      const startY = Math.floor(y * factor);
-      const endX = Math.floor((x + 1) * factor);
-      const endY = Math.floor((y + 1) * factor);
-      const total = Math.max(1, (endX - startX) * (endY - startY));
-      const sums = [0, 0, 0, 0];
-
-      for (let sy = startY; sy < endY; sy += 1) {
-        for (let sx = startX; sx < endX; sx += 1) {
-          const offset = (sy * sourceWidth + sx) * 4;
-          sums[0] += source[offset];
-          sums[1] += source[offset + 1];
-          sums[2] += source[offset + 2];
-          sums[3] += source[offset + 3];
-        }
-      }
-
-      const targetOffset = (y * targetWidth + x) * 4;
-      target[targetOffset] = Math.round(sums[0] / total);
-      target[targetOffset + 1] = Math.round(sums[1] / total);
-      target[targetOffset + 2] = Math.round(sums[2] / total);
-      target[targetOffset + 3] = Math.round(sums[3] / total);
-    }
-  }
-
-  return target;
-}
-
-function makeIco(entries) {
-  const header = Buffer.alloc(6);
-  header.writeUInt16LE(0, 0);
-  header.writeUInt16LE(1, 2);
-  header.writeUInt16LE(entries.length, 4);
-
-  const directory = Buffer.alloc(entries.length * 16);
-  let offset = header.length + directory.length;
-
-  entries.forEach((entry, index) => {
-    const entryOffset = index * 16;
-    directory[entryOffset] = entry.size >= 256 ? 0 : entry.size;
-    directory[entryOffset + 1] = entry.size >= 256 ? 0 : entry.size;
-    directory[entryOffset + 2] = 0;
-    directory[entryOffset + 3] = 0;
-    directory.writeUInt16LE(1, entryOffset + 4);
-    directory.writeUInt16LE(32, entryOffset + 6);
-    directory.writeUInt32LE(entry.png.length, entryOffset + 8);
-    directory.writeUInt32LE(offset, entryOffset + 12);
-    offset += entry.png.length;
-  });
-
-  return Buffer.concat([header, directory, ...entries.map((entry) => entry.png)]);
-}
-
-function makeIcns(entries) {
-  const chunks = entries.map((entry) => {
-    const header = Buffer.alloc(8);
-    header.write(entry.type, 0, 4, 'ascii');
-    header.writeUInt32BE(entry.png.length + 8, 4);
-    return Buffer.concat([header, entry.png]);
+  const rank = new Map(canonicalOrder.map((type, index) => [type, index]));
+  chunks.sort((left, right) => {
+    const leftType = left.subarray(0, 4).toString('ascii');
+    const rightType = right.subarray(0, 4).toString('ascii');
+    const rankDifference = (rank.get(leftType) ?? canonicalOrder.length)
+      - (rank.get(rightType) ?? canonicalOrder.length);
+    return rankDifference || leftType.localeCompare(rightType);
   });
 
   const header = Buffer.alloc(8);
   header.write('icns', 0, 4, 'ascii');
-  header.writeUInt32BE(8 + chunks.reduce((sum, chunk) => sum + chunk.length, 0), 4);
-  return Buffer.concat([header, ...chunks]);
+  header.writeUInt32BE(8 + chunks.reduce((total, chunk) => total + chunk.length, 0), 4);
+  writeFileSync(destinationPath, Buffer.concat([header, ...chunks]));
 }
 
-mkdirSync(iconDir, { recursive: true });
+rmSync(tempIconDir, { recursive: true, force: true });
+try {
+  const result = spawnSync(process.execPath, [tauriCliPath, 'icon', appIconPath, '-o', tempIconDir], {
+    cwd: rootDir,
+    encoding: 'utf8'
+  });
 
-const source = createIcon(sourceSize);
-const pngCache = new Map();
-
-function pngForSize(size) {
-  if (!pngCache.has(size)) {
-    const rgba = resizeNearestPowerOfTwo(source, sourceSize, size);
-    pngCache.set(size, pngFromRgba(size, size, rgba));
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  if (result.status !== 0) {
+    throw new Error(`Tauri icon generation failed with exit code ${result.status}.`);
   }
-  return pngCache.get(size);
+
+  for (const fileName of requiredIcons) {
+    if (!existsSync(join(tempIconDir, fileName))) {
+      throw new Error(`Tauri did not generate required icon: ${fileName}`);
+    }
+  }
+
+  for (const fileName of requiredIcons) {
+    const sourcePath = join(tempIconDir, fileName);
+    const destinationPath = join(iconDir, fileName);
+    if (fileName === 'icon.icns') {
+      writeDeterministicIcns(sourcePath, destinationPath);
+    } else {
+      copyFileSync(sourcePath, destinationPath);
+    }
+  }
+} finally {
+  rmSync(tempIconDir, { recursive: true, force: true });
 }
-
-for (const target of pngTargets) {
-  writeFileSync(join(iconDir, target.name), pngForSize(target.size));
-}
-
-writeFileSync(
-  join(iconDir, 'icon.ico'),
-  makeIco(icoTargets.map((size) => ({ size, png: pngForSize(size) })))
-);
-
-writeFileSync(
-  join(iconDir, 'icon.icns'),
-  makeIcns(icnsTargets.map((target) => ({ type: target.type, png: pngForSize(target.size) })))
-);
-
-console.log(`Generated app icons in ${iconDir}`);
+console.log(`Generated TransMate brand assets and ${requiredIcons.length} app icon files from ${markPath}`);
