@@ -62,10 +62,12 @@ assert.match(preflightSource, /preflightError\.isPreflightFailure\s*=\s*true/);
 assert.match(preflightSource, /preflightError\.isQuotaDepleted\s*=/);
 
 const preflightBranchStart = source.indexOf('} else if (error.isPreflightFailure) {');
-const genericBranchStart = source.indexOf(
-    "} else {\n                console.error('Translate error:'",
-    preflightBranchStart
+const genericBranchOffset = source.slice(preflightBranchStart).search(
+    /}\s*else\s*{\s*console\.error\('Translate error:'/m
 );
+const genericBranchStart = genericBranchOffset >= 0
+    ? preflightBranchStart + genericBranchOffset
+    : -1;
 assert.ok(preflightBranchStart >= 0, 'startTranslate should have a dedicated preflight-failure branch');
 assert.ok(genericBranchStart > preflightBranchStart, 'generic translation error branch should follow preflight handling');
 const preflightBranch = source.slice(preflightBranchStart, genericBranchStart);

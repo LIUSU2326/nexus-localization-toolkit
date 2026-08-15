@@ -9,6 +9,22 @@ function escapeAttribute(text) {
     return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+function syncNumericRangeControl(input, output) {
+    if (!input) return 0;
+    const min = Number(input.min || 0);
+    const max = Number(input.max || 100);
+    const rawValue = Number(input.value);
+    const value = Math.max(min, Math.min(max, Number.isFinite(rawValue) ? rawValue : min));
+    const progress = max > min ? ((value - min) / (max - min)) * 100 : 0;
+    input.value = String(value);
+    input.style.setProperty('--range-progress', `${progress}%`);
+    if (output) {
+        output.value = String(value);
+        output.textContent = String(value);
+    }
+    return value;
+}
+
 function getNexusDiscountGuard() {
     return globalThis.NexusDiscountGuard || null;
 }
@@ -563,8 +579,15 @@ function enhanceDeepChoiceSurfaces() {
 function revealWorkspaceInspector() {
     const panel = document.getElementById('apiConfigPanel');
     const inspector = document.getElementById('workspaceInspector');
-    if (panel) panel.style.display = 'none';
+    if (panel) {
+        panel.style.display = 'none';
+        panel.setAttribute('aria-hidden', 'true');
+    }
     if (inspector) inspector.style.display = 'grid';
+    document.body.classList.remove('api-config-open');
+    if (apiConfigReturnFocus && document.contains(apiConfigReturnFocus)) {
+        apiConfigReturnFocus.focus({ preventScroll: true });
+    }
 }
 
 const TRANSLATION_STORAGE_KEY = 'nexus_translation_progress';
@@ -2741,6 +2764,10 @@ function delayWithSignal(ms, signal = null) {
 }
 
 const CUSTOM_MODEL_OPTION = '__custom_model__';
+const MODEL_CATALOG_STORAGE_KEY = 'transmate_model_catalog_v1';
+const MODEL_CATALOG_MAX_ENTRIES = 30;
+const MODEL_CATALOG_MAX_MODELS = 500;
+const MODEL_CATALOG_TIMEOUT_MS = 30_000;
 
 const PLATFORM_CONFIG = {
     deepseek: { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', models: [
@@ -2864,6 +2891,108 @@ const PLATFORM_CONFIG = {
     custom: { name: '自定义平台', baseUrl: '', allowCustomModel: true, models: [] }
 };
 
+function getModelCatalogCacheKey(provider, baseUrl = '') {
+    const normalizedBaseUrl = normalizeProviderBaseUrl(
+        provider,
+        baseUrl || PLATFORM_CONFIG[provider]?.baseUrl || ''
+    );
+    return `${provider || 'custom'}::${normalizedBaseUrl.toLowerCase()}`;
+}
+
+function loadModelCatalogCache() {
+    try {
+        const parsed = JSON.parse(localStorage.getItem(MODEL_CATALOG_STORAGE_KEY) || '{}');
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (error) {
+        console.warn('读取模型目录缓存失败:', error);
+        return {};
+    }
+}
+
+function saveModelCatalogCache(cache) {
+    const compactEntries = Object.entries(cache || {})
+        .sort(([, left], [, right]) => Number(right?.fetchedAt || 0) - Number(left?.fetchedAt || 0))
+        .slice(0, MODEL_CATALOG_MAX_ENTRIES);
+    localStorage.setItem(MODEL_CATALOG_STORAGE_KEY, JSON.stringify(Object.fromEntries(compactEntries)));
+}
+
+function normalizeCatalogModels(models = []) {
+    const seen = new Set();
+    return models.map(item => {
+        const rawId = typeof item === 'string'
+            ? item
+            : (item?.id || item?.model || item?.model_id || item?.name || '');
+        const id = String(rawId || '').trim().replace(/^models\//i, '');
+        const rawName = typeof item === 'string'
+            ? item
+            : (item?.display_name || item?.displayName || item?.label || item?.title || item?.name || id);
+        const name = String(rawName || id).trim().replace(/^models\//i, '') || id;
+        return { id, name };
+    }).filter(model => {
+        if (!model.id || seen.has(model.id)) return false;
+        if (/embedding|embed-|rerank|moderation|whisper|transcri|speech|tts|dall-e|image-generation/i.test(model.id)) {
+            return false;
+        }
+        seen.add(model.id);
+        return true;
+    }).slice(0, MODEL_CATALOG_MAX_MODELS);
+}
+
+function getCachedModelCatalog(provider, baseUrl = '') {
+    const entry = loadModelCatalogCache()[getModelCatalogCacheKey(provider, baseUrl)];
+    if (!entry || !Array.isArray(entry.models) || entry.models.length === 0) return null;
+    return {
+        ...entry,
+        models: normalizeCatalogModels(entry.models)
+    };
+}
+
+function findCachedModelById(provider, modelId) {
+    const cache = loadModelCatalogCache();
+    for (const entry of Object.values(cache)) {
+        if (entry?.provider !== provider || !Array.isArray(entry.models)) continue;
+        const match = entry.models.find(model => String(model?.id || '') === String(modelId || ''));
+        if (match) return match;
+    }
+    return null;
+}
+
+function getAvailableModelsForProvider(provider, baseUrl = '') {
+    const cached = getCachedModelCatalog(provider, baseUrl);
+    if (cached?.models?.length) return cached.models;
+    return [...(PLATFORM_CONFIG[provider]?.models || [])];
+}
+
+function storeModelCatalog(provider, baseUrl, models) {
+    const normalizedModels = normalizeCatalogModels(models);
+    if (normalizedModels.length === 0) {
+        throw new Error('接口没有返回可用的文本生成模型');
+    }
+    const cache = loadModelCatalogCache();
+    cache[getModelCatalogCacheKey(provider, baseUrl)] = {
+        provider,
+        baseUrl: normalizeProviderBaseUrl(provider, baseUrl || PLATFORM_CONFIG[provider]?.baseUrl || ''),
+        fetchedAt: Date.now(),
+        models: normalizedModels
+    };
+    saveModelCatalogCache(cache);
+    return normalizedModels;
+}
+
+function formatModelCatalogTime(timestamp) {
+    if (!timestamp) return '尚未在线刷新';
+    try {
+        return `上次刷新 ${new Intl.DateTimeFormat('zh-CN', {
+            month: 'numeric',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        }).format(new Date(timestamp))}`;
+    } catch {
+        return '已使用在线模型列表';
+    }
+}
+
 function getPlatformName(provider) {
     return PLATFORM_CONFIG[provider]?.name || provider || '未知平台';
 }
@@ -2960,12 +3089,14 @@ function getDefaultModelForProvider(provider) {
 }
 
 function getModelDisplayName(provider, modelId) {
-    const model = (PLATFORM_CONFIG[provider]?.models || []).find(item => item.id === modelId);
-    return model ? `${model.name} (${model.id})` : (modelId ? `自定义模型 (${modelId})` : '未选择模型');
+    const model = (PLATFORM_CONFIG[provider]?.models || []).find(item => item.id === modelId) ||
+        findCachedModelById(provider, modelId);
+    return model ? `${model.name} (${model.id})` : (modelId ? `模型 (${modelId})` : '未选择模型');
 }
 
 function platformAllowsCustomModel(provider) {
-    return PLATFORM_CONFIG[provider]?.allowCustomModel === true;
+    const platform = PLATFORM_CONFIG[provider];
+    return Boolean(platform && !platform.translationOnly);
 }
 
 const DOUBAO_MODEL_FALLBACK_ORDER = [
@@ -3031,14 +3162,13 @@ function normalizeProviderBaseUrl(provider, baseUrl) {
 
 function normalizeApiProfile(profile) {
     const provider = PLATFORM_CONFIG[profile?.provider] ? profile.provider : 'deepseek';
-    const platformModels = PLATFORM_CONFIG[provider]?.models || [];
     let rawModel = String(profile?.model || '').trim();
     if (provider === 'doubao' && rawModel === 'doubao-seed-2-0-lite') {
         rawModel = 'doubao-seed-2-0-lite-260428';
     }
-    const model = rawModel && (platformAllowsCustomModel(provider) || platformModels.some(item => item.id === rawModel))
-        ? rawModel
-        : getDefaultModelForProvider(provider);
+    // Model IDs are provider-owned and change independently from this app. Never discard a
+    // saved or freshly discovered ID just because it is absent from the built-in fallback list.
+    const model = rawModel || getDefaultModelForProvider(provider);
     const name = normalizeProfileName(provider, profile?.name);
     const concurrency = Math.max(1, Math.min(10, Number(profile?.concurrency || 3)));
     let baseUrl = normalizeProviderBaseUrl(provider, profile?.baseUrl || PLATFORM_CONFIG[provider]?.baseUrl || '');
@@ -3370,13 +3500,15 @@ function initApiConfig() {
     const apiSecretLabel = document.getElementById('apiSecretLabel');
     const apiSecretRow = document.getElementById('apiSecretRow');
     const concurrencyInput = document.getElementById('apiProfileConcurrency');
+    const concurrencyOutput = document.getElementById('apiProfileConcurrencyValue');
     const testBtn = document.getElementById('testApiProfileBtn');
     const saveBtn = document.getElementById('saveApiKeyBtn');
     const clearBtn = document.getElementById('clearApiKeyBtn');
+    const refreshModelsBtn = document.getElementById('refreshModelListBtn');
+    const modelCatalogStatus = document.getElementById('modelCatalogStatus');
+    const editorModeLabel = document.getElementById('apiEditorModeLabel');
     const apiStatus = document.getElementById('apiStatus');
-    const toggleBtn = document.getElementById('toggleApiConfig');
     const closeBtn = document.getElementById('closeApiConfig');
-    const configContent = document.getElementById('apiConfigContent');
     const baseUrlRow = document.getElementById('baseUrlRow');
     const globalAiModelSelect = document.getElementById('globalAiModel');
     const profileList = document.getElementById('apiProfileList');
@@ -3386,6 +3518,10 @@ function initApiConfig() {
     let isEditingProfile = false;
     let pendingDeleteProfileId = '';
     let pendingDeleteTimer = null;
+
+    function syncProfileConcurrency() {
+        syncNumericRangeControl(concurrencyInput, concurrencyOutput);
+    }
 
     function bindSecretToggles() {
         document.querySelectorAll('.secret-toggle').forEach(button => {
@@ -3451,6 +3587,29 @@ function initApiConfig() {
         }
     }
 
+    function updateEditorMode() {
+        if (editorModeLabel) {
+            editorModeLabel.textContent = isEditingProfile ? '编辑已保存通道' : '新建通道';
+        }
+        if (saveBtn) {
+            saveBtn.textContent = isEditingProfile ? '保存修改' : '保存通道';
+        }
+    }
+
+    function updateModelCatalogStatus(provider = providerSelect.value, baseUrl = baseUrlInput.value) {
+        if (!modelCatalogStatus) return;
+        if (PLATFORM_CONFIG[provider]?.translationOnly) {
+            modelCatalogStatus.textContent = '该翻译接口使用固定模型，无需刷新。';
+            if (refreshModelsBtn) refreshModelsBtn.disabled = true;
+            return;
+        }
+        if (refreshModelsBtn) refreshModelsBtn.disabled = false;
+        const cached = getCachedModelCatalog(provider, baseUrl);
+        modelCatalogStatus.textContent = cached
+            ? `${formatModelCatalogTime(cached.fetchedAt)}，共 ${cached.models.length} 个可用模型。`
+            : '';
+    }
+
     function applyProviderDefaults(provider, options = {}) {
         const {
             useDefaultBaseUrl = true,
@@ -3465,6 +3624,7 @@ function initApiConfig() {
         if (resetEditing) {
             editingProfileId = '';
             isEditingProfile = false;
+            updateEditorMode();
         }
         if (resetName) {
             profileNameInput.value = platform.name;
@@ -3493,6 +3653,7 @@ function initApiConfig() {
         baseUrlRow.style.display = 'flex';
         updateModelSelect(providerSelect.value, true);
         updateCustomModelVisibility();
+        updateModelCatalogStatus(providerSelect.value, baseUrlInput.value);
         lastAppliedProvider = providerSelect.value;
         refreshAllVisualSelects();
 
@@ -3512,7 +3673,6 @@ function initApiConfig() {
             concurrency: 3
         });
         const platform = PLATFORM_CONFIG[normalized.provider] || PLATFORM_CONFIG.deepseek;
-        const modelKnownToPlatform = (platform.models || []).some(item => item.id === normalized.model);
 
         editingProfileId = editing ? (normalized.id || '') : '';
         isEditingProfile = editing;
@@ -3533,10 +3693,14 @@ function initApiConfig() {
         apiSecretRow.style.display = normalized.provider === 'youdaoTranslate' ? 'flex' : 'none';
         customModelInput.value = '';
         concurrencyInput.value = getProfileConcurrency(normalized);
+        syncProfileConcurrency();
         baseUrlRow.style.display = 'flex';
-        updateModelSelect(normalized.provider, true);
+        updateModelSelect(normalized.provider, true, {
+            baseUrl: normalized.baseUrl,
+            preferredModel: normalized.model
+        });
         if (globalAiModelSelect && normalized.model) {
-            if (modelKnownToPlatform) {
+            if ([...globalAiModelSelect.options].some(option => option.value === normalized.model)) {
                 globalAiModelSelect.value = normalized.model;
                 syncModelSelects(normalized.model);
             } else if (platformAllowsCustomModel(normalized.provider)) {
@@ -3545,6 +3709,8 @@ function initApiConfig() {
             }
         }
         updateCustomModelVisibility();
+        updateEditorMode();
+        updateModelCatalogStatus(normalized.provider, normalized.baseUrl);
         lastAppliedProvider = normalized.provider;
         refreshAllVisualSelects();
     }
@@ -3580,7 +3746,9 @@ function initApiConfig() {
         apiSecretInput.value = '';
         customModelInput.value = '';
         concurrencyInput.value = '3';
+        syncProfileConcurrency();
         applyProviderDefaults('deepseek', { useDefaultBaseUrl: true, resetName: true });
+        updateEditorMode();
     }
 
     function renderApiProfileList() {
@@ -3590,7 +3758,7 @@ function initApiConfig() {
         profileList.innerHTML = '';
 
         if (profiles.length === 0) {
-            profileList.innerHTML = '<div class="resource-empty">暂无 API 通道。填写上方信息并点击“保存通道”后，本地化检测就可以勾选使用。</div>';
+            profileList.innerHTML = '<div class="resource-empty">还没有保存通道。请在右侧填写连接信息，测试通过后保存。</div>';
             return;
         }
 
@@ -3598,6 +3766,9 @@ function initApiConfig() {
             const compatible = isApiProfileChatCompatible(profile);
             const translationOnly = isApiProfileTranslationOnly(profile);
             const isActive = activeProfile && activeProfile.id === profile.id;
+            const platformName = getPlatformName(profile.provider);
+            const showPlatformTag = !isActive
+                && String(profile.name || '').trim().toLocaleLowerCase() !== platformName.toLocaleLowerCase();
             const item = document.createElement('div');
             item.className = `api-profile-item ${isActive ? 'active' : ''}`;
             const deletePending = pendingDeleteProfileId === profile.id;
@@ -3606,7 +3777,8 @@ function initApiConfig() {
                 <div class="api-profile-main">
                     <div class="api-profile-title">
                         <strong title="${escapeAttribute(profile.name)}">${escapeHtml(profile.name)}</strong>
-                        <span class="api-profile-tag">${isActive ? '默认' : getPlatformName(profile.provider)}</span>
+                        ${isActive ? '<span class="api-profile-tag">默认</span>' : ''}
+                        ${showPlatformTag ? `<span class="api-profile-tag">${escapeHtml(platformName)}</span>` : ''}
                         ${profile.apiKey ? '<span class="api-profile-tag success">已保存 Key</span>' : '<span class="api-profile-tag warning">未填写 Key</span>'}
                         ${isGatewayProvider(profile.provider) ? '<span class="api-profile-tag gateway">中转网关</span>' : ''}
                         ${translationOnly ? '<span class="api-profile-tag">翻译专用</span>' : (compatible ? '' : '<span class="api-profile-tag warning">需单独适配</span>')}
@@ -3712,12 +3884,64 @@ function initApiConfig() {
     loadApiConfig();
     renderApiProfileList();
     bindSecretToggles();
+    syncProfileConcurrency();
 
     providerSelect.addEventListener('input', handleProviderChange);
     providerSelect.addEventListener('change', handleProviderChange);
     providerSelect.addEventListener('blur', handleProviderChange);
     globalAiModelSelect.addEventListener('change', () => {
         updateCustomModelVisibility();
+    });
+    concurrencyInput?.addEventListener('input', syncProfileConcurrency);
+    concurrencyInput?.addEventListener('change', syncProfileConcurrency);
+    baseUrlInput.addEventListener('change', () => {
+        const currentModel = globalAiModelSelect?.value === CUSTOM_MODEL_OPTION
+            ? customModelInput.value.trim()
+            : globalAiModelSelect?.value;
+        updateModelSelect(providerSelect.value, false, {
+            baseUrl: baseUrlInput.value,
+            preferredModel: currentModel
+        });
+        updateCustomModelVisibility();
+        updateModelCatalogStatus();
+    });
+
+    refreshModelsBtn?.addEventListener('click', async () => {
+        const profile = getProfileFromForm();
+        const previousModel = profile.model;
+        const label = refreshModelsBtn.querySelector('span');
+        const originalLabel = label?.textContent || '刷新模型列表';
+        refreshModelsBtn.disabled = true;
+        refreshModelsBtn.classList.add('is-loading');
+        if (label) label.textContent = '正在读取';
+        if (modelCatalogStatus) modelCatalogStatus.textContent = `正在从 ${getPlatformName(profile.provider)} 读取可用模型...`;
+        apiStatus.textContent = '';
+        apiStatus.className = 'api-status';
+
+        try {
+            const result = await fetchProviderModelCatalog(profile);
+            updateModelSelect(profile.provider, false, {
+                baseUrl: profile.baseUrl,
+                preferredModel: previousModel
+            });
+            if (previousModel && [...globalAiModelSelect.options].some(option => option.value === previousModel)) {
+                globalAiModelSelect.value = previousModel;
+                syncModelSelects(previousModel);
+            }
+            updateCustomModelVisibility();
+            updateModelCatalogStatus(profile.provider, profile.baseUrl);
+            apiStatus.textContent = `模型列表已刷新：读取到 ${result.models.length} 个可用模型。当前选择保持不变，请按需切换后保存。`;
+            apiStatus.className = 'api-status success';
+        } catch (error) {
+            updateModelCatalogStatus(profile.provider, profile.baseUrl);
+            apiStatus.textContent = `模型列表刷新失败：${error.message || '接口不可用'}。已保留现有列表，也可以选择“手动输入模型 ID”。`;
+            apiStatus.className = 'api-status error';
+        } finally {
+            refreshModelsBtn.classList.remove('is-loading');
+            updateModelCatalogStatus(profile.provider, profile.baseUrl);
+            if (label) label.textContent = originalLabel;
+            refreshModelsBtn.disabled = PLATFORM_CONFIG[profile.provider]?.translationOnly === true;
+        }
     });
 
     async function testApiProfile(profileInput, triggerButton = testBtn) {
@@ -3804,18 +4028,10 @@ function initApiConfig() {
         return testApiProfile(getProfileFromForm(), testBtn);
     }
 
-    toggleBtn.addEventListener('click', () => {
-        if (configContent.style.display === 'none') {
-            configContent.style.display = 'grid';
-            toggleBtn.textContent = '收起内容';
-            toggleBtn.setAttribute('aria-expanded', 'true');
-        } else {
-            configContent.style.display = 'none';
-            toggleBtn.textContent = '展开内容';
-            toggleBtn.setAttribute('aria-expanded', 'false');
-        }
-    });
     closeBtn?.addEventListener('click', revealWorkspaceInspector);
+    document.querySelectorAll('[data-close-api-config]').forEach(button => {
+        button.addEventListener('click', revealWorkspaceInspector);
+    });
 
     testBtn.addEventListener('click', () => {
         testCurrentProfile();
@@ -3929,31 +4145,21 @@ function getApiConfig() {
     return { provider: 'deepseek', apiKey: '', baseUrl: 'https://api.deepseek.com' };
 }
 
+let apiConfigReturnFocus = null;
+
 function revealApiConfigPanel() {
     const panel = document.getElementById('apiConfigPanel');
-    const content = document.getElementById('apiConfigContent');
-    const apiKeyInput = document.getElementById('apiKey');
-    const inspector = document.getElementById('workspaceInspector');
+    const profileNameInput = document.getElementById('apiProfileName');
 
     if (panel) {
-        panel.style.display = 'block';
-        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-    if (inspector) {
-        inspector.style.display = 'none';
-    }
-
-    if (content) {
-        content.style.display = 'grid';
-    }
-    const toggleBtn = document.getElementById('toggleApiConfig');
-    if (toggleBtn) {
-        toggleBtn.textContent = '收起内容';
-        toggleBtn.setAttribute('aria-expanded', 'true');
+        apiConfigReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        panel.style.display = 'flex';
+        panel.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('api-config-open');
     }
 
-    if (apiKeyInput) {
-        setTimeout(() => apiKeyInput.focus(), 350);
+    if (profileNameInput) {
+        setTimeout(() => profileNameInput.focus({ preventScroll: true }), 180);
     }
 }
 
@@ -3984,6 +4190,115 @@ function getApiBaseUrl(provider, configBaseUrl) {
         return normalizeProviderBaseUrl(provider, platform.baseUrl);
     }
     return PLATFORM_CONFIG.deepseek.baseUrl;
+}
+
+function getModelsEndpoint(provider, baseUrl) {
+    const platform = PLATFORM_CONFIG[provider];
+    if (platform?.translationOnly) {
+        throw new Error(`${platform.name} 使用固定翻译模型，不提供通用模型目录`);
+    }
+
+    const normalized = normalizeProviderBaseUrl(provider, baseUrl || platform?.baseUrl || '');
+    if (!normalized) {
+        throw new Error('请先填写 Base URL');
+    }
+
+    const url = new URL(normalized);
+    let path = url.pathname.replace(/\/+$/, '');
+    path = path.replace(/\/(chat\/completions|responses|messages)$/i, '');
+    if (!/\/models$/i.test(path)) {
+        const alreadyVersioned = /(^|\/)(v1|v1beta|api\/v3|compatible-mode\/v1|openai)$/i.test(path);
+        path = `${path}${alreadyVersioned ? '' : '/v1'}/models`;
+    }
+    url.pathname = path.replace(/\/{2,}/g, '/');
+    return url.toString();
+}
+
+function getModelCatalogHeaders(apiConfig) {
+    const protocol = getProviderProtocol(apiConfig?.provider);
+    if (protocol === 'gemini-generate') {
+        return {
+            'Accept': 'application/json',
+            'x-goog-api-key': apiConfig.apiKey
+        };
+    }
+    if (protocol === 'anthropic-messages') {
+        return {
+            'Accept': 'application/json',
+            'anthropic-version': '2023-06-01',
+            'x-api-key': apiConfig.apiKey,
+            'Authorization': `Bearer ${apiConfig.apiKey}`
+        };
+    }
+    return {
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${apiConfig.apiKey}`
+    };
+}
+
+function extractModelCatalogItems(payload) {
+    if (Array.isArray(payload)) return payload;
+    const candidates = [
+        payload?.data,
+        payload?.models,
+        payload?.result?.data,
+        payload?.result?.models,
+        payload?.data?.models
+    ];
+    return candidates.find(Array.isArray) || [];
+}
+
+async function getApiResource(apiConfig, endpoint, headers, timeoutMs = MODEL_CATALOG_TIMEOUT_MS) {
+    const invoke = window.__TAURI__?.core?.invoke;
+    if (invoke) {
+        const response = await withHardTimeout(
+            invoke('get_api_resource', {
+                url: endpoint,
+                apiKey: apiConfig.apiKey,
+                timeoutMs,
+                headers
+            }),
+            timeoutMs
+        );
+        return createTextResponse(Number(response?.status || 0), String(response?.body || ''));
+    }
+
+    return fetch(endpoint, {
+        method: 'GET',
+        headers,
+        signal: AbortSignal.timeout(timeoutMs)
+    });
+}
+
+async function fetchProviderModelCatalog(apiConfig) {
+    if (!apiConfig?.apiKey) {
+        throw new Error('请先填写 API Key，再刷新当前账号可用的模型');
+    }
+    const baseUrl = getApiBaseUrl(apiConfig.provider, apiConfig.baseUrl);
+    const endpoint = getModelsEndpoint(apiConfig.provider, baseUrl);
+    const response = await getApiResource(
+        apiConfig,
+        endpoint,
+        getModelCatalogHeaders(apiConfig)
+    );
+    const rawText = await response.text();
+    let payload = null;
+    try {
+        payload = rawText ? JSON.parse(rawText) : null;
+    } catch {
+        payload = null;
+    }
+    if (!response.ok) {
+        throw new Error(getApiResponseErrorMessage(payload, rawText, `模型列表请求失败（HTTP ${response.status}）`));
+    }
+    const models = normalizeCatalogModels(extractModelCatalogItems(payload));
+    if (models.length === 0) {
+        throw new Error('供应商接口未返回模型 ID；可改用“手动输入模型 ID”');
+    }
+    return {
+        endpoint,
+        models: storeModelCatalog(apiConfig.provider, baseUrl, models)
+    };
 }
 
 function getChatCompletionsEndpoint(provider, baseUrl) {
@@ -4883,7 +5198,7 @@ async function callAPI(prompt, model, provider) {
     });
 }
 
-function updateModelSelect(provider, forceProviderDefault = false) {
+function updateModelSelect(provider, forceProviderDefault = false, options = {}) {
     const glossaryModelSelect = document.getElementById('glossaryModel');
     const organizeGlossaryModelSelect = document.getElementById('organizeGlossaryModel');
     const globalAiModelSelect = document.getElementById('globalAiModel');
@@ -4891,7 +5206,13 @@ function updateModelSelect(provider, forceProviderDefault = false) {
     const platform = PLATFORM_CONFIG[provider];
     if (!platform) return;
 
-    const models = platform.models.length > 0 ? [...platform.models] : [];
+    const baseUrl = options.baseUrl ?? document.getElementById('baseUrl')?.value ?? platform.baseUrl ?? '';
+    const preferredModel = String(options.preferredModel || '').trim();
+    const cachedCatalog = getCachedModelCatalog(provider, baseUrl);
+    const models = getAvailableModelsForProvider(provider, baseUrl);
+    if (preferredModel && !models.some(model => model.id === preferredModel)) {
+        models.unshift({ id: preferredModel, name: '当前配置' });
+    }
     if (platformAllowsCustomModel(provider)) {
         models.push({ id: CUSTOM_MODEL_OPTION, name: '手动输入模型 ID' });
     }
@@ -4902,8 +5223,9 @@ function updateModelSelect(provider, forceProviderDefault = false) {
     [glossaryModelSelect, organizeGlossaryModelSelect, globalAiModelSelect].forEach(select => {
         if (!select) return;
         const currentValue = select.value;
-        const hasCurrentModel = !forceProviderDefault && models.some(model => model.id === currentValue);
-        const selectedValue = hasCurrentModel ? currentValue : models[0].id;
+        const requestedValue = preferredModel || (!forceProviderDefault ? currentValue : '');
+        const hasRequestedModel = models.some(model => model.id === requestedValue);
+        const selectedValue = hasRequestedModel ? requestedValue : models[0].id;
 
         select.innerHTML = models.map((model) => {
             const isSelected = selectedValue === model.id;
@@ -4911,6 +5233,7 @@ function updateModelSelect(provider, forceProviderDefault = false) {
             return `<option value="${model.id}" ${isSelected ? 'selected' : ''}>${label}</option>`;
         }).join('');
         select.value = selectedValue;
+        select.dataset.modelCatalogSource = cachedCatalog ? 'online' : 'built-in';
         updateVisualSelect(select);
     });
     refreshAllVisualSelects();
@@ -4966,6 +5289,8 @@ function initWorkbenchResizers() {
 
         handle.addEventListener('pointerdown', (event) => {
             if (window.innerWidth < 1500 && handle === panelHandle) return;
+            if (handle === sidebarHandle && document.body.classList.contains('sidebar-collapsed')) return;
+            if (handle === panelHandle && document.body.classList.contains('inspector-collapsed')) return;
             event.preventDefault();
             handle.setPointerCapture?.(event.pointerId);
             document.body.classList.add('is-resizing-layout');
@@ -4990,6 +5315,73 @@ function initWorkbenchResizers() {
         const contentRight = window.innerWidth - 24;
         setSize('--inspector-width', 'nexus_inspector_width', contentRight - clientX, 340, 560);
     });
+}
+
+function initWorkbenchPanels() {
+    const sidebarToggle = document.getElementById('toggleSidebarBtn');
+    const inspectorToggle = document.getElementById('toggleInspectorBtn');
+    const inspectorInlineToggle = document.getElementById('toggleInspectorInlineBtn');
+    const sidebarStorageKey = 'nexus_sidebar_collapsed';
+    const inspectorStorageKey = 'nexus_inspector_collapsed';
+
+    let hasSidebarPreference = localStorage.getItem(sidebarStorageKey) !== null;
+    let hasInspectorPreference = localStorage.getItem(inspectorStorageKey) !== null;
+    let sidebarCollapsed = hasSidebarPreference
+        ? localStorage.getItem(sidebarStorageKey) === '1'
+        : window.innerWidth <= 980;
+    let inspectorCollapsed = hasInspectorPreference
+        ? localStorage.getItem(inspectorStorageKey) === '1'
+        : window.innerWidth <= 1500;
+
+    document.querySelectorAll('.nav-item').forEach(item => {
+        const label = item.querySelector('span')?.textContent?.trim();
+        if (label) item.title = label;
+    });
+
+    function updateToggle(button, collapsed, collapsedLabel, expandedLabel) {
+        if (!button) return;
+        const label = collapsed ? expandedLabel : collapsedLabel;
+        button.classList.toggle('is-collapsed', collapsed);
+        button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        button.setAttribute('aria-label', label);
+        button.title = label;
+    }
+
+    function renderLayoutState() {
+        document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);
+        document.body.classList.toggle('inspector-collapsed', inspectorCollapsed);
+        updateToggle(sidebarToggle, sidebarCollapsed, '收起导航', '展开导航');
+        updateToggle(inspectorToggle, inspectorCollapsed, '收起运行面板', '展开运行面板');
+        updateToggle(inspectorInlineToggle, inspectorCollapsed, '收起运行面板', '展开运行面板');
+    }
+
+    sidebarToggle?.addEventListener('click', () => {
+        sidebarCollapsed = !sidebarCollapsed;
+        hasSidebarPreference = true;
+        localStorage.setItem(sidebarStorageKey, sidebarCollapsed ? '1' : '0');
+        renderLayoutState();
+    });
+
+    const toggleInspector = () => {
+        inspectorCollapsed = !inspectorCollapsed;
+        hasInspectorPreference = true;
+        localStorage.setItem(inspectorStorageKey, inspectorCollapsed ? '1' : '0');
+        renderLayoutState();
+    };
+    inspectorToggle?.addEventListener('click', toggleInspector);
+    inspectorInlineToggle?.addEventListener('click', toggleInspector);
+
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(() => {
+            if (!hasSidebarPreference) sidebarCollapsed = window.innerWidth <= 980;
+            if (!hasInspectorPreference) inspectorCollapsed = window.innerWidth <= 1500;
+            renderLayoutState();
+        }, 120);
+    });
+
+    renderLayoutState();
 }
 
 function initCommandPalette({ showTool }) {
@@ -5258,6 +5650,9 @@ document.addEventListener('DOMContentLoaded', function() {
     };
 
     const apiConfigPanel = document.getElementById('apiConfigPanel');
+    if (apiConfigPanel && apiConfigPanel.parentElement !== document.body) {
+        document.body.appendChild(apiConfigPanel);
+    }
     const toolsRequiringApi = ['translate', 'l10n-check', 'glossary', 'glossary-organize'];
     const currentToolLabel = document.getElementById('currentToolLabel');
     const inspectorToolName = document.getElementById('inspectorToolName');
@@ -5322,7 +5717,11 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         const requiresApi = toolsRequiringApi.includes(targetTool);
-        if (apiConfigPanel) apiConfigPanel.style.display = 'none';
+        if (apiConfigPanel) {
+            apiConfigPanel.style.display = 'none';
+            apiConfigPanel.setAttribute('aria-hidden', 'true');
+        }
+        document.body.classList.remove('api-config-open');
         if (workspaceInspector) {
             workspaceInspector.style.display = 'grid';
         }
@@ -5356,6 +5755,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     initApiConfig();
     syncGlobalModel();
+    initWorkbenchPanels();
     initWorkbenchResizers();
     installFileDropGuards();
     initCommandPalette({ showTool });
@@ -5364,8 +5764,15 @@ document.addEventListener('DOMContentLoaded', function() {
     renderRecentTasks();
     renderApiSummary();
     document.getElementById('openApiConfigBtn')?.addEventListener('click', revealApiConfigPanel);
+    document.getElementById('topbarApiStatus')?.addEventListener('click', revealApiConfigPanel);
     document.querySelectorAll('[data-open-api-config]').forEach(button => {
         button.addEventListener('click', revealApiConfigPanel);
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && document.getElementById('apiConfigPanel')?.getAttribute('aria-hidden') === 'false') {
+            event.preventDefault();
+            revealWorkspaceInspector();
+        }
     });
     document.getElementById('clearRecentTasksBtn')?.addEventListener('click', () => {
         saveRecentTasks([]);
@@ -6012,6 +6419,8 @@ function initTranslateTool() {
     const translateAutoCompactLongInput = document.getElementById('translateAutoCompactLong');
     const translateAutoRetryMultiTargetInput = document.getElementById('translateAutoRetryMultiTarget');
     const translateQualitySummary = document.getElementById('translateQualitySummary');
+    const translateConcurrencyInput = document.getElementById('translateConcurrency');
+    const translateConcurrencyOutput = document.getElementById('translateConcurrencyValue');
     const translateLanguageRunPanel = document.getElementById('translateLanguageRunPanel');
     const translateCurrentLanguageLabel = document.getElementById('translateCurrentLanguageLabel');
     const translateLanguageRunMeta = document.getElementById('translateLanguageRunMeta');
@@ -6607,7 +7016,7 @@ function initTranslateTool() {
         setStatus('success', '已清除导入进度', '本次翻译不会再复用外部翻译报告。');
     });
     translateReviewImportedProgressBtn?.addEventListener('click', reviewImportedTranslationCompleteness);
-    translateRetrySuspiciousBtn?.addEventListener('click', retrySuspiciousImportedTranslations);
+    translateRetrySuspiciousBtn?.addEventListener('click', () => retrySuspiciousImportedTranslations());
     translateCompactLongImportedBtn?.addEventListener('click', compactLongImportedTranslations);
     translatePostCheckInput?.addEventListener('change', updateTranslateSubmitPlanHint);
     translateCompletenessCheckInput?.addEventListener('change', updateTranslateSettingsSummaries);
@@ -6623,7 +7032,13 @@ function initTranslateTool() {
         }
         renderTranslateTargetLanguageList();
     });
-    document.getElementById('translateConcurrency')?.addEventListener('change', updateTranslateSubmitPlanHint);
+    const syncTranslateConcurrency = () => {
+        syncNumericRangeControl(translateConcurrencyInput, translateConcurrencyOutput);
+        updateTranslateSubmitPlanHint();
+    };
+    translateConcurrencyInput?.addEventListener('input', syncTranslateConcurrency);
+    translateConcurrencyInput?.addEventListener('change', syncTranslateConcurrency);
+    syncNumericRangeControl(translateConcurrencyInput, translateConcurrencyOutput);
     translateCommonLangBtn?.addEventListener('click', () => {
         selectedTranslateTargetLangs = new Set(['en', 'ja', 'ko', 'zh-TW', 'fr', 'de', 'es', 'pt', 'ru', 'th', 'vi', 'id', 'it', 'ar', 'tr', 'hi', 'fil', 'ms']
             .filter(lang => getTranslateTargetLanguageOptions().some(option => option.value === lang)));
@@ -7741,6 +8156,7 @@ function initTranslateTool() {
         if (profiles.length === 0) {
             translateSubmitPlanHint.className = 'translate-submit-plan muted';
             translateSubmitPlanHint.textContent = '未选择可用翻译通道。';
+            translateSubmitPlanHint.removeAttribute('title');
             updateTranslateSettingsSummaries();
             return;
         }
@@ -7758,7 +8174,7 @@ function initTranslateTool() {
             const concurrency = getTranslatePlanConcurrency(profile, canEstimate ? batchCount : 0);
             estimatedRequests += canEstimate ? Math.ceil(perProfileTasks / batchSize) : 0;
             maxInFlight += batchSize * concurrency;
-            return `${getApiProfileLabel(profile)}：每批 ${batchSize} 条，并发 ${concurrency}${getTranslateConcurrencyNote(profile)}`;
+            return `${getApiProfileLabel(profile)} · ${batchSize}/批 · 并发 ${concurrency}`;
         });
         const totalTasks = perProfileTasks * profiles.length;
         const fmt = value => Number(value || 0).toLocaleString('zh-CN');
@@ -7776,9 +8192,9 @@ function initTranslateTool() {
         translateSubmitPlanHint.className = profiles.some(profile => profile.provider === 'agnes')
             ? 'translate-submit-plan stable'
             : 'translate-submit-plan';
+        translateSubmitPlanHint.title = `${qaModeText}。每通道批次间隔约 ${settleSeconds} 秒，遇到限流或超时会自动降速重试。`;
         translateSubmitPlanHint.innerHTML = `
-            <div class="submit-plan-title">提交策略：${escapeHtml(estimateText)}</div>
-            <div class="submit-plan-meta">${escapeHtml(languageText)} · ${escapeHtml(qaModeText)} · 最多约 ${fmt(maxInFlight)} 条文本同时在途；每通道批次间隔约 ${settleSeconds} 秒，遇到限流/超时会自动降速重试。</div>
+            <div class="submit-plan-title">${escapeHtml(languageText)} · ${escapeHtml(estimateText)} · 在途上限 ${fmt(maxInFlight)}</div>
             <div class="submit-plan-chips">
                 ${profileSummaries.map(summary => `<span>${escapeHtml(summary)}</span>`).join('')}
             </div>
@@ -7795,12 +8211,25 @@ function initTranslateTool() {
             reusableEntries: [],
             suspiciousEntries: [],
             reviewedAt: 0,
+            reviewContextKey: '',
             reviewSummary: null,
             issueSummary: null,
             selectedIssueFilters: [],
             failedOrMissingCount: 0,
             skippedCount: 0
         };
+    }
+
+    function getImportedTranslationReviewContextKey(targetLang = '') {
+        const glossarySignature = getSelectedTranslateGlossaryTerms()
+            .map(term => [term?.source || '', term?.target || '', term?.constraint || ''].join('\u001f'))
+            .join('\u001e');
+        return [
+            targetLang,
+            currentProject?.id || currentProject?.name || '',
+            currentProject?.rules || '',
+            glossarySignature
+        ].join('\u001d');
     }
 
     function getImportedIssueFilterSelection(state = importedTranslateProgressState) {
@@ -7939,7 +8368,7 @@ function initTranslateTool() {
         const state = importedTranslateProgressState;
         if (!state?.entries?.length) {
             translateProgressImportStatus.className = 'translate-import-status';
-                translateProgressImportStatus.textContent = '导入旧 translation_report.xlsx 后会按当前规则重检；报告中的“必须重译 / 接受现译 / 使用修订译文”也会一起生效。硬错误清零后才生成交付版。';
+            translateProgressImportStatus.textContent = '导入旧报告后复用成功译文，仅处理失败、缺失和指定问题。';
             if (translateBtnLabel) translateBtnLabel.textContent = '开始翻译';
             if (translateClearImportedProgressBtn) translateClearImportedProgressBtn.style.display = 'none';
             if (translateReviewImportedProgressBtn) translateReviewImportedProgressBtn.disabled = true;
@@ -8353,6 +8782,7 @@ function initTranslateTool() {
                 reusableEntries,
                 suspiciousEntries,
                 reviewedAt: shouldAutoReview ? Date.now() : 0,
+                reviewContextKey: shouldAutoReview ? getImportedTranslationReviewContextKey(reviewTargetLang) : '',
                 reviewSummary: shouldAutoReview ? {
                     total: reviewedEntries.length,
                     reusable: reusableEntries.length,
@@ -9117,6 +9547,7 @@ function initTranslateTool() {
                     reusableEntries,
                     suspiciousEntries: [],
                     reviewedAt: 0,
+                    reviewContextKey: '',
                     reviewSummary: null,
                     issueSummary,
                     selectedIssueFilters: [],
@@ -10601,21 +11032,58 @@ function initTranslateTool() {
         return labels[status] || '等待';
     }
 
+    function createTranslateChannelProgressRecord(profile) {
+        return {
+            profile,
+            completed: 0,
+            total: 0,
+            success: 0,
+            failed: 0,
+            qaFailed: 0,
+            congestionCount: 0,
+            interruptionCount: 0,
+            retryCount: 0,
+            slowdownCount: 0,
+            status: 'waiting',
+            message: '等待开始翻译',
+            updatedAt: Date.now()
+        };
+    }
+
+    function classifyTranslateChannelIncident(error) {
+        const status = Number(error?.status || 0);
+        const diagnostic = `${error?.message || ''} ${error?.rawText || ''} ${JSON.stringify(error?.payload || '')}`;
+        const congestion = status === 429 || status === 503 || error?.isRateLimited ||
+            /rate.?limit|too many requests|overload|high demand|quota|限流|频率|服务繁忙|拥堵/i.test(diagnostic);
+        if (congestion) return 'congestion';
+
+        const interruption = [500, 502, 504].includes(status) || error?.isTimeout ||
+            /timeout|超时|network|fetch failed|connection|socket|ECONN|断开|中断|临时不可用|UNAVAILABLE/i.test(diagnostic);
+        return interruption ? 'interruption' : '';
+    }
+
+    function recordTranslateChannelIncident(profile, error = null, options = {}) {
+        if (!profile) return;
+        const key = getTranslateChannelKey(profile);
+        const previous = translateChannelProgressState.get(key) || createTranslateChannelProgressRecord(profile);
+        const kind = error ? classifyTranslateChannelIncident(error) : '';
+        translateChannelProgressState.set(key, {
+            ...previous,
+            profile,
+            congestionCount: Number(previous.congestionCount || 0) + (kind === 'congestion' ? 1 : 0),
+            interruptionCount: Number(previous.interruptionCount || 0) + (kind === 'interruption' ? 1 : 0),
+            retryCount: Number(previous.retryCount || 0) + (options.retry ? 1 : 0),
+            slowdownCount: Number(previous.slowdownCount || 0) + (options.slowdown ? 1 : 0),
+            updatedAt: Date.now()
+        });
+        renderTranslateChannelProgress();
+    }
+
     function initTranslateChannelProgress(tasks = []) {
         translateChannelProgressState = new Map();
         tasks.forEach(task => {
             const key = getTranslateChannelKey(task.profile);
-            const previous = translateChannelProgressState.get(key) || {
-                profile: task.profile,
-                completed: 0,
-                total: 0,
-                success: 0,
-                failed: 0,
-                qaFailed: 0,
-                status: 'waiting',
-                message: '等待开始翻译',
-                updatedAt: Date.now()
-            };
+            const previous = translateChannelProgressState.get(key) || createTranslateChannelProgressRecord(task.profile);
             previous.total += 1;
             translateChannelProgressState.set(key, previous);
         });
@@ -10625,16 +11093,7 @@ function initTranslateTool() {
     function updateTranslateChannelProgress(profile, updates = {}) {
         if (!profile) return;
         const key = getTranslateChannelKey(profile);
-        const previous = translateChannelProgressState.get(key) || {
-            profile,
-            completed: 0,
-            total: 0,
-            success: 0,
-            failed: 0,
-            qaFailed: 0,
-            status: 'waiting',
-            message: ''
-        };
+        const previous = translateChannelProgressState.get(key) || createTranslateChannelProgressRecord(profile);
         translateChannelProgressState.set(key, {
             ...previous,
             ...updates,
@@ -10646,16 +11105,7 @@ function initTranslateTool() {
 
     function recordTranslateChannelResult(task, status) {
         const key = getTranslateChannelKey(task.profile);
-        const previous = translateChannelProgressState.get(key) || {
-            profile: task.profile,
-            completed: 0,
-            total: 0,
-            success: 0,
-            failed: 0,
-            qaFailed: 0,
-            status: 'waiting',
-            message: ''
-        };
+        const previous = translateChannelProgressState.get(key) || createTranslateChannelProgressRecord(task.profile);
         const next = {
             ...previous,
             profile: task.profile,
@@ -10713,6 +11163,14 @@ function initTranslateTool() {
             const lastText = state.updatedAt && ['running', 'retrying'].includes(state.status)
                 ? ` · 最后更新 ${formatTranslateDuration(Date.now() - state.updatedAt)} 前`
                 : '';
+            const congestionCount = Number(state.congestionCount || 0);
+            const interruptionCount = Number(state.interruptionCount || 0);
+            const retryCount = Number(state.retryCount || 0);
+            const slowdownCount = Number(state.slowdownCount || 0);
+            const incidentCount = congestionCount + interruptionCount;
+            const healthAdvice = incidentCount >= 3 || slowdownCount >= 2
+                ? '<span class="channel-health-advice">建议降低并发</span>'
+                : '';
             return `
                 <div class="channel-status-card ${escapeAttribute(state.status || 'waiting')}">
                     <div class="channel-status-top">
@@ -10727,6 +11185,13 @@ function initTranslateTool() {
                         <span>${percent}%</span>
                     </div>
                     <div class="channel-status-message">${escapeHtml(modelText)}${state.message ? ` · ${escapeHtml(state.message)}` : ''}${failureText}${lastText}</div>
+                    <div class="channel-health-row" aria-label="通道健康统计">
+                        <span class="channel-health-chip${congestionCount ? ' warning' : ''}">拥堵 ${congestionCount}</span>
+                        <span class="channel-health-chip${interruptionCount ? ' danger' : ''}">超时/断连 ${interruptionCount}</span>
+                        <span class="channel-health-chip${retryCount ? ' warning' : ''}">重试 ${retryCount}</span>
+                        <span class="channel-health-chip${slowdownCount ? ' warning' : ''}">降速 ${slowdownCount}</span>
+                        ${healthAdvice}
+                    </div>
                 </div>
             `;
         }).join('');
@@ -10973,7 +11438,7 @@ function initTranslateTool() {
         renderColumnList();
     }
 
-    function restoreCompletedTranslationTasks(tasks, savedEntries, targetLang = '') {
+    function restoreCompletedTranslationTasks(tasks, savedEntries, targetLang = '', options = {}) {
         const taskKeys = new Set(tasks.map(task => task.taskKey));
         const entries = savedEntries.filter(entry => taskKeys.has(entry.taskKey));
         const entriesByKey = new Map(entries.map(entry => [entry.taskKey, entry]));
@@ -10991,13 +11456,15 @@ function initTranslateTool() {
             if (!canRestoreAsCompleted) return;
 
             const translated = normalizeTranslateResultText(entry.translatedText, task.text);
-            const currentQaStatus = summarizeTranslationQa(
-                task.text,
-                translated,
-                task.glossaryTerms || [],
-                targetLang || translationRunReport?.targetLang || targetLangSelect?.value || '',
-                task
-            );
+            const currentQaStatus = options.trustSavedQa
+                ? (entry.qaStatus || '通过')
+                : summarizeTranslationQa(
+                    task.text,
+                    translated,
+                    task.glossaryTerms || [],
+                    targetLang || translationRunReport?.targetLang || targetLangSelect?.value || '',
+                    task
+                );
             const reportEntry = buildTranslationReportEntry(task, translated, currentQaStatus);
             const decisionPolicy = globalThis.NexusTranslationDeliveryPolicy;
             const userDecision = decisionPolicy?.normalizeDecision
@@ -11107,6 +11574,13 @@ function initTranslateTool() {
         return index;
     }
 
+    function buildTranslateImportTaskLookup(tasks = []) {
+        return {
+            taskByKey: new Map(tasks.map(task => [task.taskKey, task])),
+            fallbackIndex: buildTranslateImportTaskIndex(tasks)
+        };
+    }
+
     function findImportedTranslationTaskMatch(entry, taskByKey, fallbackIndex) {
         if (entry.taskKey && taskByKey.has(entry.taskKey)) {
             return taskByKey.get(entry.taskKey);
@@ -11121,25 +11595,34 @@ function initTranslateTool() {
     function buildImportedTranslationRestoreEntries(tasks = [], targetLang = '', options = {}) {
         const state = importedTranslateProgressState;
         if (!state?.entries?.length) {
-            return { entries: [], matched: 0, unmatched: 0, skippedTargetMismatch: 0 };
+            return { entries: [], matched: 0, unmatched: 0, skippedTargetMismatch: 0, reviewedForCurrentContext: false };
         }
         if (state.targetLang && targetLang && state.targetLang !== targetLang) {
             return {
                 entries: [],
                 matched: 0,
                 unmatched: 0,
-                skippedTargetMismatch: state.entries.length
+                skippedTargetMismatch: state.entries.length,
+                reviewedForCurrentContext: false
             };
         }
 
-        const reviewedStateEntries = targetLang
+        const reviewContextKey = targetLang ? getImportedTranslationReviewContextKey(targetLang) : '';
+        const canReuseReviewedEntries = Boolean(
+            targetLang &&
+            state.reviewedAt &&
+            state.targetLang === targetLang &&
+            state.reviewContextKey === reviewContextKey
+        );
+        const reviewedStateEntries = targetLang && !canReuseReviewedEntries
             ? (state.entries || []).map(entry => buildReviewedImportedTranslationEntry(entry, targetLang))
             : (state.entries || []);
-        if (targetLang) {
+        if (targetLang && !canReuseReviewedEntries) {
             const issueSummary = getTranslationReportIssueSummary(reviewedStateEntries);
             state.entries = reviewedStateEntries;
             state.targetLang = state.targetLang || targetLang;
             state.reviewedAt = Date.now();
+            state.reviewContextKey = reviewContextKey;
             state.issueSummary = issueSummary;
             state.failedOrMissingCount = issueSummary.retryable;
             state.reusableEntries = reviewedStateEntries.filter(isReusableImportedTranslationEntry);
@@ -11153,8 +11636,9 @@ function initTranslateTool() {
             );
         }
 
-        const taskByKey = new Map(tasks.map(task => [task.taskKey, task]));
-        const fallbackIndex = buildTranslateImportTaskIndex(tasks);
+        const taskLookup = options.taskLookup || buildTranslateImportTaskLookup(tasks);
+        const taskByKey = taskLookup.taskByKey;
+        const fallbackIndex = taskLookup.fallbackIndex;
         const allowFallbackMatch = !state.targetLang || state.targetLang === targetLang;
         const usedTaskKeys = new Set();
         const entries = [];
@@ -11201,7 +11685,8 @@ function initTranslateTool() {
             entries,
             matched: entries.length,
             unmatched,
-            skippedTargetMismatch
+            skippedTargetMismatch,
+            reviewedForCurrentContext: Boolean(targetLang)
         };
     }
 
@@ -11381,6 +11866,7 @@ function initTranslateTool() {
             reusableEntries,
             suspiciousEntries,
             reviewedAt: Date.now(),
+            reviewContextKey: getImportedTranslationReviewContextKey(targetLang),
             reviewSummary: {
                 total: mergedReviewedEntries.length,
                 reusable: reusableEntries.length,
@@ -11482,14 +11968,29 @@ function initTranslateTool() {
         failedTranslationTasks = [];
         const restored = buildImportedTranslationRestoreEntries(tasks, targetLang, options);
         if (restored.entries.length) {
-            restoreCompletedTranslationTasks(tasks, restored.entries, targetLang);
+            restoreCompletedTranslationTasks(tasks, restored.entries, targetLang, {
+                trustSavedQa: restored.reviewedForCurrentContext
+            });
         }
         return restored;
     }
 
-    async function retrySuspiciousImportedTranslations() {
+    function setImportedRetryPreparationState(isPreparing, count = 0) {
+        if (translateBtn) translateBtn.disabled = isPreparing;
+        if (translateBtnLabel && isPreparing) translateBtnLabel.textContent = `正在准备 ${count} 条...`;
+        if (translateRetrySuspiciousBtn) {
+            translateRetrySuspiciousBtn.disabled = isPreparing;
+            if (isPreparing) translateRetrySuspiciousBtn.textContent = `正在准备 ${count} 条...`;
+        }
+    }
+
+    async function yieldTranslatePreparationPaint() {
+        await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+    }
+
+    async function retrySuspiciousImportedTranslations(previewOverride = null) {
         const state = importedTranslateProgressState;
-        const retryPreview = getImportedIssueRetryPreview(state);
+        const retryPreview = previewOverride || getImportedIssueRetryPreview(state);
         if (!retryPreview.entries.length) {
             alert(retryPreview.custom
                 ? '所选问题类型没有可重译的行。请换一个报告问题类型，或先点击“复查已完成译文”。'
@@ -11518,27 +12019,52 @@ function initTranslateTool() {
             if (!confirmed) return;
             targetLangSelect.value = state.targetLang;
         }
-        const allTasks = collectTranslationTasks(activeProfiles);
-        const retryTasks = [];
-        const usedTaskKeys = new Set();
-        retryPreview.entries.forEach(entry => {
-            const task = findTaskForImportedTranslationEntry(entry, allTasks);
-            if (!task || usedTaskKeys.has(task.taskKey)) return;
-            retryTasks.push(task);
-            usedTaskKeys.add(task.taskKey);
-        });
-
-        if (!retryTasks.length) {
-            setStatus('error', '未定位到报告问题行', '请确认当前上传文件、工作表、所选列与导入报告来自同一次翻译。');
-            return;
-        }
-
-        initializeTranslateOutputFromImportedReport(allTasks, targetLang);
-        failedTranslationTasks = retryTasks;
-        updateTranslationRunActions();
         const retryScope = retryPreview.custom
             ? `所选问题类型（${formatImportedIssueFilterSelection(retryPreview)}）`
             : '可疑行';
+        setImportedRetryPreparationState(true, retryPreview.entries.length);
+        setStatus('processing', `正在准备${retryScope}`, `正在建立源文件索引并定位 ${retryPreview.entries.length} 条报告问题，完成后会自动开始补译。`);
+        await yieldTranslatePreparationPaint();
+
+        let retryTasks = [];
+        try {
+            const allTasks = collectTranslationTasks(activeProfiles, { deferGlossary: true });
+            const taskLookup = buildTranslateImportTaskLookup(allTasks);
+            const usedTaskKeys = new Set();
+            retryPreview.entries.forEach(entry => {
+                const task = findImportedTranslationTaskMatch(entry, taskLookup.taskByKey, taskLookup.fallbackIndex);
+                if (!task || usedTaskKeys.has(task.taskKey)) return;
+                retryTasks.push(task);
+                usedTaskKeys.add(task.taskKey);
+            });
+
+            if (!retryTasks.length) {
+                setStatus('error', '未定位到报告问题行', '请确认当前上传文件、工作表、所选列与导入报告来自同一次翻译。');
+                return;
+            }
+
+            const glossaryTerms = getSelectedTranslateGlossaryTerms();
+            retryTasks.forEach(task => {
+                task.glossaryTerms = getRelevantTranslateGlossaryTerms(
+                    [task.text, task.referenceText],
+                    glossaryTerms,
+                    targetLang,
+                    24
+                );
+            });
+            initializeTranslateOutputFromImportedReport(allTasks, targetLang, { taskLookup });
+            failedTranslationTasks = retryTasks;
+            updateTranslationRunActions();
+        } catch (error) {
+            recordClientError('prepare-imported-translation-retry', error);
+            setStatus('error', '准备补译失败', error?.message || '建立任务索引时发生异常');
+            return;
+        } finally {
+            setImportedRetryPreparationState(false);
+            updateTranslateProgressImportStatus();
+            updateTranslationRunActions();
+        }
+
         setStatus('processing', `已准备${retryScope}补译`, `定位到 ${retryTasks.length}/${retryPreview.entries.length} 条报告问题行，将复用其余成功译文。`);
         await retryFailedTranslations({ skipConfirm: true, deferAutoQaRepair: true });
     }
@@ -11546,7 +12072,7 @@ function initTranslateTool() {
     async function handleTranslatePrimaryAction() {
         const retryPreview = getImportedIssueRetryPreview(importedTranslateProgressState);
         if (retryPreview.custom) {
-            await retrySuspiciousImportedTranslations();
+            await retrySuspiciousImportedTranslations(retryPreview);
             return;
         }
         await startTranslate();
@@ -12013,10 +12539,11 @@ function initTranslateTool() {
         ].join('|');
     }
 
-    function collectTranslationTasks(activeProfiles) {
+    function collectTranslationTasks(activeProfiles, options = {}) {
         const tasks = [];
         let filteredEmpty = 0;
         let filteredSpecial = 0;
+        const deferGlossary = Boolean(options.deferGlossary);
         const glossaryTerms = getSelectedTranslateGlossaryTerms();
         const targetLang = document.getElementById('targetLang').value;
 
@@ -12040,7 +12567,9 @@ function initTranslateTool() {
 
                 activeProfiles.forEach(profile => {
                     const referenceText = getTranslateReferenceText(row, originalColIndex);
-                    const glossary = getRelevantTranslateGlossaryTerms([cellText, referenceText], glossaryTerms, targetLang, 24);
+                    const glossary = deferGlossary
+                        ? []
+                        : getRelevantTranslateGlossaryTerms([cellText, referenceText], glossaryTerms, targetLang, 24);
                     const referenceColIndex = referenceText ? referenceColumn : null;
                     const passthrough = isSpecialCode(cellText, targetLang);
                     if (passthrough) filteredSpecial++;
@@ -13449,8 +13978,9 @@ function initTranslateTool() {
                     2,
                     glossaryTermsForRun,
                     {
-                        onBatchStatus: ({ attempt, retries, summary, willRetry }) => {
+                        onBatchStatus: ({ attempt, retries, error, summary, willRetry }) => {
                             batchFailureSummary = summary || batchFailureSummary;
+                            recordTranslateChannelIncident(profile, error, { retry: willRetry });
                             updateTranslateChannelProgress(profile, {
                                 status: 'retrying',
                                 message: `批量第 ${attempt}/${retries} 次失败：${summary}${willRetry ? '，正在重试' : '，准备降级单条'}`
@@ -13622,11 +14152,15 @@ function initTranslateTool() {
                         }
 
                         function reduceAdaptiveConcurrency(reason = '') {
+                            const shouldRecordSlowdown = adaptive.current > 1 || Date.now() >= adaptive.cooldownUntil;
                             adaptive.current = 1;
                             adaptive.stableSuccesses = 0;
                             adaptive.cooldownUntil = Date.now() + TRANSLATION_ADAPTIVE_COOLDOWN_MS;
                             adaptive.lastReason = reason ? `已降速保护：${reason}` : '已降速保护';
                             nextBatchStartAt = Math.max(nextBatchStartAt, Date.now() + TRANSLATION_BATCH_FAILURE_SETTLE_DELAY_MS);
+                            if (shouldRecordSlowdown) {
+                                recordTranslateChannelIncident(profile, null, { slowdown: true });
+                            }
                         }
 
                         function reserveBatchSettleDelay() {
@@ -13695,6 +14229,7 @@ function initTranslateTool() {
                                 } else {
                                     const summary = summarizeTranslateError(error);
                                     if (isTemporaryTranslateApiError(error)) {
+                                        recordTranslateChannelIncident(profile, error);
                                         reduceAdaptiveConcurrency(summary);
                                     }
                                     const committedFailures = commitUnfinishedTranslateTaskFailures(taskBatch, summary || '当前批次异常');
@@ -14733,6 +15268,7 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                 }
                 lastError = error;
                 console.error(`Translate attempt ${attempt + 1} failed:`, error);
+                recordTranslateChannelIncident(apiConfig, error, { retry: attempt < retries - 1 });
                 if (attempt === retries - 1) {
                     return makeTranslateFailureText(text, summarizeTranslateError(error));
                 }
@@ -14884,6 +15420,7 @@ ${protectedContext.fields.currentTranslation}`;
                     throw error;
                 }
                 console.warn(`Repair translate attempt ${attempt + 1} failed:`, error);
+                recordTranslateChannelIncident(apiConfig, error, { retry: attempt < retries - 1 });
                 if (attempt === retries - 1) return currentTranslation;
                 const retryAfter = Number(error.retryAfterMs || 0);
                 const waitMs = Math.max(700 * (attempt + 1), Math.min(retryAfter, 60000));
@@ -20220,32 +20757,13 @@ function initL10nCheckTool() {
         if (!modeExplainer) return;
 
         const selectedMode = getSelectedCheckMode();
-        const orderedModes = [
-            selectedMode,
-            ...L10N_MODE_ORDER.filter(mode => mode !== selectedMode)
-        ];
-
-        modeExplainer.innerHTML = orderedModes.map(mode => {
-            const config = L10N_MODE_CONFIG[mode];
-            const isActive = mode === selectedMode;
-            return `
-                <button class="mode-card ${isActive ? 'active' : ''}" data-mode="${mode}" type="button" aria-pressed="${isActive ? 'true' : 'false'}">
-                    <strong>${escapeHtml(config.label)}${isActive ? ' · 当前选择' : ''}</strong>
-                    <span>${escapeHtml(config.description)}</span>
-                </button>
-            `;
-        }).join('');
-
-        modeExplainer.querySelectorAll('.mode-card[data-mode]').forEach(card => {
-            card.addEventListener('click', () => {
-                const mode = card.dataset.mode;
-                if (!L10N_MODE_CONFIG[mode]) return;
-                if (checkModeSelect) {
-                    checkModeSelect.value = mode;
-                    checkModeSelect.dispatchEvent(new Event('change'));
-                }
-            });
-        });
+        const config = L10N_MODE_CONFIG[selectedMode] || L10N_MODE_CONFIG.balanced;
+        modeExplainer.innerHTML = `
+            <div class="mode-card active compact-mode-summary">
+                <strong>${escapeHtml(config.label)}</strong>
+                <span>${escapeHtml(config.description)}</span>
+            </div>
+        `;
     }
 
     function createEmptyHistoryImportState() {

@@ -118,6 +118,58 @@ async fn post_chat_completion(
     Ok(ChatCompletionResponse { status, body })
 }
 
+#[tauri::command]
+async fn get_api_resource(
+    url: String,
+    api_key: String,
+    timeout_ms: Option<u64>,
+    headers: Option<HashMap<String, String>>,
+) -> Result<ChatCompletionResponse, String> {
+    let parsed_url = reqwest::Url::parse(&url).map_err(|error| format!("接口地址无效：{error}"))?;
+    if !matches!(parsed_url.scheme(), "https" | "http") {
+        return Err("接口地址必须是 http 或 https".to_string());
+    }
+
+    let timeout_ms = timeout_ms.unwrap_or(30_000).clamp(5_000, 120_000);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms))
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|error| format!("初始化接口客户端失败：{error}"))?;
+
+    let mut request = client.get(parsed_url);
+    if let Some(headers) = headers {
+        for (key, value) in headers {
+            if !key.trim().is_empty() {
+                request = request.header(key, value);
+            }
+        }
+    } else if !api_key.trim().is_empty() {
+        request = request.bearer_auth(api_key);
+    }
+
+    let response = request.send().await.map_err(|error| {
+        if error.is_timeout() {
+            format!(
+                "读取模型列表超时（超过 {} 秒），请稍后重试",
+                (timeout_ms + 999) / 1000
+            )
+        } else if error.is_connect() {
+            format!("无法连接模型列表接口，请检查 Base URL 或网络状态：{error}")
+        } else {
+            format!("读取模型列表失败：{error}")
+        }
+    })?;
+
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("读取模型列表返回失败：{error}"))?;
+
+    Ok(ChatCompletionResponse { status, body })
+}
+
 fn downloads_dir() -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
@@ -343,6 +395,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_dropped_file,
             post_chat_completion,
+            get_api_resource,
             save_report_to_downloads,
             save_binary_report_to_downloads,
             start_binary_report_save,
