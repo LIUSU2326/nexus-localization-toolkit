@@ -604,6 +604,8 @@ const TRANSLATION_ADAPTIVE_COOLDOWN_MS = 120000;
 const TRANSLATION_BATCH_SETTLE_DELAY_MS = 800;
 const TRANSLATION_BATCH_FAILURE_SETTLE_DELAY_MS = 5000;
 const TRANSLATION_CHANNEL_RECOVERY_COOLDOWN_MS = 180000;
+const TRANSLATION_QA_REPAIR_MAX_ATTEMPTS = 2;
+const TRANSLATION_QA_REPAIR_MAX_CONCURRENCY = 2;
 const TRANSLATION_PREVIEW_MAX_ITEMS = 60;
 const TRANSLATION_PREVIEW_RENDER_EVERY = 5;
 const TRANSLATION_TASK_CHECKPOINT_BATCH_SIZE = 50;
@@ -612,6 +614,70 @@ const TRANSLATE_BATCH_IMPORT_SETTLE_DELAY_MS = 600;
 const TAURI_BINARY_SAVE_ARRAY_LIMIT = 2 * 1024 * 1024;
 const TAURI_BINARY_SAVE_CHUNK_SIZE = 512 * 1024;
 const NEXUS_CLIENT_ERROR_LOG_KEY = 'nexus_client_error_log_v1';
+
+function normalizeTranslationRepairFingerprint(value) {
+    return String(value ?? '')
+        .replace(/\r\n?/g, '\n')
+        .trim();
+}
+
+function hasTranslationQaRepairChanged(previousTranslated, nextTranslated) {
+    return normalizeTranslationRepairFingerprint(previousTranslated) !==
+        normalizeTranslationRepairFingerprint(nextTranslated);
+}
+
+function shouldAttemptNextTranslationQaRepair(previousTranslated, nextTranslated, attempt, maxAttempts = TRANSLATION_QA_REPAIR_MAX_ATTEMPTS, allowRetryOnUnchanged = false) {
+    if (attempt + 1 >= maxAttempts) return false;
+    return allowRetryOnUnchanged || hasTranslationQaRepairChanged(previousTranslated, nextTranslated);
+}
+
+function getTranslationQaRepairConcurrency(configuredLimit, adaptiveLimit, taskCount) {
+    const configured = Number.isFinite(Number(configuredLimit)) ? Number(configuredLimit) : 1;
+    const adaptive = Number.isFinite(Number(adaptiveLimit)) ? Number(adaptiveLimit) : 1;
+    const count = Number.isFinite(Number(taskCount)) ? Number(taskCount) : 0;
+    if (count <= 0) return 1;
+    return Math.max(1, Math.min(
+        TRANSLATION_QA_REPAIR_MAX_CONCURRENCY,
+        Math.max(1, configured),
+        Math.max(1, adaptive),
+        count
+    ));
+}
+
+function createTranslationRequestLimiter(getCapacity, onCancel = () => {}, waitMs = 50) {
+    let activeCount = 0;
+    const readCapacity = () => Math.max(1, Number(getCapacity?.()) || 1);
+
+    return {
+        async acquire() {
+            while (activeCount >= readCapacity()) {
+                onCancel();
+                await new Promise(resolve => setTimeout(resolve, Math.max(0, waitMs)));
+            }
+            onCancel();
+            activeCount++;
+            let released = false;
+            return () => {
+                if (released) return;
+                released = true;
+                activeCount = Math.max(0, activeCount - 1);
+            };
+        },
+        getActiveCount() {
+            return activeCount;
+        }
+    };
+}
+
+async function runWithTranslationRequestLimiter(limiter, request) {
+    let releaseRequest = null;
+    try {
+        releaseRequest = limiter ? await limiter.acquire() : null;
+        return await request();
+    } finally {
+        releaseRequest?.();
+    }
+}
 
 let translationProgressDbPromise = null;
 let translationProgressWriteEpoch = 0;
@@ -11044,6 +11110,7 @@ function initTranslateTool() {
             interruptionCount: 0,
             retryCount: 0,
             slowdownCount: 0,
+            lastIncidentAt: 0,
             status: 'waiting',
             message: '等待开始翻译',
             updatedAt: Date.now()
@@ -11067,6 +11134,8 @@ function initTranslateTool() {
         const key = getTranslateChannelKey(profile);
         const previous = translateChannelProgressState.get(key) || createTranslateChannelProgressRecord(profile);
         const kind = error ? classifyTranslateChannelIncident(error) : '';
+        const incidentRecorded = Boolean(kind) || Boolean(options.slowdown);
+        const incidentAt = incidentRecorded ? Date.now() : Number(previous.lastIncidentAt || 0);
         translateChannelProgressState.set(key, {
             ...previous,
             profile,
@@ -11074,6 +11143,7 @@ function initTranslateTool() {
             interruptionCount: Number(previous.interruptionCount || 0) + (kind === 'interruption' ? 1 : 0),
             retryCount: Number(previous.retryCount || 0) + (options.retry ? 1 : 0),
             slowdownCount: Number(previous.slowdownCount || 0) + (options.slowdown ? 1 : 0),
+            lastIncidentAt: incidentAt,
             updatedAt: Date.now()
         });
         renderTranslateChannelProgress();
@@ -13705,6 +13775,43 @@ function initTranslateTool() {
                 }
             }
 
+            // Batch, single-item, and QA-repair calls share one per-channel limiter.
+            // This keeps the repair workers from bypassing the channel's effective cap.
+            const translationRequestLimiters = new Map();
+            const translationRequestAdaptiveCaps = new Map();
+
+            function setTranslationRequestAdaptiveCap(profile, limit) {
+                const key = getTranslateChannelKey(profile);
+                const numericLimit = Number(limit);
+                if (Number.isFinite(numericLimit) && numericLimit > 0) {
+                    translationRequestAdaptiveCaps.set(key, numericLimit);
+                }
+            }
+
+            function getTranslationRequestLimiter(profile) {
+                const key = getTranslateChannelKey(profile);
+                if (!translationRequestLimiters.has(key)) {
+                    const getCapacity = () => {
+                        const configured = getTranslateEffectiveConcurrencyLimit(profile);
+                        const state = translateChannelProgressState.get(key);
+                        const adaptive = Number(translationRequestAdaptiveCaps.get(key));
+                        const adaptiveLimit = Number.isFinite(adaptive) && adaptive > 0 ? adaptive : configured;
+                        const lastIncidentAt = Number(state?.lastIncidentAt || 0);
+                        const hasRecentIncident = lastIncidentAt > 0 &&
+                            Date.now() - lastIncidentAt < TRANSLATION_ADAPTIVE_COOLDOWN_MS;
+                        return hasRecentIncident
+                            ? 1
+                            : Math.max(1, Math.min(configured, adaptiveLimit));
+                    };
+
+                    translationRequestLimiters.set(
+                        key,
+                        createTranslationRequestLimiter(getCapacity, () => throwIfTranslationCancelled(runId))
+                    );
+                }
+                return translationRequestLimiters.get(key);
+            }
+
             function recordChannelOutcome(task, isFailed) {
                 const profileId = getProfileRunId(task.profile);
                 if (!isFailed) {
@@ -13768,11 +13875,15 @@ function initTranslateTool() {
 
                 const beforeRepairTranslated = nextTranslated;
                 const beforeRepairQaStatus = qaStatus;
-                for (let repairAttempt = 0; repairAttempt < 2 && !isTranslationQaPassed(qaStatus); repairAttempt++) {
+                const requestLimiter = getTranslationRequestLimiter(task.profile);
+                for (let repairAttempt = 0;
+                    repairAttempt < TRANSLATION_QA_REPAIR_MAX_ATTEMPTS && !isTranslationQaPassed(qaStatus);
+                    repairAttempt++) {
                     updateTranslateChannelProgress(task.profile, {
                         status: 'retrying',
                         message: `QA 未通过，自动修复第 ${repairAttempt + 1} 次`
                     });
+                    let repairRequestFailed = false;
                     const repaired = await repairTranslationWithRetry(
                         task,
                         nextTranslated,
@@ -13782,15 +13893,49 @@ function initTranslateTool() {
                         currentProject.rules,
                         task.profile,
                         runSignal,
-                        1
+                        1,
+                        {
+                            requestLimiter,
+                            onFailure: () => {
+                                repairRequestFailed = true;
+                            }
+                        }
                     );
-                    nextTranslated = applyLocalTranslationFixes(task.text, repaired, targetLang);
-                    qaStatus = summarizeTranslationQa(task.text, nextTranslated, task.glossaryTerms || [], targetLang, task);
+                    const repairedTranslated = applyLocalTranslationFixes(task.text, repaired, targetLang);
+                    const repairedQaStatus = summarizeTranslationQa(
+                        task.text,
+                        repairedTranslated,
+                        task.glossaryTerms || [],
+                        targetLang,
+                        task
+                    );
+                    const repairChangedTranslation = hasTranslationQaRepairChanged(
+                        nextTranslated,
+                        repairedTranslated,
+                    );
+                    const shouldContinueRepair = shouldAttemptNextTranslationQaRepair(
+                        nextTranslated,
+                        repairedTranslated,
+                        repairAttempt,
+                        TRANSLATION_QA_REPAIR_MAX_ATTEMPTS,
+                        repairRequestFailed
+                    );
+                    nextTranslated = repairedTranslated;
+                    qaStatus = repairedQaStatus;
                     if (isTranslateFailureText(nextTranslated)) break;
+                    if (!repairChangedTranslation && !repairRequestFailed && !isTranslationQaPassed(qaStatus)) {
+                        updateTranslateChannelProgress(task.profile, {
+                            status: 'retrying',
+                            message: 'QA 修复未改变译文，已停止重复修复'
+                        });
+                        break;
+                    }
+                    if (!shouldContinueRepair) break;
                 }
+                const repairRequestsStillActive = requestLimiter.getActiveCount() > 0;
                 updateTranslateChannelProgress(task.profile, {
-                    status: 'running',
-                    message: 'QA 修复结束，写入结果'
+                    status: repairRequestsStillActive ? 'retrying' : 'running',
+                    message: repairRequestsStillActive ? 'QA 修复进行中' : 'QA 修复结束，写入结果'
                 });
 
                 if (targetLang === 'zh-TW' && /疑似内容流失|疑似译文过短/.test(qaStatus)) {
@@ -13859,7 +14004,18 @@ function initTranslateTool() {
                     status: 'running',
                     message: '单条翻译请求中'
                 });
-                const translatePromise = translateTextWithRetry(task.text, sourceLang, targetLang, currentProject.rules, task.profile, 3, runSignal, task.glossaryTerms, task)
+                const translatePromise = translateTextWithRetry(
+                    task.text,
+                    sourceLang,
+                    targetLang,
+                    currentProject.rules,
+                    task.profile,
+                    3,
+                    runSignal,
+                    task.glossaryTerms,
+                    task,
+                    { requestLimiter: getTranslationRequestLimiter(task.profile) }
+                )
                     .finally(() => translationMemoryPromises.delete(memoryKey));
                 translationMemoryPromises.set(memoryKey, translatePromise);
                 const translated = await translatePromise;
@@ -13870,7 +14026,42 @@ function initTranslateTool() {
                 return status;
             }
 
-            async function processTranslateTaskBatch(tasks) {
+            async function prepareTranslationBatchResults(tasks, translations, profile, adaptiveConcurrency = 1) {
+                const results = new Array(tasks.length);
+                const repairConcurrency = getTranslationQaRepairConcurrency(
+                    getTranslateEffectiveConcurrencyLimit(profile),
+                    adaptiveConcurrency,
+                    tasks.length
+                );
+                let nextIndex = 0;
+                let firstError = null;
+
+                async function worker() {
+                    while (true) {
+                        if (firstError) return;
+                        const index = nextIndex++;
+                        if (index >= tasks.length) return;
+                        try {
+                            throwIfTranslationCancelled(runId);
+                            const task = tasks[index];
+                            const translated = translations[index] || makeTranslateFailureText(task.text);
+                            results[index] = {
+                                result: await prepareTranslationForCommit(task, translated)
+                            };
+                        } catch (error) {
+                            firstError ||= error;
+                            results[index] = { error };
+                        }
+                    }
+                }
+
+                await Promise.all(
+                    Array.from({ length: repairConcurrency }, () => worker())
+                );
+                return { results, firstError };
+            }
+
+            async function processTranslateTaskBatch(tasks, options = {}) {
                 if (!tasks.length) return { completed: 0, failed: 0, shouldSlowDown: false, reason: '' };
 
                 throwIfTranslationCancelled(runId);
@@ -13968,6 +14159,7 @@ function initTranslateTool() {
                     message: `批量翻译 ${representativeTasks.length} 条（每批最多 ${getTranslationBatchSize(profile)}）`
                 });
                 let batchFailureSummary = '';
+                const requestLimiter = getTranslationRequestLimiter(profile);
                 const translations = await translateBatchWithRetry(
                     representativeTasks,
                     sourceLang,
@@ -13978,6 +14170,7 @@ function initTranslateTool() {
                     2,
                     glossaryTermsForRun,
                     {
+                        requestLimiter,
                         onBatchStatus: ({ attempt, retries, error, summary, willRetry }) => {
                             batchFailureSummary = summary || batchFailureSummary;
                             recordTranslateChannelIncident(profile, error, { retry: willRetry });
@@ -13992,9 +14185,28 @@ function initTranslateTool() {
 
                 if (translations && translations.length === representativeTasks.length) {
                     let failedInBatch = localDiscountFailureCount;
+                    const preparedBatch = await prepareTranslationBatchResults(
+                        representativeTasks,
+                        translations,
+                        profile,
+                        options.qaRepairConcurrency
+                    );
+                    let firstPreparationError = preparedBatch.firstError;
+                    const preparedResults = preparedBatch.results;
                     for (const [index, task] of representativeTasks.entries()) {
-                        const translated = translations[index] || makeTranslateFailureText(task.text);
-                        const result = await prepareTranslationForCommit(task, translated);
+                        if (preparedResults[index]?.error) {
+                            firstPreparationError ||= preparedResults[index].error;
+                            continue;
+                        }
+                        if (!preparedResults[index]) {
+                            firstPreparationError ||= new Error('QA 预处理未返回结果');
+                            continue;
+                        }
+                        const result = preparedResults[index]?.result;
+                        if (!result) {
+                            firstPreparationError ||= new Error('QA 预处理未返回结果');
+                            continue;
+                        }
                         const status = commitTranslateResult(task, result.translated, result.qaStatus);
                         recordChannelOutcome(task, status === 'failed' || status === 'missing');
                         if (status !== 'success') failedInBatch++;
@@ -14004,6 +14216,7 @@ function initTranslateTool() {
                             if (duplicateStatus !== 'success') failedInBatch++;
                         }
                     }
+                    if (firstPreparationError) throw firstPreparationError;
                     return {
                         completed: representativeTasks.length,
                         failed: failedInBatch,
@@ -14143,6 +14356,7 @@ function initTranslateTool() {
                             if (Date.now() < adaptive.cooldownUntil) return;
                             if (adaptive.stableSuccesses < TRANSLATION_ADAPTIVE_SUCCESS_TO_INCREASE) return;
                             adaptive.current++;
+                            setTranslationRequestAdaptiveCap(profile, adaptive.current);
                             adaptive.stableSuccesses = 0;
                             adaptive.lastReason = '连续稳定，谨慎提速';
                             updateTranslateChannelProgress(profile, {
@@ -14154,6 +14368,7 @@ function initTranslateTool() {
                         function reduceAdaptiveConcurrency(reason = '') {
                             const shouldRecordSlowdown = adaptive.current > 1 || Date.now() >= adaptive.cooldownUntil;
                             adaptive.current = 1;
+                            setTranslationRequestAdaptiveCap(profile, adaptive.current);
                             adaptive.stableSuccesses = 0;
                             adaptive.cooldownUntil = Date.now() + TRANSLATION_ADAPTIVE_COOLDOWN_MS;
                             adaptive.lastReason = reason ? `已降速保护：${reason}` : '已降速保护';
@@ -14201,7 +14416,10 @@ function initTranslateTool() {
                                     status: 'running',
                                     message: formatAdaptiveMessage(`正在翻译第 ${taskBatch[0]?.rowIndex + 1 || '-'} 行附近，批量 ${taskBatch.length} 条，批次间隔 ${TRANSLATION_BATCH_SETTLE_DELAY_MS / 1000}s`)
                                 });
-                                const batchResult = await processTranslateTaskBatch(taskBatch);
+                                setTranslationRequestAdaptiveCap(profile, adaptive.current);
+                                const batchResult = await processTranslateTaskBatch(taskBatch, {
+                                    qaRepairConcurrency: adaptive.current
+                                });
                                 throwIfTranslationCancelled(runId);
 
                                 if (batchResult?.shouldSlowDown) {
@@ -15115,40 +15333,43 @@ ${text}`;
                     batchConsistencyTerms,
                     batchConsistencyExamples
                 );
-                const content = apiConfig.provider === 'youdaoTranslate'
-                    ? await translateWithYoudaoLlm(
-                        promptParts.userPrompt,
-                        sourceLang,
-                        targetLang,
-                        rules,
-                        apiConfig,
-                        signal,
-                        promptParts.systemPrompt
-                    )
-                    : await requestModelContent(
-                        apiConfig,
-                        {
-                            model,
-                            messages: [
-                                {
-                                    role: 'system',
-                                    content: promptParts.systemPrompt,
-                                    cacheControl: true
-                                },
-                                { role: 'user', content: promptParts.userPrompt }
-                            ],
-                            prompt_cache_key: promptParts.cacheKey,
-                            temperature: 0.1,
-                            max_tokens: getTranslationMaxTokens(contextTexts, targetLang, {
-                                mode: 'batch',
-                                itemCount: tasks.length,
-                                attempt
-                            })
-                        },
-                        signal,
-                        API_REQUEST_TIMEOUT_MS,
-                        { rejectTruncated: true }
-                    );
+                const content = await runWithTranslationRequestLimiter(
+                    options.requestLimiter,
+                    async () => apiConfig.provider === 'youdaoTranslate'
+                        ? await translateWithYoudaoLlm(
+                            promptParts.userPrompt,
+                            sourceLang,
+                            targetLang,
+                            rules,
+                            apiConfig,
+                            signal,
+                            promptParts.systemPrompt
+                        )
+                        : await requestModelContent(
+                            apiConfig,
+                            {
+                                model,
+                                messages: [
+                                    {
+                                        role: 'system',
+                                        content: promptParts.systemPrompt,
+                                        cacheControl: true
+                                    },
+                                    { role: 'user', content: promptParts.userPrompt }
+                                ],
+                                prompt_cache_key: promptParts.cacheKey,
+                                temperature: 0.1,
+                                max_tokens: getTranslationMaxTokens(contextTexts, targetLang, {
+                                    mode: 'batch',
+                                    itemCount: tasks.length,
+                                    attempt
+                                })
+                            },
+                            signal,
+                            API_REQUEST_TIMEOUT_MS,
+                            { rejectTruncated: true }
+                        )
+                );
                 const translations = parseBatchTranslationResponse(content, tasks.length);
                 const restoredTranslations = translations.map((translation, index) =>
                     restoreProtectedPlaceholders(translation, protectedTasks[index]?.placeholderReplacements || [])
@@ -15179,7 +15400,7 @@ ${text}`;
         return null;
     }
 
-    async function translateTextWithRetry(text, sourceLang, targetLang, rules, profile = null, retries = 3, signal = null, glossaryTerms = [], context = {}) {
+    async function translateTextWithRetry(text, sourceLang, targetLang, rules, profile = null, retries = 3, signal = null, glossaryTerms = [], context = {}, options = {}) {
         const apiConfig = profile || getApiConfig();
         const model = apiConfig.model || getDefaultModelForProvider(apiConfig.provider);
 
@@ -15220,11 +15441,11 @@ ${text}`;
                 };
 
                 if (apiConfig.provider === 'youdaoTranslate') {
-                    const translated = await translateWithYoudaoLlm(protectedText, sourceLang, targetLang, `${rules || ""}
+                    const translated = await runWithTranslationRequestLimiter(options.requestLimiter, () => translateWithYoudaoLlm(protectedText, sourceLang, targetLang, `${rules || ""}
 ${buildTranslateReferenceInstruction(nextContext, targetLang)}
 ${buildTranslateLengthInstruction(text, targetLang, context)}
 ${buildTranslateGlossaryPromptSection(glossaryTerms, targetLang)}
-${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nextContext.consistencyExamples || [])}`, apiConfig, signal);
+${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nextContext.consistencyExamples || [])}`, apiConfig, signal));
                     const restoredTranslation = restoreProtectedPlaceholders(
                         cleanTranslationResponse(translated),
                         protectedContext.replacements
@@ -15234,7 +15455,7 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                 }
 
                 const prompt = buildTranslatePrompt(protectedText, sourceLang, targetLang, rules, glossaryTerms, nextContext);
-                const content = await requestModelContent(
+                const content = await runWithTranslationRequestLimiter(options.requestLimiter, () => requestModelContent(
                     apiConfig,
                     {
                         model: model,
@@ -15254,7 +15475,7 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                     signal,
                     API_REQUEST_TIMEOUT_MS,
                     { rejectTruncated: true }
-                );
+                ));
                 const translated = restoreProtectedPlaceholders(
                     cleanTranslationResponse(content),
                     protectedContext.replacements
@@ -15280,7 +15501,7 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
         return makeTranslateFailureText(text, summarizeTranslateError(lastError));
     }
 
-    async function repairTranslationWithRetry(task, currentTranslation, qaStatus, sourceLang, targetLang, rules, profile, signal = null, retries = 2) {
+    async function repairTranslationWithRetry(task, currentTranslation, qaStatus, sourceLang, targetLang, rules, profile, signal = null, retries = 2, options = {}) {
         const apiConfig = profile || getApiConfig();
         const model = apiConfig.model || getDefaultModelForProvider(apiConfig.provider);
         if (!apiConfig.apiKey || !model) return currentTranslation;
@@ -15379,7 +15600,7 @@ ${protectedContext.fields.currentTranslation}`;
                 if (signal?.aborted) throw new Error('TRANSLATION_CANCELLED');
 
                 if (apiConfig.provider === 'youdaoTranslate') {
-                    const repaired = await translateWithYoudaoLlm(protectedContext.fields.sourceText, sourceLang, targetLang, `${repairInstruction}`, apiConfig, signal);
+                    const repaired = await runWithTranslationRequestLimiter(options.requestLimiter, () => translateWithYoudaoLlm(protectedContext.fields.sourceText, sourceLang, targetLang, `${repairInstruction}`, apiConfig, signal));
                     const restoredRepair = restoreProtectedPlaceholders(
                         cleanTranslationResponse(repaired),
                         protectedContext.replacements
@@ -15388,7 +15609,7 @@ ${protectedContext.fields.currentTranslation}`;
                     return restoredRepair;
                 }
 
-                const content = await requestModelContent(
+                const content = await runWithTranslationRequestLimiter(options.requestLimiter, () => requestModelContent(
                     apiConfig,
                     {
                         model,
@@ -15408,7 +15629,7 @@ ${protectedContext.fields.currentTranslation}`;
                     signal,
                     API_REQUEST_TIMEOUT_MS,
                     { rejectTruncated: true }
-                );
+                ));
                 const restoredRepair = restoreProtectedPlaceholders(
                     cleanTranslationResponse(content),
                     protectedContext.replacements
@@ -15421,7 +15642,10 @@ ${protectedContext.fields.currentTranslation}`;
                 }
                 console.warn(`Repair translate attempt ${attempt + 1} failed:`, error);
                 recordTranslateChannelIncident(apiConfig, error, { retry: attempt < retries - 1 });
-                if (attempt === retries - 1) return currentTranslation;
+                if (attempt === retries - 1) {
+                    options.onFailure?.(error);
+                    return currentTranslation;
+                }
                 const retryAfter = Number(error.retryAfterMs || 0);
                 const waitMs = Math.max(700 * (attempt + 1), Math.min(retryAfter, 60000));
                 await delayWithSignal(waitMs, signal);
