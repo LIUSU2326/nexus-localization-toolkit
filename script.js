@@ -607,6 +607,8 @@ const TRANSLATION_BATCH_SPLIT_MAX_DEPTH = 2;
 const TRANSLATION_CHANNEL_RECOVERY_COOLDOWN_MS = 180000;
 const TRANSLATION_QA_REPAIR_MAX_ATTEMPTS = 2;
 const TRANSLATION_QA_REPAIR_MAX_CONCURRENCY = 2;
+const TRANSLATION_RETRY_DEEP_REPAIR_LIMIT = 60;
+const TRANSLATION_AGNES_TARGET_RPM = 17;
 const TRANSLATION_PREVIEW_MAX_ITEMS = 60;
 const TRANSLATION_PREVIEW_RENDER_EVERY = 5;
 const TRANSLATION_TASK_CHECKPOINT_BATCH_SIZE = 50;
@@ -670,6 +672,106 @@ function getTranslationBatchSplitPlan(tasks, error, depth = 0, maxDepth = TRANSL
     return splitTranslationTaskBatch(tasks);
 }
 
+function getTranslationTargetRpm(profile) {
+    const configured = Number(profile?.translationRpm || profile?.requestsPerMinute || 0);
+    if (Number.isFinite(configured) && configured > 0) {
+        return Math.max(1, Math.min(600, configured));
+    }
+    return profile?.provider === 'agnes' ? TRANSLATION_AGNES_TARGET_RPM : 0;
+}
+
+function shouldDeferRetryQaRepair(options = {}) {
+    return options.deferAutoQaRepair !== false;
+}
+
+function shouldUseTwoStageTranslationRetry(retryTasks, options = {}) {
+    return Boolean(Array.isArray(retryTasks) && retryTasks.length > 0 && options.twoStageRetry !== false);
+}
+
+function shouldRunDeferredTranslationRepair(taskCount, limit = TRANSLATION_RETRY_DEEP_REPAIR_LIMIT) {
+    const count = Math.max(0, Number(taskCount) || 0);
+    const boundedLimit = Math.max(0, Number(limit) || 0);
+    return count > 0 && count <= boundedLimit;
+}
+
+function createTranslationRpmPacer(getTargetRpm, onCancel = () => {}, waitMs = 100, timing = {}) {
+    const now = typeof timing.now === 'function'
+        ? timing.now
+        : () => globalThis.performance?.now?.() ?? Date.now();
+    const delay = typeof timing.delay === 'function'
+        ? timing.delay
+        : milliseconds => new Promise(resolve => setTimeout(resolve, Math.max(0, milliseconds)));
+    let lastStartedAt = 0;
+    let hasStarted = false;
+    let blockedUntil = 0;
+    let turnQueue = Promise.resolve();
+
+    async function waitUntilReady(beforeStart = null) {
+        while (true) {
+            onCancel();
+            const rpm = Math.max(0, Number(getTargetRpm?.()) || 0);
+            const intervalMs = rpm > 0 ? Math.ceil(60000 / rpm) : 0;
+            const currentTime = now();
+            const intervalReadyAt = hasStarted ? lastStartedAt + intervalMs : currentTime;
+            const readyAt = Math.max(intervalReadyAt, blockedUntil);
+            const remainingMs = Math.max(0, readyAt - currentTime);
+            if (remainingMs <= 0) {
+                const startValue = typeof beforeStart === 'function' ? await beforeStart() : undefined;
+                lastStartedAt = now();
+                hasStarted = true;
+                return typeof beforeStart === 'function'
+                    ? { startedAt: lastStartedAt, value: startValue }
+                    : lastStartedAt;
+            }
+            await delay(Math.min(remainingMs, Math.max(1, Number(waitMs) || 100)));
+        }
+    }
+
+    return {
+        waitForTurn(beforeStart = null) {
+            const turn = turnQueue.then(() => waitUntilReady(beforeStart));
+            turnQueue = turn.catch(() => {});
+            return turn;
+        },
+        deferFor(milliseconds) {
+            const durationMs = Math.max(0, Math.min(60000, Number(milliseconds) || 0));
+            if (durationMs > 0) blockedUntil = Math.max(blockedUntil, now() + durationMs);
+        },
+        snapshot() {
+            return { lastStartedAt, blockedUntil, hasStarted };
+        }
+    };
+}
+
+function createTranslationRequestGate(concurrencyLimiter, rpmPacer, waitUntilActive = async () => {}) {
+    return {
+        async acquire() {
+            if (!rpmPacer?.waitForTurn) {
+                await waitUntilActive();
+                return concurrencyLimiter ? await concurrencyLimiter.acquire() : (() => {});
+            }
+            const turn = await rpmPacer.waitForTurn(async () => {
+                await waitUntilActive();
+                const release = concurrencyLimiter ? await concurrencyLimiter.acquire() : null;
+                try {
+                    await waitUntilActive();
+                    return release || (() => {});
+                } catch (error) {
+                    release?.();
+                    throw error;
+                }
+            });
+            return turn?.value || (() => {});
+        },
+        deferFor(milliseconds) {
+            rpmPacer?.deferFor?.(milliseconds);
+        },
+        getActiveCount() {
+            return concurrencyLimiter?.getActiveCount?.() || 0;
+        }
+    };
+}
+
 function createTranslationRequestLimiter(getCapacity, onCancel = () => {}, waitMs = 50) {
     let activeCount = 0;
     const readCapacity = () => Math.max(1, Number(getCapacity?.()) || 1);
@@ -700,6 +802,10 @@ async function runWithTranslationRequestLimiter(limiter, request) {
     try {
         releaseRequest = limiter ? await limiter.acquire() : null;
         return await request();
+    } catch (error) {
+        const retryAfterMs = Number(error?.retryAfterMs || 0);
+        if (retryAfterMs > 0) limiter?.deferFor?.(retryAfterMs);
+        throw error;
     } finally {
         releaseRequest?.();
     }
@@ -4352,7 +4458,11 @@ async function getApiResource(apiConfig, endpoint, headers, timeoutMs = MODEL_CA
             }),
             timeoutMs
         );
-        return createTextResponse(Number(response?.status || 0), String(response?.body || ''));
+        return createTextResponse(
+            Number(response?.status || 0),
+            String(response?.body || ''),
+            { 'retry-after': response?.retryAfter || response?.retry_after || '' }
+        );
     }
 
     return fetch(endpoint, {
@@ -4848,6 +4958,21 @@ function parseRetryDelayMs(value) {
     return 0;
 }
 
+function parseRetryAfterHeaderMs(value, nowMs = Date.now()) {
+    const text = String(value || '').trim();
+    if (!text) return 0;
+    if (/^\d+(?:\.\d+)?$/.test(text)) {
+        return Math.max(0, Math.ceil(Number(text) * 1000));
+    }
+    const retryAt = Date.parse(text);
+    if (!Number.isFinite(retryAt)) return 0;
+    return Math.max(0, retryAt - Number(nowMs || 0));
+}
+
+function getResponseRetryAfterMs(response) {
+    return parseRetryAfterHeaderMs(response?.headers?.get?.('retry-after'));
+}
+
 function getApiRetryDelayMs(payload, rawText = '') {
     const details = Array.isArray(payload?.error?.details) ? payload.error.details : [];
     for (const detail of details) {
@@ -4943,14 +5068,17 @@ async function tryDoubaoModelFallback(apiConfig, tunedBody, currentModel, signal
     throw error;
 }
 
-function createApiRequestError(message, status, payload, rawText) {
+function createApiRequestError(message, status, payload, rawText, retryAfterMs = 0) {
     const error = new Error(message);
     const code = payload?.error?.code ?? payload?.code;
     const payloadStatus = payload?.error?.status ?? payload?.status;
     error.status = status;
     error.payload = payload;
     error.rawText = rawText;
-    error.retryAfterMs = getApiRetryDelayMs(payload, rawText);
+    error.retryAfterMs = Math.max(
+        getApiRetryDelayMs(payload, rawText),
+        Math.max(0, Number(retryAfterMs) || 0)
+    );
     error.isQuotaDepleted = isApiQuotaDepletedSignal(code, status || payloadStatus, message, rawText, payload);
     error.isRateLimited = !error.isQuotaDepleted &&
         isApiRateLimitSignal(code, status || payloadStatus, message, rawText);
@@ -5055,7 +5183,8 @@ async function readModelResponseContent(response, apiConfig, options = {}) {
             getApiResponseErrorMessage(payload, rawText, `HTTP ${response.status}`),
             response.status,
             payload,
-            rawText
+            rawText,
+            getResponseRetryAfterMs(response)
         );
     }
 
@@ -5082,10 +5211,18 @@ async function readChatCompletionContent(response) {
     return readModelResponseContent(response, { provider: 'openai' });
 }
 
-function createTextResponse(status, body) {
+function createTextResponse(status, body, responseHeaders = {}) {
+    const normalizedHeaders = Object.fromEntries(
+        Object.entries(responseHeaders || {}).map(([key, value]) => [String(key).toLowerCase(), String(value || '')])
+    );
     return {
         ok: status >= 200 && status < 300,
         status,
+        headers: {
+            get(name) {
+                return normalizedHeaders[String(name || '').toLowerCase()] || null;
+            }
+        },
         async text() {
             return body || '';
         }
@@ -5153,7 +5290,11 @@ async function postChatCompletion(apiConfig, endpoint, body, signal = null, time
         if (signal?.aborted) {
             throw createAbortError();
         }
-        return createTextResponse(Number(response?.status || 0), String(response?.body || ''));
+        return createTextResponse(
+            Number(response?.status || 0),
+            String(response?.body || ''),
+            { 'retry-after': response?.retryAfter || response?.retry_after || '' }
+        );
     }
 
     const requestController = new AbortController();
@@ -11171,6 +11312,9 @@ function initTranslateTool() {
             batchSplitCount: 0,
             requestCount: 0,
             requestDurationMs: 0,
+            requestStats: {},
+            qaRepairTaskCount: 0,
+            qaRepairRetryCount: 0,
             lastRequestDurationMs: 0,
             lastRequestKind: '',
             lastRequestOutcome: '',
@@ -11243,11 +11387,22 @@ function initTranslateTool() {
             const requestCount = Number(previous.requestCount || 0) + 1;
             const requestDurationMs = Number(previous.requestDurationMs || 0) + durationMs;
             const outcome = details.outcome || 'success';
+            const requestKind = ['batch', 'single', 'qa-repair'].includes(kind) ? kind : 'other';
+            const requestStats = { ...(previous.requestStats || {}) };
+            const previousKindStats = requestStats[requestKind] || {};
+            requestStats[requestKind] = {
+                requestCount: Number(previousKindStats.requestCount || 0) + 1,
+                successCount: Number(previousKindStats.successCount || 0) + (outcome === 'success' ? 1 : 0),
+                errorCount: Number(previousKindStats.errorCount || 0) + (outcome === 'success' ? 0 : 1),
+                durationMs: Number(previousKindStats.durationMs || 0) + durationMs,
+                submittedItemCount: Number(previousKindStats.submittedItemCount || 0) + Math.max(1, Number(details.itemCount || 1))
+            };
             translateChannelProgressState.set(key, {
                 ...previous,
                 profile,
                 requestCount,
                 requestDurationMs,
+                requestStats,
                 lastRequestDurationMs: durationMs,
                 lastRequestKind: kind,
                 lastRequestOutcome: outcome,
@@ -11267,6 +11422,20 @@ function initTranslateTool() {
         } catch {
             // Telemetry must never turn a successful translation into a retry or failure.
         }
+    }
+
+    function recordTranslateQaRepairAttempt(profile, attempt = 0) {
+        if (!profile) return;
+        const key = getTranslateChannelKey(profile);
+        const previous = translateChannelProgressState.get(key) || createTranslateChannelProgressRecord(profile);
+        translateChannelProgressState.set(key, {
+            ...previous,
+            profile,
+            qaRepairTaskCount: Number(previous.qaRepairTaskCount || 0) + (Number(attempt) === 0 ? 1 : 0),
+            qaRepairRetryCount: Number(previous.qaRepairRetryCount || 0) + (Number(attempt) > 0 ? 1 : 0),
+            updatedAt: Date.now()
+        });
+        renderTranslateChannelProgress();
     }
 
     function initTranslateChannelProgress(tasks = []) {
@@ -11359,6 +11528,12 @@ function initTranslateTool() {
             const slowdownCount = Number(state.slowdownCount || 0);
             const batchSplitCount = Number(state.batchSplitCount || 0);
             const requestCount = Number(state.requestCount || 0);
+            const requestStats = state.requestStats || {};
+            const batchRequestCount = Number(requestStats.batch?.requestCount || 0);
+            const singleRequestCount = Number(requestStats.single?.requestCount || 0);
+            const qaRepairRequestCount = Number(requestStats['qa-repair']?.requestCount || 0);
+            const qaRepairTaskCount = Number(state.qaRepairTaskCount || 0);
+            const qaRepairRetryCount = Number(state.qaRepairRetryCount || 0);
             const averageRequestMs = requestCount > 0
                 ? Number(state.requestDurationMs || 0) / requestCount
                 : 0;
@@ -11389,7 +11564,8 @@ function initTranslateTool() {
                         <span class="channel-health-chip${retryCount ? ' warning' : ''}">重试 ${retryCount}</span>
                         <span class="channel-health-chip${slowdownCount ? ' warning' : ''}">降速 ${slowdownCount}</span>
                         ${batchSplitCount ? `<span class="channel-health-chip warning">拆批 ${batchSplitCount}</span>` : ''}
-                        ${requestCount ? `<span class="channel-health-chip">请求 ${requestCount} · 均时 ${averageRequestText}</span>` : ''}
+                        ${qaRepairTaskCount ? `<span class="channel-health-chip warning">QA修复 ${qaRepairTaskCount}${qaRepairRetryCount ? ` · 续修 ${qaRepairRetryCount}` : ''}</span>` : ''}
+                        ${requestCount ? `<span class="channel-health-chip" title="批量 ${batchRequestCount} / 单条 ${singleRequestCount} / QA修复 ${qaRepairRequestCount}">请求 ${requestCount}（批 ${batchRequestCount} / 单 ${singleRequestCount} / 修 ${qaRepairRequestCount}）· 均时 ${averageRequestText}</span>` : ''}
                         ${healthAdvice}
                     </div>
                 </div>
@@ -12235,6 +12411,8 @@ function initTranslateTool() {
             const confirmed = confirm(`导入报告是 ${getTranslateLanguageName(state.targetLang)}，当前页面选择的是 ${getTranslateLanguageName(targetLangSelect.value)}。\n\n将切换到 ${getTranslateLanguageName(state.targetLang)} 后补译可疑行，是否继续？`);
             if (!confirmed) return;
             targetLangSelect.value = state.targetLang;
+            selectedTranslateTargetLangs = new Set([state.targetLang]);
+            renderTranslateTargetLanguageList();
         }
         const retryScope = retryPreview.custom
             ? `所选问题类型（${formatImportedIssueFilterSelection(retryPreview)}）`
@@ -12260,15 +12438,6 @@ function initTranslateTool() {
                 return;
             }
 
-            const glossaryTerms = getSelectedTranslateGlossaryTerms();
-            retryTasks.forEach(task => {
-                task.glossaryTerms = getRelevantTranslateGlossaryTerms(
-                    [task.text, task.referenceText],
-                    glossaryTerms,
-                    targetLang,
-                    24
-                );
-            });
             initializeTranslateOutputFromImportedReport(allTasks, targetLang, { taskLookup });
             failedTranslationTasks = retryTasks;
             updateTranslationRunActions();
@@ -13124,7 +13293,7 @@ function initTranslateTool() {
             return [];
         }
 
-        const allTasks = collectTranslationTasks(activeProfiles);
+        const allTasks = collectTranslationTasks(activeProfiles, { deferGlossary: true });
         const restoredTasks = [];
         const usedTaskKeys = new Set();
 
@@ -13187,25 +13356,34 @@ function initTranslateTool() {
 
         const retryPlan = buildFailedTranslationRetryPlan(activeProfiles, retryTasks);
         if (!options.skipConfirm) {
-            const confirmed = confirm(`将重新翻译 ${retryPlan.length} 个硬问题，包括翻译失败、结果缺失和硬质检未通过。\n\n处理规则：使用文本翻译里当前勾选的模型通道；勾选多个通道时会轮询分配，不再强制沿用原通道。\n\n软性需确认和超长行不会在这里自动重译；超长行请使用“精简超长译文”。\n\n${summarizeRetryPlan(retryPlan)}\n\n确定开始重译吗？`);
+            const confirmed = confirm(`将重新翻译 ${retryPlan.length} 个硬问题，包括翻译失败、结果缺失和硬质检未通过。\n\n处理规则：第一阶段统一批量重译并做本地 QA，不会边翻译边逐条调用 AI 修复；批量后最多选取 ${TRANSLATION_RETRY_DEEP_REPAIR_LIMIT} 个残余阻断项进入有界深度修复，超出的条目会保留并在下一轮轮转处理。已有译文的硬问题最多定向修复一次；缺失项最多补译一次，必要时再定向修复一次。\n\n使用文本翻译里当前勾选的模型通道；勾选多个通道时会轮询分配，不再强制沿用原通道。软性需确认和超长行不会在这里自动重译；超长行请使用“精简超长译文”。\n\n${summarizeRetryPlan(retryPlan)}\n\n确定开始重译吗？`);
             if (!confirmed) return;
         }
 
+        const retryTargetLang = document.getElementById('targetLang').value;
+        const retryGlossaryTerms = getSelectedTranslateGlossaryTerms();
         pendingRetryTranslationTasks = retryPlan.map(({ task, profile }) => {
-            const targetLang = document.getElementById('targetLang').value;
             return {
                 ...task,
                 profile,
                 retryOfTaskKey: task.retryOfTaskKey || task.taskKey,
-                taskKey: buildTranslationTaskKey(task.source, task.rowIndex, task.colIndex, profile, task.referenceColIndex, targetLang),
-                glossaryTerms: getRelevantTranslateGlossaryTerms([task.text, task.referenceText], getSelectedTranslateGlossaryTerms(), targetLang, 24)
+                taskKey: buildTranslationTaskKey(task.source, task.rowIndex, task.colIndex, profile, task.referenceColIndex, retryTargetLang),
+                glossaryTerms: getRelevantTranslateGlossaryTerms(
+                    [task.text, task.referenceText],
+                    retryGlossaryTerms,
+                    retryTargetLang,
+                    24,
+                    { normalized: true }
+                )
             };
         });
         failedTranslationTasks = [];
         updateTranslationRunActions();
         try {
             const result = await startTranslate({
-                deferAutoQaRepair: Boolean(options.deferAutoQaRepair),
+                deferAutoQaRepair: shouldDeferRetryQaRepair(options),
+                twoStageRetry: options.twoStageRetry !== false,
+                glossaryTermsSnapshot: retryGlossaryTerms,
                 suppressAutoSave: Boolean(options.suppressAutoSave)
             });
             return result;
@@ -13302,7 +13480,8 @@ function initTranslateTool() {
                     );
                     const retryResult = await retryFailedTranslations({
                         skipConfirm: true,
-                        deferAutoQaRepair: false
+                        deferAutoQaRepair: true,
+                        twoStageRetry: true
                     });
                     if (['success', 'needs_action'].includes(retryResult?.status)) {
                         repairableCount = Number(retryResult.repairableCount || 0);
@@ -13389,11 +13568,19 @@ function initTranslateTool() {
         }
         let activeProfiles = getSelectedTranslateProfiles();
         const retryTasks = pendingRetryTranslationTasks ? [...pendingRetryTranslationTasks] : null;
-        const deferAutoQaRepairForRun = Boolean(options.deferAutoQaRepair || (!retryTasks && isTranslateFastBatchModeEnabled()));
-        const glossaryTermsForRun = getSelectedTranslateGlossaryTerms();
+        const twoStageRetryRun = shouldUseTwoStageTranslationRetry(retryTasks, options);
+        const deferAutoQaRepairForRun = Boolean(
+            twoStageRetryRun ||
+            options.deferAutoQaRepair ||
+            (!retryTasks && isTranslateFastBatchModeEnabled())
+        );
+        const glossaryTermsForRun = Array.isArray(options.glossaryTermsSnapshot)
+            ? options.glossaryTermsSnapshot
+            : getSelectedTranslateGlossaryTerms();
         let runOutcome = 'started';
         let runReportFailureCount = 0;
         let runRepairableCount = 0;
+        let deferredRetryRepairSummary = null;
 
         console.log('🚀 开始翻译', { targetLang, currentProject: currentProject?.name, selectedColumns, sheetDataLength: sheetData?.length });
 
@@ -13926,6 +14113,7 @@ function initTranslateTool() {
             // This keeps the repair workers from bypassing the channel's effective cap.
             const translationRequestLimiters = new Map();
             const translationRequestAdaptiveCaps = new Map();
+            const translationRequestPacers = new Map();
 
             function setTranslationRequestAdaptiveCap(profile, limit) {
                 const key = getTranslateChannelKey(profile);
@@ -13951,9 +14139,47 @@ function initTranslateTool() {
                             : Math.max(1, Math.min(configured, adaptiveLimit));
                     };
 
+                    const onCancel = () => throwIfTranslationCancelled(runId);
+                    const concurrencyLimiter = createTranslationRequestLimiter(getCapacity, onCancel);
+                    const configuredBaseUrl = String(profile?.baseUrl || API_PLATFORMS[profile?.provider]?.baseUrl || '')
+                        .trim()
+                        .replace(/\/+$/, '');
+                    const pacingKey = profile?.provider === 'agnes'
+                        ? `agnes:${configuredBaseUrl}`
+                        : key;
+                    if (!translationRequestPacers.has(pacingKey)) {
+                        translationRequestPacers.set(
+                            pacingKey,
+                            createTranslationRpmPacer(
+                                () => {
+                                    const configuredRpm = Number(profile?.translationRpm || profile?.requestsPerMinute || 0);
+                                    if (Number.isFinite(configuredRpm) && configuredRpm > 0) {
+                                        return getTranslationTargetRpm(profile);
+                                    }
+                                    const hasAgnesCongestion = [...translateChannelProgressState.values()].some(state =>
+                                        state?.profile?.provider === 'agnes' &&
+                                        Number(state?.congestionCount || 0) > 0
+                                    );
+                                    const shouldPaceAgnes = Boolean(
+                                        retryTasks || hasAgnesCongestion
+                                    );
+                                    return shouldPaceAgnes ? getTranslationTargetRpm(profile) : 0;
+                                },
+                                onCancel
+                            )
+                        );
+                    }
+                    const waitUntilActive = async () => {
+                        while (isPaused && !isTranslationCancelled) await waitForResume();
+                        throwIfTranslationCancelled(runId);
+                    };
                     translationRequestLimiters.set(
                         key,
-                        createTranslationRequestLimiter(getCapacity, () => throwIfTranslationCancelled(runId))
+                        createTranslationRequestGate(
+                            concurrencyLimiter,
+                            translationRequestPacers.get(pacingKey),
+                            waitUntilActive
+                        )
                     );
                 }
                 return translationRequestLimiters.get(key);
@@ -13986,7 +14212,7 @@ function initTranslateTool() {
                 }
             }
 
-            async function prepareTranslationForCommit(task, translated) {
+            async function prepareTranslationForCommit(task, translated, prepareOptions = {}) {
                 let nextTranslated = applyLocalTranslationFixes(task.text, translated, targetLang);
                 if (!translatePostCheckInput?.checked) {
                     /*
@@ -14013,7 +14239,8 @@ function initTranslateTool() {
                 if (isTranslateFailureText(nextTranslated) || isTranslationQaPassed(qaStatus)) {
                     return { translated: nextTranslated, qaStatus };
                 }
-                if (deferAutoQaRepairForRun) {
+                const deferQaRepair = prepareOptions.deferAutoQaRepair ?? deferAutoQaRepairForRun;
+                if (deferQaRepair) {
                     return { translated: nextTranslated, qaStatus };
                 }
                 if (!shouldAutoRepairTranslationQa(qaStatus, targetLang)) {
@@ -14023,9 +14250,14 @@ function initTranslateTool() {
                 const beforeRepairTranslated = nextTranslated;
                 const beforeRepairQaStatus = qaStatus;
                 const requestLimiter = getTranslationRequestLimiter(task.profile);
+                const maxRepairAttempts = Math.max(0, Math.min(
+                    TRANSLATION_QA_REPAIR_MAX_ATTEMPTS,
+                    Number(prepareOptions.maxRepairAttempts ?? TRANSLATION_QA_REPAIR_MAX_ATTEMPTS) || 0
+                ));
                 for (let repairAttempt = 0;
-                    repairAttempt < TRANSLATION_QA_REPAIR_MAX_ATTEMPTS && !isTranslationQaPassed(qaStatus);
+                    repairAttempt < maxRepairAttempts && !isTranslationQaPassed(qaStatus);
                     repairAttempt++) {
+                    recordTranslateQaRepairAttempt(task.profile, repairAttempt);
                     updateTranslateChannelProgress(task.profile, {
                         status: 'retrying',
                         message: `QA 未通过，自动修复第 ${repairAttempt + 1} 次`
@@ -14064,7 +14296,7 @@ function initTranslateTool() {
                         nextTranslated,
                         repairedTranslated,
                         repairAttempt,
-                        TRANSLATION_QA_REPAIR_MAX_ATTEMPTS,
+                        maxRepairAttempts,
                         repairRequestFailed
                     );
                     nextTranslated = repairedTranslated;
@@ -14101,6 +14333,231 @@ function initTranslateTool() {
                     return { translated: beforeRepairTranslated, qaStatus: beforeRepairQaStatus };
                 }
                 return { translated: nextTranslated, qaStatus };
+            }
+
+            function getDeferredRetryRepairJobs() {
+                if (!twoStageRetryRun) return [];
+                const reportEntryByTaskKey = new Map();
+                (translationRunReport?.entries || []).forEach(entry => {
+                    if (entry?.taskKey) reportEntryByTaskKey.set(entry.taskKey, entry);
+                });
+                return allTranslationTasks.map(task => {
+                    const entry = translationProgressTasks.get(task.taskKey) || reportEntryByTaskKey.get(task.taskKey);
+                    const kind = classifyTranslationReportEntry(entry);
+                    return ['hard', 'missing'].includes(kind) ? { task, entry, kind } : null;
+                }).filter(Boolean);
+            }
+
+            function replaceTranslateChannelResult(task, previousStatus, nextStatus) {
+                const key = getTranslateChannelKey(task.profile);
+                const previous = translateChannelProgressState.get(key) || createTranslateChannelProgressRecord(task.profile);
+                const wasSuccess = previousStatus === 'success';
+                const isSuccess = nextStatus === 'success';
+                const wasQaFailed = previousStatus === 'qa_failed';
+                const isQaFailed = nextStatus === 'qa_failed';
+                const next = {
+                    ...previous,
+                    profile: task.profile,
+                    success: Math.max(0, Number(previous.success || 0) - (wasSuccess ? 1 : 0) + (isSuccess ? 1 : 0)),
+                    failed: Math.max(0, Number(previous.failed || 0) - (wasSuccess ? 0 : 1) + (isSuccess ? 0 : 1)),
+                    qaFailed: Math.max(0, Number(previous.qaFailed || 0) - (wasQaFailed ? 1 : 0) + (isQaFailed ? 1 : 0)),
+                    updatedAt: Date.now()
+                };
+                if (next.total > 0 && next.completed >= next.total) {
+                    next.status = next.failed > 0 ? 'warning' : 'done';
+                    next.message = next.failed > 0
+                        ? `两阶段修复完成，仍有问题 ${next.failed} 个`
+                        : '两阶段修复完成，硬问题已清零';
+                }
+                translateChannelProgressState.set(key, next);
+                renderTranslateChannelProgress();
+            }
+
+            function replaceCommittedTranslateResult(task, translated, qaStatusOverride = null) {
+                throwIfTranslationCancelled(runId);
+                const previousEntry = translationProgressTasks.get(task.taskKey);
+                const previousStatus = previousEntry
+                    ? getTranslationReportStatus(previousEntry.translatedText, previousEntry.qaStatus)
+                    : 'missing';
+                const normalizedTranslated = normalizeTranslateResultText(translated, task.text);
+                const qaStatus = qaStatusOverride ?? (translatePostCheckInput?.checked
+                    ? summarizeTranslationQa(task.text, normalizedTranslated, task.glossaryTerms || [], targetLang, task)
+                    : '');
+                if (
+                    previousEntry?.translatedText &&
+                    !isTranslateFailureText(previousEntry.translatedText) &&
+                    isTranslateFailureText(normalizedTranslated)
+                ) {
+                    return { status: previousStatus, entry: previousEntry, changed: false };
+                }
+
+                writeTranslationResult(task, normalizedTranslated, qaStatus);
+                if (task.retryOfTaskKey && task.retryOfTaskKey !== task.taskKey) {
+                    translationProgressTasks.delete(task.retryOfTaskKey);
+                    deleteTranslationTaskProgress(task.retryOfTaskKey);
+                }
+                translationRunReport = translationRunReport || { entries: [] };
+                const reportEntry = buildTranslationReportEntry(task, normalizedTranslated, qaStatus);
+                const compactEntry = compactTranslationProgressEntry(reportEntry);
+                translationProgressTasks.set(task.taskKey, compactEntry || reportEntry);
+                queueTranslationTaskProgress(reportEntry);
+                const reportEntries = translationRunReport.entries || [];
+                const replaceableTaskKeys = new Set([task.taskKey, task.retryOfTaskKey].filter(Boolean));
+                const existingReportIndex = reportEntries.findIndex(item => replaceableTaskKeys.has(item.taskKey));
+                if (existingReportIndex >= 0) reportEntries[existingReportIndex] = reportEntry;
+                else reportEntries.push(reportEntry);
+                translationRunReport.entries = reportEntries;
+                const nextStatus = getTranslationReportStatus(normalizedTranslated, qaStatus);
+                replaceTranslateChannelResult(task, previousStatus, nextStatus);
+                if (nextStatus === 'success') rememberSuccessfulTranslation(task, normalizedTranslated);
+                return {
+                    status: nextStatus,
+                    entry: reportEntry,
+                    changed: hasTranslationQaRepairChanged(previousEntry?.translatedText || '', normalizedTranslated) ||
+                        String(previousEntry?.qaStatus || '') !== String(qaStatus || '')
+                };
+            }
+
+            async function runDeferredRetryRepairPhase() {
+                const allJobs = getDeferredRetryRepairJobs();
+                const summary = {
+                    eligible: allJobs.length,
+                    scheduled: 0,
+                    deferred: 0,
+                    attempted: 0,
+                    changed: 0,
+                    resolved: 0,
+                    errors: 0,
+                    limitedByBudget: false
+                };
+                if (!allJobs.length) return summary;
+                let jobs = allJobs;
+                if (!shouldRunDeferredTranslationRepair(allJobs.length)) {
+                    summary.limitedByBudget = true;
+                    const cursor = Math.max(0, Number(translationRunReport?.deferredRepairCursor || 0)) % allJobs.length;
+                    const rotatedJobs = [...allJobs.slice(cursor), ...allJobs.slice(0, cursor)];
+                    jobs = rotatedJobs.slice(0, TRANSLATION_RETRY_DEEP_REPAIR_LIMIT);
+                    translationRunReport.deferredRepairCursor = (cursor + jobs.length) % allJobs.length;
+                    summary.deferred = Math.max(0, allJobs.length - jobs.length);
+                    updateTranslateRunSummary(
+                        totalTasks,
+                        totalTasks,
+                        `${runLanguageLabel}批量重译完成，本轮深修 ${jobs.length}/${allJobs.length} 个硬问题`
+                    );
+                    setStatus(
+                        'warning',
+                        '已限制第二阶段修复规模',
+                        `批量重译后仍有 ${allJobs.length} 个阻断问题；本轮按安全预算只深度处理 ${jobs.length} 个，其余 ${summary.deferred} 个保留原结果，避免再次形成上千次逐条请求。下轮会从后续条目继续。`
+                    );
+                }
+                summary.scheduled = jobs.length;
+
+                let nextIndex = 0;
+                let phaseCompleted = 0;
+                const workerCount = Math.max(1, Math.min(
+                    TRANSLATION_QA_REPAIR_MAX_CONCURRENCY,
+                    jobs.length
+                ));
+                updateTranslateProgress(0, jobs.length, 0);
+                updateTranslateRunSummary(0, jobs.length, `${runLanguageLabel}少量残余硬问题深度修复中`);
+                setStatus(
+                    'processing',
+                    `正在深度修复 ${jobs.length} 个残余硬问题`,
+                    `第一阶段批量重译已完成；第二阶段只处理剩余阻断项，每条最多一次定向 QA 修复，并发不超过 ${workerCount}。`
+                );
+
+                async function worker() {
+                    while (true) {
+                        const jobIndex = nextIndex++;
+                        if (jobIndex >= jobs.length) return;
+                        const { task, entry, kind } = jobs[jobIndex];
+                        try {
+                            throwIfTranslationCancelled(runId);
+                            while (isPaused && !isTranslationCancelled) await waitForResume();
+                            throwIfTranslationCancelled(runId);
+                            summary.attempted++;
+                            updateTranslateChannelProgress(task.profile, {
+                                status: 'retrying',
+                                message: `第二阶段 ${jobIndex + 1}/${jobs.length}：${kind === 'missing' ? '补回缺失译文' : '定向修复硬问题'}`
+                            });
+
+                            let prepared = null;
+                            if (kind === 'missing' || isTranslateFailureText(entry?.translatedText)) {
+                                await waitForTranslateChannelRecovery(task.profile);
+                                const translated = await translateTextWithRetry(
+                                    task.text,
+                                    sourceLang,
+                                    targetLang,
+                                    currentProject.rules,
+                                    task.profile,
+                                    1,
+                                    runSignal,
+                                    task.glossaryTerms,
+                                    task,
+                                    { requestLimiter: getTranslationRequestLimiter(task.profile) }
+                                );
+                                if (!isTranslateFailureText(translated)) {
+                                    prepared = await prepareTranslationForCommit(task, translated, {
+                                        deferAutoQaRepair: true,
+                                        maxRepairAttempts: 0
+                                    });
+                                    if (
+                                        !isTranslateFailureText(prepared.translated) &&
+                                        shouldAutoRepairTranslationQa(prepared.qaStatus, targetLang)
+                                    ) {
+                                        prepared = await prepareTranslationForCommit(task, prepared.translated, {
+                                            deferAutoQaRepair: false,
+                                            maxRepairAttempts: 1
+                                        });
+                                    }
+                                }
+                            } else {
+                                prepared = await prepareTranslationForCommit(task, entry.translatedText, {
+                                    deferAutoQaRepair: false,
+                                    maxRepairAttempts: 1
+                                });
+                            }
+
+                            if (prepared) {
+                                const replacement = replaceCommittedTranslateResult(task, prepared.translated, prepared.qaStatus);
+                                if (replacement.changed) summary.changed++;
+                                if (!isRepairableTranslationReportEntry(replacement.entry)) summary.resolved++;
+                            }
+                        } catch (error) {
+                            if (error?.name === 'AbortError' || error?.message === 'TRANSLATION_CANCELLED' || isTranslationCancelled) {
+                                throw error;
+                            }
+                            summary.errors++;
+                            console.warn('Deferred retry repair failed; preserving the first-stage result:', error);
+                        } finally {
+                            phaseCompleted++;
+                            const percent = Math.round((phaseCompleted / jobs.length) * 100);
+                            updateTranslateProgress(phaseCompleted, jobs.length, percent);
+                            updateTranslateRunSummary(
+                                phaseCompleted,
+                                jobs.length,
+                                `${runLanguageLabel}残余硬问题深度修复中`
+                            );
+                        }
+                    }
+                }
+
+                await Promise.all(Array.from({ length: workerCount }, () => worker()));
+                await flushTranslationTaskProgress();
+                refreshTranslationRunCountsFromReport();
+                const reportEntryByTaskKey = new Map(
+                    (translationRunReport?.entries || [])
+                        .filter(entry => entry?.taskKey)
+                        .map(entry => [entry.taskKey, entry])
+                );
+                const runCounts = countTranslationProgressEntries(
+                    allTranslationTasks
+                        .map(task => translationProgressTasks.get(task.taskKey) || reportEntryByTaskKey.get(task.taskKey))
+                        .filter(Boolean)
+                );
+                runSuccessCount = runCounts.successCount;
+                runFailCount = runCounts.failCount;
+                return summary;
             }
 
             async function processTranslateTask(task) {
@@ -14677,6 +15134,13 @@ function initTranslateTool() {
             throwIfTranslationCancelled(runId);
 
             ensureTranslationReportCoversExpectedTasks();
+            if (twoStageRetryRun) {
+                deferredRetryRepairSummary = await runDeferredRetryRepairPhase();
+                throwIfTranslationCancelled(runId);
+                ensureTranslationReportCoversExpectedTasks();
+                refreshTranslationRunCountsFromReport();
+                updateTranslateProgress(totalTasks, totalTasks, 100);
+            }
             translatedWorkbook = buildTranslationWorkbook();
             translatedData = translatedDataLocal;
 
@@ -14751,9 +15215,16 @@ function initTranslateTool() {
                 : (reportFailureCount > 0
                     ? '剩余为软性需确认项；可在报告中填写处理决定，重新导入后会保留该决定。'
                     : '交付版和报告已准备好。');
+            const deferredRepairMessage = deferredRetryRepairSummary
+                ? (deferredRetryRepairSummary.limitedByBudget
+                    ? `批量重译后有 ${deferredRetryRepairSummary.eligible} 个阻断项；本轮按预算深度检查 ${deferredRetryRepairSummary.attempted} 条，其余 ${deferredRetryRepairSummary.deferred} 条保留原结果并轮转到后续批次。`
+                    : (deferredRetryRepairSummary.eligible > 0
+                        ? `第二阶段深度检查 ${deferredRetryRepairSummary.attempted} 条，更新 ${deferredRetryRepairSummary.changed} 条，解除阻断 ${deferredRetryRepairSummary.resolved} 条${deferredRetryRepairSummary.errors ? `，保留异常 ${deferredRetryRepairSummary.errors} 条原结果` : ''}。`
+                        : '批量重译后没有残余硬问题，无需逐条 AI 修复。'))
+                : '';
             const issueSummaryText = formatTranslationReportIssueSummary(finalIssueSummary);
-            setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}已完成：本轮通过质检 ${runSuccessCount} 个，发现问题 ${runFailCount} 个；当前报告为 ${issueSummaryText}。${followUpMessage}`);
-            setStatus(deliveryGate.ready ? 'success' : 'warning', statusTitle, `本轮通过质检 ${runSuccessCount} 个，发现问题 ${runFailCount} 个；当前报告为 ${issueSummaryText}${autoSaveMessage}`, function() {
+            setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}已完成：本轮通过质检 ${runSuccessCount} 个，发现问题 ${runFailCount} 个；当前报告为 ${issueSummaryText}。${deferredRepairMessage}${followUpMessage}`);
+            setStatus(deliveryGate.ready ? 'success' : 'warning', statusTitle, `本轮通过质检 ${runSuccessCount} 个，发现问题 ${runFailCount} 个；当前报告为 ${issueSummaryText}。${deferredRepairMessage}${autoSaveMessage}`, function() {
                 document.getElementById('translate-tool').scrollIntoView({ behavior: 'smooth' });
             });
             if (!deliveryGate.ready) {
@@ -15207,7 +15678,8 @@ function initTranslateTool() {
                 getApiResponseErrorMessage(payload, rawText, `Youdao API error: ${response.status}`),
                 response.status,
                 payload,
-                rawText
+                rawText,
+                getResponseRetryAfterMs(response)
             );
         }
 
@@ -15529,7 +16001,13 @@ ${text}`;
                     throw new Error('TRANSLATION_CANCELLED');
                 }
                 tasks.forEach(task => {
-                    task.glossaryTerms = getRelevantTranslateGlossaryTerms([task.text, task.referenceText], glossaryTerms, targetLang, 24);
+                    task.glossaryTerms = getRelevantTranslateGlossaryTerms(
+                        [task.text, task.referenceText],
+                        glossaryTerms,
+                        targetLang,
+                        24,
+                        { normalized: true }
+                    );
                 });
                 const protectedTasks = tasks.map(task => {
                     const protectedContext = createPlaceholderProtectionContext({

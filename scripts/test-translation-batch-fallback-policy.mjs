@@ -40,6 +40,11 @@ const translateBatchSource = extractFunction(source, 'async function translateBa
 const youdaoSource = extractFunction(source, 'async function translateWithYoudaoLlm(');
 const youdaoFetchSource = extractFunction(source, 'async function fetchWithTranslateAbort(');
 const requestTimingSource = extractFunction(source, 'function recordTranslateRequestTiming(');
+const retryAfterHeaderSource = extractFunction(source, 'function parseRetryAfterHeaderMs(');
+const readResponseSource = extractFunction(source, 'async function readModelResponseContent(');
+const apiErrorSource = extractFunction(source, 'function createApiRequestError(');
+const postChatSource = extractFunction(source, 'async function postChatCompletion(');
+const rustSource = fs.readFileSync(path.join(projectDir, 'src-tauri', 'src', 'lib.rs'), 'utf8');
 
 const splitPolicy = new Function(`
     const TRANSLATION_BATCH_SPLIT_MAX_DEPTH = 2;
@@ -96,6 +101,12 @@ assert.equal(classifyIncident('请求接口失败：channel closed'), 'interrupt
 assert.equal(classifyIncident('读取接口返回失败：body error'), 'interruption');
 assert.equal(classifyIncident(new SyntaxError('Unexpected end of JSON input')), '');
 
+const parseRetryAfterHeader = new Function(`${retryAfterHeaderSource}; return parseRetryAfterHeaderMs;`)();
+assert.equal(parseRetryAfterHeader('3'), 3000);
+assert.equal(parseRetryAfterHeader('0.5'), 500);
+assert.equal(parseRetryAfterHeader('Wed, 21 Oct 2015 07:28:00 GMT', Date.parse('Wed, 21 Oct 2015 07:27:55 GMT')), 5000);
+assert.equal(parseRetryAfterHeader('invalid'), 0);
+
 const isTemporaryError = new Function(
     'isApiQuotaDepletedError',
     `${temporarySource}; return isTemporaryTranslateApiError;`
@@ -138,6 +149,28 @@ assert.match(
     /try \{[\s\S]*renderTranslateChannelProgress\(\);[\s\S]*\} catch \{/,
     'request telemetry must be best-effort and never change translation success semantics'
 );
+assert.match(
+    readResponseSource,
+    /getResponseRetryAfterMs\(response\)/,
+    'HTTP errors should retain the standard Retry-After response header'
+);
+assert.match(
+    apiErrorSource,
+    /Math\.max\([\s\S]*getApiRetryDelayMs\(payload, rawText\)[\s\S]*retryAfterMs/,
+    'payload and header retry delays should use the longer value'
+);
+assert.match(
+    postChatSource,
+    /response\?\.retryAfter \|\| response\?\.retry_after/,
+    'Tauri responses should expose Retry-After to the browser response shim'
+);
+assert.match(
+    youdaoSource,
+    /getResponseRetryAfterMs\(response\)/,
+    'direct Youdao responses should also preserve Retry-After'
+);
+assert.match(rustSource, /reqwest::header::RETRY_AFTER/);
+assert.match(rustSource, /#\[serde\(rename = "retryAfter"\)\]/);
 
 {
     const fetchWithTimeout = new Function(

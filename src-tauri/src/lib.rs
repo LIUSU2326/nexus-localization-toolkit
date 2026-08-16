@@ -13,6 +13,8 @@ struct DroppedFile {
 struct ChatCompletionResponse {
     status: u16,
     body: String,
+    #[serde(rename = "retryAfter")]
+    retry_after: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -139,12 +141,21 @@ async fn post_chat_completion(
     })?;
 
     let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let body = response
         .text()
         .await
         .map_err(|error| format!("读取接口返回失败：{error}"))?;
 
-    Ok(ChatCompletionResponse { status, body })
+    Ok(ChatCompletionResponse {
+        status,
+        body,
+        retry_after,
+    })
 }
 
 #[tauri::command]
@@ -190,12 +201,21 @@ async fn get_api_resource(
     })?;
 
     let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let body = response
         .text()
         .await
         .map_err(|error| format!("读取模型列表返回失败：{error}"))?;
 
-    Ok(ChatCompletionResponse { status, body })
+    Ok(ChatCompletionResponse {
+        status,
+        body,
+        retry_after,
+    })
 }
 
 fn downloads_dir() -> Result<PathBuf, String> {

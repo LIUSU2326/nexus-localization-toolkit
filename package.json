@@ -8,7 +8,7 @@
     "icons": "node scripts/generate-tauri-icon.js",
     "dev:web": "node scripts/dev-server.js",
     "build:web": "node scripts/build-web.js",
-    "test": "node scripts/test-language-carryover-guard.mjs && node scripts/test-protected-ui-token-policy.mjs && node scripts/test-translation-delivery-policy.mjs && node scripts/test-translation-preflight-error.mjs && node scripts/test-translation-preflight-state.mjs && node scripts/test-translation-repair-policy.mjs && node scripts/test-translation-batch-fallback-policy.mjs && node scripts/test-translation-import-review-cache.mjs",
+    "test": "node scripts/test-language-carryover-guard.mjs && node scripts/test-protected-ui-token-policy.mjs && node scripts/test-translation-delivery-policy.mjs && node scripts/test-translation-preflight-error.mjs && node scripts/test-translation-preflight-state.mjs && node scripts/test-translation-repair-policy.mjs && node scripts/test-translation-batch-fallback-policy.mjs && node scripts/test-translation-import-review-cache.mjs && node scripts/test-translation-retry-workflow.mjs",
     "test:language-guard": "node scripts/test-language-carryover-guard.mjs",
     "test:protected-ui-tokens": "node scripts/test-protected-ui-token-policy.mjs",
     "test:delivery-policy": "node scripts/test-translation-delivery-policy.mjs",

@@ -34,25 +34,35 @@ const normalizeSource = extractFunction(source, 'function normalizeTranslationRe
 const changedSource = extractFunction(source, 'function hasTranslationQaRepairChanged(');
 const continueSource = extractFunction(source, 'function shouldAttemptNextTranslationQaRepair(');
 const concurrencySource = extractFunction(source, 'function getTranslationQaRepairConcurrency(');
+const targetRpmSource = extractFunction(source, 'function getTranslationTargetRpm(');
+const pacerSource = extractFunction(source, 'function createTranslationRpmPacer(');
 const limiterSource = extractFunction(source, 'function createTranslationRequestLimiter(');
+const gateSource = extractFunction(source, 'function createTranslationRequestGate(');
 const runWithLimiterSource = extractFunction(source, 'async function runWithTranslationRequestLimiter(');
 const batchSource = extractFunction(source, 'async function processTranslateTaskBatch(');
 
 const policy = new Function(`
     const TRANSLATION_QA_REPAIR_MAX_ATTEMPTS = 2;
     const TRANSLATION_QA_REPAIR_MAX_CONCURRENCY = 2;
+    const TRANSLATION_AGNES_TARGET_RPM = 17;
     ${normalizeSource}
     ${changedSource}
     ${continueSource}
     ${concurrencySource}
+    ${targetRpmSource}
+    ${pacerSource}
     ${limiterSource}
+    ${gateSource}
     ${runWithLimiterSource}
     return {
         normalizeTranslationRepairFingerprint,
         hasTranslationQaRepairChanged,
         shouldAttemptNextTranslationQaRepair,
         getTranslationQaRepairConcurrency,
+        getTranslationTargetRpm,
+        createTranslationRpmPacer,
         createTranslationRequestLimiter,
+        createTranslationRequestGate,
         runWithTranslationRequestLimiter
     };
 `)();
@@ -70,6 +80,9 @@ assert.equal(policy.getTranslationQaRepairConcurrency(3, 2, 20), 2);
 assert.equal(policy.getTranslationQaRepairConcurrency(3, 1, 20), 1);
 assert.equal(policy.getTranslationQaRepairConcurrency(3, 2, 1), 1);
 assert.equal(policy.getTranslationQaRepairConcurrency(3, 2, 0), 1);
+assert.equal(policy.getTranslationTargetRpm({ provider: 'agnes' }), 17);
+assert.equal(policy.getTranslationTargetRpm({ provider: 'deepseek' }), 0);
+assert.equal(policy.getTranslationTargetRpm({ provider: 'agnes', translationRpm: 18 }), 18);
 assert.ok(batchSource.includes('requestLimiter'), 'batch requests should use the shared request limiter');
 assert.ok(
     batchSource.indexOf('commitTranslateResult') < batchSource.indexOf('if (firstPreparationError) throw'),
@@ -120,4 +133,113 @@ assert.match(
     assert.equal(limiter.getActiveCount(), 0, 'failed requests should release their limiter slot');
 }
 
-console.log('translation-repair-policy: no-change guard and concurrency limits passed');
+{
+    let clock = 0;
+    const pacer = policy.createTranslationRpmPacer(
+        () => 60,
+        () => {},
+        1000,
+        {
+            now: () => clock,
+            delay: async milliseconds => {
+                clock += milliseconds;
+            }
+        }
+    );
+    const starts = await Promise.all([
+        pacer.waitForTurn(),
+        pacer.waitForTurn(),
+        pacer.waitForTurn()
+    ]);
+    assert.deepEqual(starts, [0, 1000, 2000], 'concurrent callers should start in a smooth FIFO cadence');
+    pacer.deferFor(5000);
+    assert.equal(await pacer.waitForTurn(), 7000, 'Retry-After should delay the whole channel without a burst');
+
+    const concurrencyLimiter = policy.createTranslationRequestLimiter(() => 2, () => {}, 0);
+    const gate = policy.createTranslationRequestGate(concurrencyLimiter, pacer);
+    await assert.rejects(
+        policy.runWithTranslationRequestLimiter(gate, async () => {
+            const error = new Error('rate limited');
+            error.retryAfterMs = 3000;
+            throw error;
+        }),
+        /rate limited/
+    );
+    assert.equal(gate.getActiveCount(), 0, 'paced request failures should release their concurrency slot');
+    assert.ok(pacer.snapshot().blockedUntil >= clock + 3000, 'Retry-After should be shared with later requests');
+}
+
+{
+    let clock = 0;
+    const pacer = policy.createTranslationRpmPacer(
+        () => 17,
+        () => {},
+        10_000,
+        {
+            now: () => clock,
+            delay: async milliseconds => {
+                clock += milliseconds;
+            }
+        }
+    );
+    const starts = [];
+    for (let index = 0; index < 18; index++) starts.push(await pacer.waitForTurn());
+    assert.equal(starts[1], 3530);
+    assert.equal(starts[17], 60010);
+    assert.equal(starts.filter(startedAt => startedAt < 60000).length, 17, 'a rolling minute must not start an 18th Agnes request');
+}
+
+{
+    let active = false;
+    let resume = null;
+    const resumed = new Promise(resolve => {
+        resume = resolve;
+    });
+    const concurrencyLimiter = policy.createTranslationRequestLimiter(() => 2, () => {}, 0);
+    const pacer = policy.createTranslationRpmPacer(() => 0, () => {}, 0);
+    const gate = policy.createTranslationRequestGate(
+        concurrencyLimiter,
+        pacer,
+        async () => {
+            if (!active) await resumed;
+        }
+    );
+    const waiting = gate.acquire();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(concurrencyLimiter.getActiveCount(), 0, 'paused requests must not reserve or start a network slot');
+    active = true;
+    resume();
+    const release = await waiting;
+    assert.equal(concurrencyLimiter.getActiveCount(), 1);
+    release();
+}
+
+{
+    let capacity = 2;
+    let clock = 0;
+    const concurrencyLimiter = policy.createTranslationRequestLimiter(() => capacity, () => {}, 0);
+    const pacer = policy.createTranslationRpmPacer(
+        () => 60,
+        () => {},
+        1000,
+        {
+            now: () => clock,
+            delay: async milliseconds => {
+                clock += milliseconds;
+            }
+        }
+    );
+    const gate = policy.createTranslationRequestGate(concurrencyLimiter, pacer);
+    const firstRelease = await gate.acquire();
+    capacity = 1;
+    const secondAcquire = gate.acquire();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(concurrencyLimiter.getActiveCount(), 1, 'a queued request must re-check a reduced adaptive cap at actual start');
+    firstRelease();
+    const secondRelease = await secondAcquire;
+    assert.equal(concurrencyLimiter.getActiveCount(), 1);
+    secondRelease();
+}
+
+console.log('translation-repair-policy: no-change guard, pacing, and concurrency limits passed');
