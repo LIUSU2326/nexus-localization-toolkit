@@ -29,6 +29,35 @@ struct BinarySaveSession {
 #[derive(Default)]
 struct SaveSessionState(Mutex<HashMap<String, PathBuf>>);
 
+struct HttpClientState {
+    chat: Result<reqwest::Client, String>,
+    resource: Result<reqwest::Client, String>,
+}
+
+impl Default for HttpClientState {
+    fn default() -> Self {
+        Self {
+            chat: build_http_client(20),
+            resource: build_http_client(15),
+        }
+    }
+}
+
+fn build_http_client(connect_timeout_secs: u64) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(connect_timeout_secs))
+        .build()
+        .map_err(|error| format!("初始化接口客户端失败：{error}"))
+}
+
+fn normalize_chat_timeout_ms(timeout_ms: Option<u64>) -> u64 {
+    timeout_ms.unwrap_or(240_000).clamp(5_000, 600_000)
+}
+
+fn normalize_resource_timeout_ms(timeout_ms: Option<u64>) -> u64 {
+    timeout_ms.unwrap_or(30_000).clamp(5_000, 120_000)
+}
+
 #[tauri::command]
 fn read_dropped_file(path: String) -> Result<DroppedFile, String> {
     let path = PathBuf::from(path);
@@ -67,6 +96,7 @@ fn read_dropped_file(path: String) -> Result<DroppedFile, String> {
 
 #[tauri::command]
 async fn post_chat_completion(
+    http: tauri::State<'_, HttpClientState>,
     url: String,
     api_key: String,
     body: serde_json::Value,
@@ -78,14 +108,13 @@ async fn post_chat_completion(
         return Err("接口地址必须是 http 或 https".to_string());
     }
 
-    let timeout_ms = timeout_ms.unwrap_or(240_000).clamp(5_000, 600_000);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(timeout_ms))
-        .connect_timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| format!("初始化接口客户端失败：{error}"))?;
+    let timeout_ms = normalize_chat_timeout_ms(timeout_ms);
+    let client = http.chat.as_ref().map_err(|error| error.clone())?;
 
-    let mut request = client.post(parsed_url).json(&body);
+    let mut request = client
+        .post(parsed_url)
+        .timeout(Duration::from_millis(timeout_ms))
+        .json(&body);
     if let Some(headers) = headers {
         for (key, value) in headers {
             if !key.trim().is_empty() {
@@ -120,6 +149,7 @@ async fn post_chat_completion(
 
 #[tauri::command]
 async fn get_api_resource(
+    http: tauri::State<'_, HttpClientState>,
     url: String,
     api_key: String,
     timeout_ms: Option<u64>,
@@ -130,14 +160,12 @@ async fn get_api_resource(
         return Err("接口地址必须是 http 或 https".to_string());
     }
 
-    let timeout_ms = timeout_ms.unwrap_or(30_000).clamp(5_000, 120_000);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(timeout_ms))
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|error| format!("初始化接口客户端失败：{error}"))?;
+    let timeout_ms = normalize_resource_timeout_ms(timeout_ms);
+    let client = http.resource.as_ref().map_err(|error| error.clone())?;
 
-    let mut request = client.get(parsed_url);
+    let mut request = client
+        .get(parsed_url)
+        .timeout(Duration::from_millis(timeout_ms));
     if let Some(headers) = headers {
         for (key, value) in headers {
             if !key.trim().is_empty() {
@@ -392,6 +420,7 @@ fn abort_binary_report_save(
 pub fn run() {
     tauri::Builder::default()
         .manage(SaveSessionState::default())
+        .manage(HttpClientState::default())
         .invoke_handler(tauri::generate_handler![
             read_dropped_file,
             post_chat_completion,
@@ -405,4 +434,25 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_chat_timeout_ms, normalize_resource_timeout_ms};
+
+    #[test]
+    fn chat_timeout_keeps_existing_defaults_and_bounds() {
+        assert_eq!(normalize_chat_timeout_ms(None), 240_000);
+        assert_eq!(normalize_chat_timeout_ms(Some(1)), 5_000);
+        assert_eq!(normalize_chat_timeout_ms(Some(45_000)), 45_000);
+        assert_eq!(normalize_chat_timeout_ms(Some(900_000)), 600_000);
+    }
+
+    #[test]
+    fn resource_timeout_keeps_existing_defaults_and_bounds() {
+        assert_eq!(normalize_resource_timeout_ms(None), 30_000);
+        assert_eq!(normalize_resource_timeout_ms(Some(1)), 5_000);
+        assert_eq!(normalize_resource_timeout_ms(Some(45_000)), 45_000);
+        assert_eq!(normalize_resource_timeout_ms(Some(900_000)), 120_000);
+    }
 }
