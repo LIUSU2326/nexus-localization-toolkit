@@ -44,7 +44,14 @@ const retryAfterHeaderSource = extractFunction(source, 'function parseRetryAfter
 const readResponseSource = extractFunction(source, 'async function readModelResponseContent(');
 const apiErrorSource = extractFunction(source, 'function createApiRequestError(');
 const postChatSource = extractFunction(source, 'async function postChatCompletion(');
+const requestModelSource = extractFunction(source, 'async function requestModelContent(');
 const rustSource = fs.readFileSync(path.join(projectDir, 'src-tauri', 'src', 'lib.rs'), 'utf8');
+
+assert.match(
+    requestModelSource,
+    /try\s*\{[\s\S]*return await readModelResponseContent\(response, responseConfig, options\);[\s\S]*catch \(error\)/,
+    'HTTP response errors must reach requestModelContent compatibility fallbacks'
+);
 
 const splitPolicy = new Function(`
     const TRANSLATION_BATCH_SPLIT_MAX_DEPTH = 2;

@@ -60,6 +60,55 @@ fn normalize_resource_timeout_ms(timeout_ms: Option<u64>) -> u64 {
     timeout_ms.unwrap_or(30_000).clamp(5_000, 120_000)
 }
 
+#[cfg(target_os = "windows")]
+fn build_taskbar_attention_icon() -> tauri::image::Image<'static> {
+    const SIZE: u32 = 32;
+    const OUTER_RADIUS_SQUARED: i32 = 14 * 14;
+    const INNER_RADIUS_SQUARED: i32 = 10 * 10;
+    let center = (SIZE as i32 - 1) / 2;
+    let mut rgba = vec![0_u8; (SIZE * SIZE * 4) as usize];
+
+    for y in 0..SIZE as i32 {
+        for x in 0..SIZE as i32 {
+            let dx = x - center;
+            let dy = y - center;
+            let distance_squared = dx * dx + dy * dy;
+            let pixel = ((y as u32 * SIZE + x as u32) * 4) as usize;
+            if distance_squared <= OUTER_RADIUS_SQUARED {
+                let color = if distance_squared <= INNER_RADIUS_SQUARED {
+                    [239, 68, 68, 255]
+                } else {
+                    [248, 250, 252, 255]
+                };
+                rgba[pixel..pixel + 4].copy_from_slice(&color);
+            }
+        }
+    }
+
+    tauri::image::Image::new_owned(rgba, SIZE, SIZE)
+}
+
+#[tauri::command]
+fn set_taskbar_attention(window: tauri::WebviewWindow, active: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let overlay = active.then(build_taskbar_attention_icon);
+        window
+            .set_overlay_icon(overlay)
+            .map_err(|error| format!("更新任务栏完成提示失败：{error}"))?;
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    window
+        .request_user_attention(active.then_some(tauri::UserAttentionType::Informational))
+        .map_err(|error| format!("更新任务栏提醒状态失败：{error}"))?;
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let _ = (window, active);
+
+    Ok(())
+}
+
 #[tauri::command]
 fn read_dropped_file(path: String) -> Result<DroppedFile, String> {
     let path = PathBuf::from(path);
@@ -450,7 +499,8 @@ pub fn run() {
             start_binary_report_save,
             append_binary_report_chunk,
             finish_binary_report_save,
-            abort_binary_report_save
+            abort_binary_report_save,
+            set_taskbar_attention
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -459,6 +509,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{normalize_chat_timeout_ms, normalize_resource_timeout_ms};
+
+    #[cfg(target_os = "windows")]
+    use super::build_taskbar_attention_icon;
 
     #[test]
     fn chat_timeout_keeps_existing_defaults_and_bounds() {
@@ -474,5 +527,22 @@ mod tests {
         assert_eq!(normalize_resource_timeout_ms(Some(1)), 5_000);
         assert_eq!(normalize_resource_timeout_ms(Some(45_000)), 45_000);
         assert_eq!(normalize_resource_timeout_ms(Some(900_000)), 120_000);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn taskbar_attention_icon_is_a_small_transparent_red_badge() {
+        let icon = build_taskbar_attention_icon();
+        assert_eq!(icon.width(), 32);
+        assert_eq!(icon.height(), 32);
+        assert_eq!(icon.rgba().len(), 32 * 32 * 4);
+        assert!(icon
+            .rgba()
+            .chunks_exact(4)
+            .any(|pixel| pixel == [239, 68, 68, 255]));
+        assert!(icon
+            .rgba()
+            .chunks_exact(4)
+            .any(|pixel| pixel == [0, 0, 0, 0]));
     }
 }

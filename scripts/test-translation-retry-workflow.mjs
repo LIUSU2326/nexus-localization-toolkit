@@ -157,5 +157,10 @@ assert.match(
     /previousEntry[\s\S]*!isTranslateFailureText\(previousEntry\.translatedText\)[\s\S]*isTranslateFailureText\(normalizedTranslated\)/,
     'a failed deep repair must preserve the valid first-stage translation'
 );
+assert.match(
+    replaceSource,
+    /classifyTranslationReportEntry\(previousEntry\) === 'hard'[\s\S]*!isActualTranslationFailureReportEntry\(previousEntry\)[\s\S]*classifyTranslationReportEntry\(reportEntry\) === 'hard'[\s\S]*changed: false/,
+    'a deep repair that remains blocking must not replace the first-stage translation'
+);
 
 console.log('translation-retry-workflow: two-stage bounds and retry glossary snapshot passed');

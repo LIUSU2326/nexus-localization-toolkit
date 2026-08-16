@@ -242,4 +242,30 @@ assert.match(
     secondRelease();
 }
 
+{
+    let clock = 0;
+    const concurrencyLimiter = policy.createTranslationRequestLimiter(() => 1, () => {}, 0);
+    const pacer = policy.createTranslationRpmPacer(
+        () => 0,
+        () => {},
+        30_000,
+        {
+            now: () => clock,
+            delay: async milliseconds => {
+                clock += milliseconds;
+            }
+        }
+    );
+    const gate = policy.createTranslationRequestGate(concurrencyLimiter, pacer);
+    const firstRelease = await gate.acquire();
+    const waiting = gate.acquire();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    pacer.deferFor(30_000);
+    firstRelease();
+    const secondRelease = await waiting;
+    assert.equal(clock, 30_000, 'a queued request must re-check Retry-After after acquiring a slot');
+    assert.equal(concurrencyLimiter.getActiveCount(), 1);
+    secondRelease();
+}
+
 console.log('translation-repair-policy: no-change guard, pacing, and concurrency limits passed');

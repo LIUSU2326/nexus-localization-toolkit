@@ -109,8 +109,8 @@ function setStatus(type, text, subtext = '', actionCallback = null, actionLabel 
             detail: subtext || '',
             status: 'success'
         });
-        if (Notification.permission === 'granted') {
-            new Notification('任务完成', {
+        if (globalThis.Notification?.permission === 'granted') {
+            new globalThis.Notification('任务完成', {
                 body: subtext || text
             });
         }
@@ -129,11 +129,90 @@ function hideStatus() {
 }
 
 const UX_RECENT_TASKS_KEY = 'nexus_ux_recent_tasks_v1';
+const TASKBAR_ATTENTION_MIN_DURATION_MS = 30_000;
 
 let inspectorTaskStartedAt = 0;
 let inspectorTaskFinishedAt = 0;
 let inspectorTaskTimerId = null;
 let inspectorTaskStatus = 'idle';
+let taskbarAttentionDesired = false;
+let taskbarAttentionApplied = false;
+let taskbarAttentionSyncPromise = null;
+let taskbarAttentionSuppressionDepth = 0;
+
+function shouldSignalTaskbarAttention(type, phase, durationMs, context = {}) {
+    const hidden = context.hidden ?? Boolean(globalThis.document?.hidden);
+    const hasFocus = context.hasFocus ?? Boolean(globalThis.document?.hasFocus?.());
+    const terminalType = ['success', 'warning', 'error'].includes(String(type || ''));
+    const intentionallyStopped = /取消|暂停|已停止/.test(String(phase || ''));
+    return terminalType &&
+        !intentionallyStopped &&
+        Number(durationMs || 0) >= TASKBAR_ATTENTION_MIN_DURATION_MS &&
+        (hidden || !hasFocus);
+}
+
+function syncTaskbarAttentionState() {
+    if (taskbarAttentionSyncPromise) return taskbarAttentionSyncPromise;
+    taskbarAttentionSyncPromise = (async () => {
+        const invoke = globalThis.window?.__TAURI__?.core?.invoke;
+        if (!invoke) {
+            taskbarAttentionApplied = taskbarAttentionDesired;
+            return;
+        }
+        while (taskbarAttentionApplied !== taskbarAttentionDesired) {
+            const nextActive = taskbarAttentionDesired;
+            try {
+                await invoke('set_taskbar_attention', { active: nextActive });
+                taskbarAttentionApplied = nextActive;
+            } catch (error) {
+                console.debug('Taskbar attention update was unavailable:', error);
+                taskbarAttentionApplied = taskbarAttentionDesired;
+                break;
+            }
+        }
+    })().finally(() => {
+        taskbarAttentionSyncPromise = null;
+        if (taskbarAttentionApplied !== taskbarAttentionDesired) {
+            syncTaskbarAttentionState();
+        }
+    });
+    return taskbarAttentionSyncPromise;
+}
+
+function setTaskbarAttention(active, options = {}) {
+    taskbarAttentionDesired = Boolean(active);
+    if (options.force && !taskbarAttentionDesired) {
+        // A renderer reload forgets the applied state while the native window
+        // may still hold its overlay icon. Force one native clear on startup.
+        taskbarAttentionApplied = true;
+    }
+    void syncTaskbarAttentionState();
+}
+
+function clearTaskbarAttention() {
+    setTaskbarAttention(false);
+}
+
+function setTaskbarAttentionSuppressed(suppressed) {
+    taskbarAttentionSuppressionDepth = Math.max(
+        0,
+        taskbarAttentionSuppressionDepth + (suppressed ? 1 : -1)
+    );
+}
+
+function signalTaskbarAttentionForCompletedTask(type, phase, durationMs) {
+    if (taskbarAttentionSuppressionDepth > 0) return;
+    if (!shouldSignalTaskbarAttention(type, phase, durationMs)) return;
+    setTaskbarAttention(true);
+}
+
+function initTaskbarAttention() {
+    window.addEventListener('focus', clearTaskbarAttention);
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && document.hasFocus()) clearTaskbarAttention();
+    });
+    setTaskbarAttention(false, { force: true });
+}
 
 function getActiveToolKey() {
     return document.querySelector('.nav-item.active')?.dataset.tool || 'split';
@@ -163,6 +242,7 @@ function renderInspectorTaskTimer() {
 
 function startInspectorTaskTimer(phase = '运行中') {
     if (inspectorTaskStatus !== 'running' || !inspectorTaskStartedAt) {
+        clearTaskbarAttention();
         inspectorTaskStartedAt = Date.now();
         inspectorTaskFinishedAt = 0;
         inspectorTaskStatus = 'running';
@@ -185,6 +265,7 @@ function finishInspectorTaskTimer(type = 'success', phase = '') {
     const isTerminalWarningOverride = isWarning && inspectorTaskStatus === 'success';
     if (!isRunning && !isTerminalWarningOverride) return;
     if (isRunning) inspectorTaskFinishedAt = Date.now();
+    const taskDurationMs = Math.max(0, inspectorTaskFinishedAt - inspectorTaskStartedAt);
     inspectorTaskStatus = isError ? 'error' : (isWarning ? 'warning' : 'success');
     if (inspectorTaskTimerId) {
         clearInterval(inspectorTaskTimerId);
@@ -194,6 +275,7 @@ function finishInspectorTaskTimer(type = 'success', phase = '') {
     setInspectorText('inspectorTaskBadge', isError ? '异常' : (isWarning ? '需处理' : '完成'));
     setInspectorText('inspectorTaskPhase', phase || (isError ? '处理异常' : (isWarning ? '处理完成，仍需修复' : '处理完成')));
     setInspectorText('inspectorEstimateBadge', isError ? '已停止' : '已计时');
+    if (isRunning) signalTaskbarAttentionForCompletedTask(type, phase, taskDurationMs);
 }
 
 function resetInspectorTaskTimer() {
@@ -716,8 +798,24 @@ function createTranslationRpmPacer(getTargetRpm, onCancel = () => {}, waitMs = 1
             const readyAt = Math.max(intervalReadyAt, blockedUntil);
             const remainingMs = Math.max(0, readyAt - currentTime);
             if (remainingMs <= 0) {
-                const startValue = typeof beforeStart === 'function' ? await beforeStart() : undefined;
-                lastStartedAt = now();
+                const preparedStart = typeof beforeStart === 'function' ? await beforeStart() : undefined;
+                const latestTime = now();
+                const latestRpm = Math.max(0, Number(getTargetRpm?.()) || 0);
+                const latestIntervalMs = latestRpm > 0 ? Math.ceil(60000 / latestRpm) : 0;
+                const latestIntervalReadyAt = hasStarted ? lastStartedAt + latestIntervalMs : latestTime;
+                const latestReadyAt = Math.max(latestIntervalReadyAt, blockedUntil);
+                if (latestReadyAt > latestTime) {
+                    preparedStart?.cancel?.();
+                    await delay(Math.min(
+                        latestReadyAt - latestTime,
+                        Math.max(1, Number(waitMs) || 100)
+                    ));
+                    continue;
+                }
+                const startValue = preparedStart && typeof preparedStart === 'object' && 'value' in preparedStart
+                    ? preparedStart.value
+                    : preparedStart;
+                lastStartedAt = latestTime;
                 hasStarted = true;
                 return typeof beforeStart === 'function'
                     ? { startedAt: lastStartedAt, value: startValue }
@@ -755,7 +853,11 @@ function createTranslationRequestGate(concurrencyLimiter, rpmPacer, waitUntilAct
                 const release = concurrencyLimiter ? await concurrencyLimiter.acquire() : null;
                 try {
                     await waitUntilActive();
-                    return release || (() => {});
+                    const releaseRequest = release || (() => {});
+                    return {
+                        value: releaseRequest,
+                        cancel: releaseRequest
+                    };
                 } catch (error) {
                     release?.();
                     throw error;
@@ -5350,7 +5452,7 @@ async function requestModelContent(apiConfig, body, signal = null, timeoutMs = A
             timeoutMs,
             request.headers
         );
-        return readModelResponseContent(response, responseConfig, options);
+        return await readModelResponseContent(response, responseConfig, options);
     } catch (error) {
         if (hasPromptCacheMetadata(tunedBody) && isPromptCacheUnsupportedError(error)) {
             const uncachedBody = withoutPromptCaching(tunedBody);
@@ -6032,6 +6134,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if ('Notification' in window) {
         Notification.requestPermission();
     }
+    initTaskbarAttention();
 
     initSplitTool();
     initTranslateTool();
@@ -13419,26 +13522,30 @@ function initTranslateTool() {
         const confirmed = confirm(`将按顺序翻译 ${targetLangs.length} 种目标语言：${targetLangs.map(getTranslateLanguageName).join('、')}。\n\n每种语言都会保存独立报告；只有硬错误清零时才保存交付版译文，避免把有问题的文件误用于交付。${autoRetryText}\n\n是否开始？`);
         if (!confirmed) return { status: 'cancelled' };
 
+        const multiTargetStartedAt = Date.now();
         const originalTargetLang = targetLangSelect?.value || targetLangs[0];
         const savedSuffix = activeTranslationOutputSuffix;
         isTranslateMultiTargetRunning = true;
+        setTaskbarAttentionSuppressed(true);
         let completedTargets = 0;
         let stopped = false;
+        let stoppedByCancellation = false;
         const retryTargets = [];
-        updateTranslateLanguageRunState({
-            targets: targetLangs,
-            currentIndex: 0,
-            completed: [],
-            failed: [],
-            status: 'queued'
-        });
-        setTranslateDownloadLanguageSummary(`多语言队列准备中：${targetLangs.map(getTranslateLanguageName).join('、')}`);
-
         try {
+            updateTranslateLanguageRunState({
+                targets: targetLangs,
+                currentIndex: 0,
+                completed: [],
+                failed: [],
+                status: 'queued'
+            });
+            setTranslateDownloadLanguageSummary(`多语言队列准备中：${targetLangs.map(getTranslateLanguageName).join('、')}`);
+
             for (let index = 0; index < targetLangs.length; index++) {
                 const targetLang = targetLangs[index];
                 if (isTranslationCancelled) {
                     stopped = true;
+                    stoppedByCancellation = true;
                     break;
                 }
                 if (targetLangSelect) targetLangSelect.value = targetLang;
@@ -13465,6 +13572,9 @@ function initTranslateTool() {
                 });
                 if (!['success', 'needs_action'].includes(result?.status) || isTranslationCancelled) {
                     stopped = true;
+                    stoppedByCancellation = Boolean(
+                        isTranslationCancelled || result?.status === 'cancelled'
+                    );
                     markTranslateLanguageFailed(targetLang);
                     break;
                 }
@@ -13501,6 +13611,7 @@ function initTranslateTool() {
             }
         } finally {
             isTranslateMultiTargetRunning = false;
+            setTaskbarAttentionSuppressed(false);
             activeTranslationOutputSuffix = savedSuffix;
             if (targetLangSelect && originalTargetLang) targetLangSelect.value = originalTargetLang;
             renderTranslateTargetLanguageList();
@@ -13530,6 +13641,11 @@ function initTranslateTool() {
             if (retryTargets.length) {
                 finishInspectorTaskTimer('warning', '多语言队列完成，仍有阻断问题');
             }
+            signalTaskbarAttentionForCompletedTask(
+                retryTargets.length ? 'warning' : 'success',
+                retryTargets.length ? '多语言队列完成，仍有阻断问题' : '多语言翻译完成',
+                Date.now() - multiTargetStartedAt
+            );
             return {
                 status: retryTargets.length ? 'needs_action' : 'success',
                 completedTargets,
@@ -13543,6 +13659,13 @@ function initTranslateTool() {
         setTranslateDownloadLanguageSummary(`多语言翻译已停止：已完成 ${completedTargets}/${targetLangs.length} 种语言。`);
         setStatus('warning', '多语言翻译已停止', `已完成 ${completedTargets}/${targetLangs.length} 种目标语言。未完成语言可以稍后重新勾选后继续。`);
         finishInspectorTaskTimer('warning', '多语言翻译已停止');
+        if (!stoppedByCancellation) {
+            signalTaskbarAttentionForCompletedTask(
+                'error',
+                '多语言翻译异常中止',
+                Date.now() - multiTargetStartedAt
+            );
+        }
         return { status: 'cancelled', completedTargets };
     }
 
@@ -14375,7 +14498,12 @@ function initTranslateTool() {
 
             function replaceCommittedTranslateResult(task, translated, qaStatusOverride = null) {
                 throwIfTranslationCancelled(runId);
-                const previousEntry = translationProgressTasks.get(task.taskKey);
+                translationRunReport = translationRunReport || { entries: [] };
+                const reportEntries = translationRunReport.entries || [];
+                const replaceableTaskKeys = new Set([task.taskKey, task.retryOfTaskKey].filter(Boolean));
+                const existingReportIndex = reportEntries.findIndex(item => replaceableTaskKeys.has(item.taskKey));
+                const previousEntry = translationProgressTasks.get(task.taskKey) ||
+                    (existingReportIndex >= 0 ? reportEntries[existingReportIndex] : null);
                 const previousStatus = previousEntry
                     ? getTranslationReportStatus(previousEntry.translatedText, previousEntry.qaStatus)
                     : 'missing';
@@ -14383,10 +14511,18 @@ function initTranslateTool() {
                 const qaStatus = qaStatusOverride ?? (translatePostCheckInput?.checked
                     ? summarizeTranslationQa(task.text, normalizedTranslated, task.glossaryTerms || [], targetLang, task)
                     : '');
+                const reportEntry = buildTranslationReportEntry(task, normalizedTranslated, qaStatus);
                 if (
                     previousEntry?.translatedText &&
                     !isTranslateFailureText(previousEntry.translatedText) &&
                     isTranslateFailureText(normalizedTranslated)
+                ) {
+                    return { status: previousStatus, entry: previousEntry, changed: false };
+                }
+                if (
+                    classifyTranslationReportEntry(previousEntry) === 'hard' &&
+                    !isActualTranslationFailureReportEntry(previousEntry) &&
+                    classifyTranslationReportEntry(reportEntry) === 'hard'
                 ) {
                     return { status: previousStatus, entry: previousEntry, changed: false };
                 }
@@ -14396,14 +14532,9 @@ function initTranslateTool() {
                     translationProgressTasks.delete(task.retryOfTaskKey);
                     deleteTranslationTaskProgress(task.retryOfTaskKey);
                 }
-                translationRunReport = translationRunReport || { entries: [] };
-                const reportEntry = buildTranslationReportEntry(task, normalizedTranslated, qaStatus);
                 const compactEntry = compactTranslationProgressEntry(reportEntry);
                 translationProgressTasks.set(task.taskKey, compactEntry || reportEntry);
                 queueTranslationTaskProgress(reportEntry);
-                const reportEntries = translationRunReport.entries || [];
-                const replaceableTaskKeys = new Set([task.taskKey, task.retryOfTaskKey].filter(Boolean));
-                const existingReportIndex = reportEntries.findIndex(item => replaceableTaskKeys.has(item.taskKey));
                 if (existingReportIndex >= 0) reportEntries[existingReportIndex] = reportEntry;
                 else reportEntries.push(reportEntry);
                 translationRunReport.entries = reportEntries;
