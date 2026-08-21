@@ -9,4 +9,6 @@ run-logs/
 __pycache__/
 *.py[cod]
 *.log
+# Local recovery data may contain API keys and project rules.
+tm-restore-data.js
 .DS_Store

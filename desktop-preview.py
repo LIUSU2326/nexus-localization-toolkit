@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -41,7 +42,18 @@ class ProjectRequestHandler(SimpleHTTPRequestHandler):
 
 
 def start_server() -> tuple[ThreadingHTTPServer, str]:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), ProjectRequestHandler)
+    # 固定端口保证 localStorage 的 origin 稳定（与 Tauri dev 一致），
+    # 避免每次随机端口导致浏览器存储“丢失”。
+    server = None
+    for port in (1420, 0):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", port), ProjectRequestHandler)
+            if port == 0:
+                logging.warning("Port 1420 is busy; falling back to a random port (localStorage origin will change)")
+            break
+        except OSError:
+            if port == 0:
+                raise
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, name="transmate-preview-server", daemon=True).start()
     url = f"http://127.0.0.1:{server.server_address[1]}/index.html"
@@ -73,6 +85,9 @@ def run_window() -> int:
         return 1
 
     server, url = start_server()
+    # 持久化目录放在项目外部的工作区内（沙箱/权限环境可能不允许写 %LOCALAPPDATA%）
+    storage_dir = PROJECT_ROOT.parent / "transmate-preview-data"
+    storage_dir.mkdir(parents=True, exist_ok=True)
     try:
         webview.create_window(
             "TransMate · AI 游戏本地化助手 · 桌面测试",
@@ -82,7 +97,12 @@ def run_window() -> int:
             min_size=(1080, 720),
             background_color="#f6f2eb",
         )
-        webview.start(gui="edgechromium", debug=False, private_mode=True)
+        webview.start(
+            gui="edgechromium",
+            debug=False,
+            private_mode=False,
+            storage_path=str(storage_dir),
+        )
         return 0
     except Exception:
         logging.exception("Desktop preview window failed to start")
