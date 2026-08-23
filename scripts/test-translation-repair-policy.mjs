@@ -85,8 +85,12 @@ assert.equal(policy.getTranslationTargetRpm({ provider: 'deepseek' }), 0);
 assert.equal(policy.getTranslationTargetRpm({ provider: 'agnes', translationRpm: 18 }), 18);
 assert.ok(batchSource.includes('requestLimiter'), 'batch requests should use the shared request limiter');
 assert.ok(
-    batchSource.indexOf('commitTranslateResult') < batchSource.indexOf('if (firstPreparationError) throw'),
-    'successful prepared results should be committed before propagating a preparation error'
+    batchSource.includes('commitTranslateResult(task, translatedForCommit, qaStatusForCommit)'),
+    'successful provider results should still be committed when local QA preparation fails'
+);
+assert.ok(
+    batchSource.includes('需确认：译文已返回，但本地质检未完成'),
+    'local QA preparation failures must not be relabeled as missing model output'
 );
 assert.match(
     source,

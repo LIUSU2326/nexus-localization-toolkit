@@ -46,9 +46,11 @@ function createXlsxStub() {
 }
 
 const signatures = [
+    'function sanitizeTranslationCandidateAudit(',
     'function compactTranslationProgressEntry(',
     'function getTranslateSourceOutput(',
     'function getTranslateResultProfile(',
+    'function copyPersistableTranslationAudit(',
     'function getTranslateOutputSlotId(',
     'function getTranslateOutputTaskKey(',
     'function createTranslateResultProfileFromReportEntry(',

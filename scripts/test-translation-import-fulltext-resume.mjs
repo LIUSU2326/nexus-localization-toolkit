@@ -53,6 +53,9 @@ const selectPreferredEntrySource = extractFunction(source, 'function selectPrefe
 const dedupeEntriesSource = extractFunction(source, 'function dedupeTranslationReportEntries(');
 const continuationPlanSource = extractFunction(source, 'function buildImportedContinuationPlan(');
 const retryPreviewSource = extractFunction(source, 'function getImportedIssueRetryPreview(');
+const ensureExpectedCoverageSource = extractFunction(source, 'function ensureTranslationReportCoversExpectedTasks(');
+const reportDisplayStatusSource = extractFunction(source, 'function getTranslationReportDisplayStatus(');
+const addTranslationItemSource = extractFunction(source, 'function addTranslationItem(');
 
 const { mergeImportedTranslationEntriesWithCurrentTasks } = new Function(
     'getCompactModelLabel',
@@ -237,6 +240,13 @@ function makeReportEntry(task, overrides = {}) {
     const retryPreview = getImportedIssueRetryPreview({
         entries: merged.entries
     });
+    assert.equal(missingEntry.profile, '', 'an imported report gap must not inherit the currently selected API channel');
+    assert.equal(missingEntry.model, '', 'an imported report gap must not inherit the currently selected model');
+    assert.equal(missingEntry.executorProfile, '', 'an imported report gap has no executor');
+    assert.equal(missingEntry.executorModel, '', 'an imported report gap has no executor model');
+    assert.equal(missingEntry.executionOutcome, 'import_missing');
+    assert.equal(missingEntry.candidateReturned, null, 'an imported report gap is unattempted, not a model no-content result');
+    assert.equal(missingEntry.candidateDecision, 'not_attempted');
     assert.equal(retryPreview.custom, false);
     assert.equal(
         retryPreview.entries.length,
@@ -277,6 +287,121 @@ function makeReportEntry(task, overrides = {}) {
     assert.equal(retryPreview.entries.length, 0, 'review-only heuristics must never call AI automatically');
     assert.equal(retryPreview.plan.reviewCount, 1);
     assert.equal(retryPreview.plan.reusableCount, 1);
+}
+
+{
+    const currentProfile = { name: 'DeepSeek', model: 'deepseek-v4-flash' };
+    const notProcessedEntry = new Function(
+        'ensureExpectedCoverageSource',
+        `
+            const task = {
+                taskKey: 'not-processed-task',
+                rowIndex: 1,
+                colIndex: 2,
+                text: '尚未处理原文',
+                profile: ${JSON.stringify(currentProfile)}
+            };
+            let translationRunReport = { entries: [] };
+            let translationExpectedTaskMap = new Map([[
+                task.taskKey,
+                {
+                    task,
+                    snapshot: {
+                        taskKey: task.taskKey,
+                        sourceText: task.text,
+                        profile: task.profile.name,
+                        model: task.profile.model
+                    }
+                }
+            ]]);
+            function makeTranslateFailureText(_sourceText, reason) {
+                return '[翻译失败：' + reason + ']';
+            }
+            function writeTranslationResult() {}
+            eval(ensureExpectedCoverageSource);
+            ensureTranslationReportCoversExpectedTasks();
+            return translationRunReport.entries[0];
+        `
+    )(ensureExpectedCoverageSource);
+
+    assert.equal(notProcessedEntry.profile, '', 'an unprocessed task must not be attributed to the selected channel');
+    assert.equal(notProcessedEntry.model, '', 'an unprocessed task must not be attributed to the selected model');
+    assert.equal(notProcessedEntry.executorProfile, '');
+    assert.equal(notProcessedEntry.executorModel, '');
+    assert.equal(notProcessedEntry.executionOutcome, 'not_processed');
+    assert.equal(notProcessedEntry.resultOrigin, 'none');
+    assert.equal(notProcessedEntry.candidateReturned, null);
+    assert.equal(notProcessedEntry.candidateDecision, 'not_attempted');
+}
+
+{
+    const getTranslationReportDisplayStatus = new Function(
+        'classifyTranslationReportEntry',
+        'isActualTranslationFailureReportEntry',
+        `${reportDisplayStatusSource}; return getTranslationReportDisplayStatus;`
+    )(
+        () => 'missing',
+        () => false
+    );
+    assert.equal(
+        getTranslationReportDisplayStatus({ executionOutcome: 'no_content', candidateReturned: false }),
+        '模型未返回可用译文',
+        'a no-content response must be presented as missing content, not candidate rejection'
+    );
+    assert.equal(
+        getTranslationReportDisplayStatus({ executionOutcome: 'candidate_rejected', candidateReturned: true }),
+        '候选未采用 · 保留此前结果',
+        'candidate rejection remains a distinct audited state'
+    );
+
+    const renderTranslationItem = new Function(
+        'escapeHtml',
+        'isTranslateFailureText',
+        'getApiProfileLabel',
+        'getTranslateLanguageName',
+        `
+            const TRANSLATION_PREVIEW_MAX_ITEMS = 50;
+            const document = {
+                createElement() {
+                    return { className: '', innerHTML: '' };
+                }
+            };
+            ${addTranslationItemSource}
+            return audit => {
+                const list = {
+                    children: [],
+                    get firstChild() { return this.children[0] || null; },
+                    insertBefore(item) { this.children.unshift(item); },
+                    removeChild(item) { this.children.splice(this.children.indexOf(item), 1); }
+                };
+                addTranslationItem(list, '原文', '此前译文', 1, 2, null, '', audit);
+                return list.children[0].innerHTML;
+            };
+        `
+    )(
+        value => String(value || ''),
+        () => false,
+        () => '',
+        () => ''
+    );
+    const noContentHtml = renderTranslationItem({
+        executionOutcome: 'no_content',
+        resultOrigin: 'previous',
+        resultProfile: 'Agnes AI',
+        resultModel: 'agnes-2.5-flash',
+        candidateReturned: false
+    });
+    assert.match(noContentHtml, /本轮未获得可用候选/);
+    assert.doesNotMatch(noContentHtml, /候选未通过确定性质检/);
+
+    const rejectedHtml = renderTranslationItem({
+        executionOutcome: 'candidate_rejected',
+        resultOrigin: 'previous',
+        resultProfile: 'Agnes AI',
+        resultModel: 'agnes-2.5-flash',
+        candidateReturned: true
+    });
+    assert.match(rejectedHtml, /候选未通过确定性质检/);
 }
 
 assert.doesNotMatch(source, /TRANSLATE_IMPORT_ISSUE_FILTERS/);

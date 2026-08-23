@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const distDir = join(rootDir, 'dist');
-const entryFiles = ['index.html', 'styles.css', 'discount-guard.js', 'language-quality-profiles.js', 'translation-format-token-policy.js', 'translation-number-policy.js', 'translation-repair-attempt-policy.js', 'protected-ui-token-policy.js', 'language-carryover-guard.js', 'translation-delivery-policy.js', 'translation-strict-repair-policy.js', 'translation-issue-policy.js', 'translation-repair-batch-policy.js', 'script.js'];
+const entryFiles = ['index.html', 'styles.css', 'discount-guard.js', 'language-quality-profiles.js', 'translation-format-token-policy.js', 'translation-number-policy.js', 'translation-repair-attempt-policy.js', 'protected-ui-token-policy.js', 'language-carryover-guard.js', 'translation-delivery-policy.js', 'translation-strict-repair-policy.js', 'translation-issue-policy.js', 'translation-repair-batch-policy.js', 'translation-batch-response-policy.js', 'provider-response-policy.js', 'script.js'];
 const requiredAssetDirs = ['vendor'];
 const optionalAssetDirs = ['assets', 'images', 'fonts'];
 

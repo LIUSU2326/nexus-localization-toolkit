@@ -3507,6 +3507,13 @@ body.file-drag-active .file-input-overlay {
     line-height: 1.45;
 }
 
+.translation-row-state {
+    margin: -2px 0 8px;
+    color: var(--warning-color, #b45309);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
 .channel-health-row {
     display: flex;
     flex-wrap: wrap;

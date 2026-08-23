@@ -8,6 +8,25 @@ await import('../translation-issue-policy.js');
 
 const policy = globalThis.NexusTranslationIssuePolicy;
 assert.ok(policy, 'NexusTranslationIssuePolicy should be installed');
+assert.equal(policy.POLICY_VERSION, '1.2.0');
+assert.deepEqual(policy.sanitizePersistableCandidateAudit({
+    candidateReturned: true,
+    candidateDecision: 'rejected',
+    candidateRejectReason: 'new_required_finding',
+    previousIssueIds: ['mixed_chinese', 'malicious-secret-text'],
+    candidateIssueIds: ['number', 'number'],
+    introducedHardIssueIds: ['number', 'SECRET_CANDIDATE_TRANSLATION'],
+    resolvedIssueIds: ['mixed_chinese'],
+    selectedText: 'SECRET_CANDIDATE_TRANSLATION'
+}), {
+    candidateReturned: true,
+    candidateDecision: 'rejected',
+    candidateRejectReason: 'new_required_finding',
+    previousIssueIds: ['mixed_chinese'],
+    candidateIssueIds: ['number'],
+    introducedHardIssueIds: ['number'],
+    resolvedIssueIds: ['mixed_chinese']
+});
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const projectDir = path.resolve(scriptDir, '..');
 const descriptorById = new Map(policy.ISSUE_DESCRIPTORS.map(item => [item.id, item]));
@@ -224,6 +243,13 @@ function decide(previous, candidate, options = {}) {
     assert.equal(decision.selectedText, 'New translation');
     assert.equal(decision.diff.selectedBefore, 1);
     assert.equal(decision.diff.selectedAfter, 0);
+    assert.equal(decision.candidateReturned, true);
+    assert.equal(decision.candidateDecision, 'accepted');
+    assert.equal(decision.candidateRejectReason, '');
+    assert.deepEqual(decision.previousIssueIds, ['mixed_chinese']);
+    assert.deepEqual(decision.candidateIssueIds, []);
+    assert.deepEqual(decision.introducedHardIssueIds, []);
+    assert.deepEqual(decision.resolvedIssueIds, ['mixed_chinese']);
 }
 
 {
@@ -235,6 +261,13 @@ function decide(previous, candidate, options = {}) {
     assert.equal(decision.accept, false, 'fixing Chinese may not introduce a required number error');
     assert.equal(decision.reason, 'new_required_finding');
     assert.equal(decision.selectedText, '旧译文');
+    assert.equal(decision.candidateReturned, true, 'a QA-rejected content candidate must still be recorded as returned');
+    assert.equal(decision.candidateDecision, 'rejected');
+    assert.equal(decision.candidateRejectReason, 'new_required_finding');
+    assert.deepEqual(decision.previousIssueIds, ['mixed_chinese']);
+    assert.deepEqual(decision.candidateIssueIds, ['number']);
+    assert.deepEqual(decision.introducedHardIssueIds, ['number']);
+    assert.deepEqual(decision.resolvedIssueIds, ['mixed_chinese']);
 }
 
 {
@@ -326,6 +359,13 @@ function decide(previous, candidate, options = {}) {
     assert.equal(candidateFailure.accept, false);
     assert.equal(candidateFailure.reason, 'candidate_empty_or_failed');
     assert.equal(candidateFailure.selectedText, 'usable');
+    assert.equal(candidateFailure.candidateReturned, false);
+    assert.equal(candidateFailure.candidateDecision, 'not_returned');
+    assert.equal(candidateFailure.candidateRejectReason, 'candidate_empty_or_failed');
+    assert.deepEqual(candidateFailure.previousIssueIds, ['mixed_chinese']);
+    assert.deepEqual(candidateFailure.candidateIssueIds, ['transport_or_missing']);
+    assert.deepEqual(candidateFailure.introducedHardIssueIds, ['transport_or_missing']);
+    assert.deepEqual(candidateFailure.resolvedIssueIds, ['mixed_chinese']);
 
     const unsafeMissingReplacement = decide(
         { text: '', status: 'missing', qaStatus: '未返回结果' },
@@ -344,6 +384,36 @@ function decide(previous, candidate, options = {}) {
     );
     assert.equal(fillMissing.accept, true, 'a clean candidate may replace a missing translation');
     assert.equal(fillMissing.reason, 'accepted_missing_replacement');
+}
+
+{
+    const previousText = 'SECRET_PREVIOUS_TRANSLATION';
+    const candidateText = 'SECRET_CANDIDATE_TRANSLATION';
+    const decision = decide(
+        { text: previousText, status: 'qa_failed', qaStatus: '需确认：目标阿拉伯文中混入中文' },
+        { text: candidateText, status: 'success', qaStatus: '通过' },
+        { selectedIssueIds: ['mixed_chinese'], mode: 'targeted' }
+    );
+    const persistableAudit = {
+        candidateReturned: decision.candidateReturned,
+        candidateDecision: decision.candidateDecision,
+        candidateRejectReason: decision.candidateRejectReason,
+        previousIssueIds: decision.previousIssueIds,
+        candidateIssueIds: decision.candidateIssueIds,
+        introducedHardIssueIds: decision.introducedHardIssueIds,
+        resolvedIssueIds: decision.resolvedIssueIds
+    };
+    const serializedAudit = JSON.stringify(persistableAudit);
+    assert.doesNotMatch(serializedAudit, /SECRET_(?:PREVIOUS|CANDIDATE)_TRANSLATION/);
+    assert.deepEqual(JSON.parse(serializedAudit), {
+        candidateReturned: true,
+        candidateDecision: 'accepted',
+        candidateRejectReason: '',
+        previousIssueIds: ['mixed_chinese'],
+        candidateIssueIds: [],
+        introducedHardIssueIds: [],
+        resolvedIssueIds: ['mixed_chinese']
+    });
 }
 
 {

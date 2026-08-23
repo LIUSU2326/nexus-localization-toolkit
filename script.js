@@ -781,7 +781,7 @@ function isSplittableTranslationBatchError(error) {
     if ((httpStatus >= 400 && httpStatus <= 599) || error?.isRateLimited || error?.isTimeout || error?.isQuotaDepleted) {
         return false;
     }
-    if (error instanceof SyntaxError || error?.isOutputTruncated || error?.isEmptyEndTurn || error?.isRepairBatchStructureError) return true;
+    if (error instanceof SyntaxError || error?.isOutputTruncated || error?.isEmptyEndTurn || error?.isBatchStructureError || error?.isRepairBatchStructureError) return true;
 
     const diagnostic = `${error?.message || ''} ${error?.rawText || ''}`;
     return /批量(?:翻译|修复)返回(?:数量不一致|空译文|结构异常|无有效结果)|接口返回(?:为空|被截断)|JSON|Unexpected\s+(?:token|end)|unterminated|string array|数组.{0,8}(?:数量|长度|格式)|(?:parse|解析).{0,8}(?:JSON|数组)/i.test(diagnostic);
@@ -1066,7 +1066,45 @@ function isMissingTranslationResult(text) {
     if (!value) return true;
     if (!isMarkedTranslationFailure(value)) return false;
     const failureLabel = value.match(/^\[翻译失败[^\]]*\]/)?.[0] || '';
-    return /返回空译文|未返回结果|空返回/.test(failureLabel);
+    return /返回空译文|未返回结果|空返回|任务未执行|尚未处理|报告缺失/.test(failureLabel);
+}
+
+const TRANSLATION_EXECUTION_OUTCOMES = new Set([
+    'accepted',
+    'accepted_after_batch_fallback',
+    'candidate_rejected',
+    'no_content',
+    'request_failed',
+    'output_truncated',
+    'batch_structure_error',
+    'qa_processing_failed',
+    'rate_limited',
+    'quota_depleted',
+    'timeout',
+    'not_processed',
+    'import_missing',
+    'reused',
+    'passthrough',
+    'local_rule'
+]);
+const TRANSLATION_RESULT_ORIGINS = new Set(['candidate', 'previous', 'none', 'reused', 'source']);
+
+function sanitizeTranslationCandidateAudit(entry = {}) {
+    const policy = globalThis.NexusTranslationIssuePolicy;
+    if (policy?.sanitizePersistableCandidateAudit) {
+        return policy.sanitizePersistableCandidateAudit(entry);
+    }
+    return {
+        candidateReturned: entry.candidateReturned === true
+            ? true
+            : (entry.candidateReturned === false ? false : null),
+        candidateDecision: '',
+        candidateRejectReason: '',
+        previousIssueIds: [],
+        candidateIssueIds: [],
+        introducedHardIssueIds: [],
+        resolvedIssueIds: []
+    };
 }
 
 function compactTranslationProgressEntry(entry) {
@@ -1075,11 +1113,34 @@ function compactTranslationProgressEntry(entry) {
     const statusFromText = isMissingTranslationResult(translatedText)
         ? 'missing'
         : (isMarkedTranslationFailure(translatedText) ? 'failed' : '');
+    const candidateAudit = globalThis.NexusTranslationIssuePolicy?.sanitizePersistableCandidateAudit?.(entry) || {
+        candidateReturned: entry.candidateReturned === true
+            ? true
+            : (entry.candidateReturned === false ? false : null),
+        candidateDecision: entry.candidateDecision || '',
+        candidateRejectReason: entry.candidateRejectReason || '',
+        previousIssueIds: Array.isArray(entry.previousIssueIds) ? entry.previousIssueIds : [],
+        candidateIssueIds: Array.isArray(entry.candidateIssueIds) ? entry.candidateIssueIds : [],
+        introducedHardIssueIds: Array.isArray(entry.introducedHardIssueIds) ? entry.introducedHardIssueIds : [],
+        resolvedIssueIds: Array.isArray(entry.resolvedIssueIds) ? entry.resolvedIssueIds : []
+    };
+    const allowedExecutionOutcomes = new Set([
+        'accepted', 'accepted_after_batch_fallback', 'candidate_rejected', 'no_content', 'request_failed',
+        'output_truncated', 'batch_structure_error', 'qa_processing_failed', 'rate_limited', 'quota_depleted',
+        'timeout', 'not_processed', 'import_missing', 'reused', 'passthrough', 'local_rule'
+    ]);
+    const allowedResultOrigins = new Set(['candidate', 'previous', 'none', 'reused', 'source']);
     return {
         taskKey: entry.taskKey,
         outputSlotId: entry.outputSlotId || 'primary',
         profile: entry.profile || '',
         model: entry.model || '',
+        executorProfile: entry.executorProfile || '',
+        executorModel: entry.executorModel || '',
+        executionOutcome: allowedExecutionOutcomes.has(entry.executionOutcome) ? entry.executionOutcome : '',
+        resultOrigin: allowedResultOrigins.has(entry.resultOrigin) ? entry.resultOrigin : '',
+        ...candidateAudit,
+        responseDiagnostic: globalThis.NexusProviderResponsePolicy?.sanitizeSafeResponseDiagnostic?.(entry.responseDiagnostic) || null,
         legacyVariants: Array.isArray(entry.legacyVariants) ? entry.legacyVariants : [],
         status: entry.manualResolutionValid
             ? 'success'
@@ -5276,6 +5337,8 @@ function normalizeChatContent(content) {
 }
 
 function extractChatCompletionContent(payload) {
+    const safePolicyContent = globalThis.NexusProviderResponsePolicy?.extractFinalContent?.(payload);
+    if (safePolicyContent) return safePolicyContent;
     const choice = payload?.choices?.[0];
     const content = normalizeChatContent(choice?.message?.content ?? choice?.text ?? '');
     return content.trim();
@@ -5336,11 +5399,12 @@ function extractProviderContent(payload, apiConfig) {
     return extractChatCompletionContent(payload);
 }
 
-function createOutputTruncatedError(finishReason) {
+function createOutputTruncatedError(finishReason, safeDiagnostic = null) {
     const reasonText = finishReason ? `，finish_reason: ${finishReason}` : '';
     const error = new Error(`接口返回被截断${reasonText}`);
     error.finishReason = finishReason;
     error.isOutputTruncated = true;
+    if (safeDiagnostic) error.safeDiagnostic = safeDiagnostic;
     return error;
 }
 
@@ -5354,14 +5418,28 @@ async function readModelResponseContent(response, apiConfig, options = {}) {
         payload = null;
     }
 
+    const safeDiagnostic = globalThis.NexusProviderResponsePolicy?.createSafeResponseDiagnostic?.(
+        payload,
+        { httpStatus: response.status, rawText }
+    ) || null;
+    if (safeDiagnostic && typeof options.onSafeDiagnostic === 'function') {
+        try {
+            options.onSafeDiagnostic(safeDiagnostic);
+        } catch (callbackError) {
+            console.warn('Safe response diagnostic callback failed:', callbackError);
+        }
+    }
+
     if (!response.ok) {
-        throw createApiRequestError(
+        const requestError = createApiRequestError(
             getApiResponseErrorMessage(payload, rawText, `HTTP ${response.status}`),
             response.status,
             payload,
             rawText,
             getResponseRetryAfterMs(response)
         );
+        if (safeDiagnostic) requestError.safeDiagnostic = safeDiagnostic;
+        throw requestError;
     }
 
     const protocol = getProviderProtocol(apiConfig?.provider);
@@ -5369,7 +5447,7 @@ async function readModelResponseContent(response, apiConfig, options = {}) {
     const isOutputTruncated = /length|MAX_TOKENS|max_tokens|incomplete|max_output/i.test(String(finishReason || ''));
     const content = extractProviderContent(payload, apiConfig);
     if (content && options.rejectTruncated && isOutputTruncated) {
-        throw createOutputTruncatedError(finishReason);
+        throw createOutputTruncatedError(finishReason, safeDiagnostic);
     }
     if (!content) {
         const reasonText = finishReason ? `，finish_reason: ${finishReason}` : '';
@@ -5377,6 +5455,7 @@ async function readModelResponseContent(response, apiConfig, options = {}) {
         error.finishReason = finishReason;
         error.isOutputTruncated = isOutputTruncated;
         error.isEmptyEndTurn = /end_turn/i.test(String(finishReason || ''));
+        if (safeDiagnostic) error.safeDiagnostic = safeDiagnostic;
         throw error;
     }
 
@@ -7206,7 +7285,28 @@ function initTranslateTool() {
     }
 
     function getTranslateResultProfile(task) {
-        return task?.reportProfile || task?.executorProfile || task?.profile || {};
+        return task?.executorProfile || task?.reportProfile || task?.profile || {};
+    }
+
+    function copyPersistableTranslationAudit(entry = {}) {
+        const candidateAudit = sanitizeTranslationCandidateAudit(entry);
+        const allowedExecutionOutcomes = new Set([
+            'accepted', 'accepted_after_batch_fallback', 'candidate_rejected', 'no_content', 'request_failed',
+            'output_truncated', 'batch_structure_error', 'qa_processing_failed', 'rate_limited', 'quota_depleted',
+            'timeout', 'not_processed', 'import_missing', 'reused', 'passthrough', 'local_rule'
+        ]);
+        const allowedResultOrigins = new Set(['candidate', 'previous', 'none', 'reused', 'source']);
+        const safeDiagnostic = globalThis.NexusProviderResponsePolicy?.sanitizeSafeResponseDiagnostic?.(
+            entry.responseDiagnostic
+        ) || null;
+        return {
+            executorProfile: String(entry.executorProfile || '').slice(0, 160),
+            executorModel: String(entry.executorModel || '').slice(0, 160),
+            executionOutcome: allowedExecutionOutcomes.has(entry.executionOutcome) ? entry.executionOutcome : '',
+            resultOrigin: allowedResultOrigins.has(entry.resultOrigin) ? entry.resultOrigin : '',
+            ...candidateAudit,
+            responseDiagnostic: safeDiagnostic
+        };
     }
 
     function getTranslateOutputSlotId() {
@@ -8567,8 +8667,17 @@ function initTranslateTool() {
             rowNumber: findHeaderColumn(headers, ['原始行号', '行号', 'row number', 'rownumber', 'row']),
             column: findHeaderColumn(headers, ['列', 'column', 'col']),
             outputSlotId: findHeaderColumn(headers, ['输出槽', 'output slot', 'outputslot', 'output slot id', 'outputslotid']),
-            profile: findHeaderColumn(headers, ['通道', 'profile', 'channel']),
-            model: findHeaderColumn(headers, ['模型', 'model']),
+            profile: findHeaderColumn(headers, ['当前结果通道', '通道', 'result profile', 'profile', 'channel']),
+            model: findHeaderColumn(headers, ['当前结果模型', '模型', 'result model', 'model']),
+            executorProfile: findHeaderColumn(headers, ['本轮执行通道', 'attempt profile', 'executor profile', 'executorprofile']),
+            executorModel: findHeaderColumn(headers, ['本轮执行模型', 'attempt model', 'executor model', 'executormodel']),
+            executionOutcome: findHeaderColumn(headers, ['本轮处理结果', 'execution outcome', 'executionoutcome']),
+            resultOrigin: findHeaderColumn(headers, ['当前结果来源', 'result origin', 'resultorigin']),
+            candidateReturned: findHeaderColumn(headers, ['候选是否返回', 'candidate returned', 'candidatereturned']),
+            candidateDecision: findHeaderColumn(headers, ['候选判定', 'candidate decision', 'candidatedecision']),
+            candidateRejectReason: findHeaderColumn(headers, ['候选拒绝原因', 'candidate reject reason', 'candidaterejectreason']),
+            candidateIssueAudit: findHeaderColumn(headers, ['候选问题变化', 'candidate issue audit', 'candidateissueaudit']),
+            responseDiagnostic: findHeaderColumn(headers, ['安全诊断', 'safe diagnostic', 'responsediagnostic']),
             sourceText: findHeaderColumnAvoiding(headers, ['原文', 'source text', 'source', 'original text', 'sourcetext'], ['来源文件', 'source file', 'sourcefile', 'file']),
             referenceText: findHeaderColumn(headers, ['参考译文', '参考', 'reference text', 'reference', 'referenceText']),
             translatedText: findHeaderColumnAvoiding(headers, ['译文', 'translated text', 'translation', 'translatedtext', 'target'], ['参考', 'reference']),
@@ -8644,6 +8753,18 @@ function initTranslateTool() {
                 outputSlotId: readReportCell(row, columns.outputSlotId) || 'primary',
                 profile: readReportCell(row, columns.profile),
                 model: readReportCell(row, columns.model),
+                executorProfile: readReportCell(row, columns.executorProfile),
+                executorModel: readReportCell(row, columns.executorModel),
+                executionOutcome: readReportCell(row, columns.executionOutcome),
+                resultOrigin: readReportCell(row, columns.resultOrigin),
+                candidateReturned: (() => {
+                    const value = normalizeHeaderText(readReportCell(row, columns.candidateReturned));
+                    if (['是', 'yes', 'true', '1'].includes(value)) return true;
+                    if (['否', 'no', 'false', '0'].includes(value)) return false;
+                    return null;
+                })(),
+                candidateDecision: readReportCell(row, columns.candidateDecision),
+                candidateRejectReason: readReportCell(row, columns.candidateRejectReason),
                 sourceText: readReportCell(row, columns.sourceText),
                 referenceText: readReportCell(row, columns.referenceText),
                 translatedText: readReportCell(row, columns.translatedText),
@@ -8657,6 +8778,31 @@ function initTranslateTool() {
                 decisionNote: readReportCell(row, columns.decisionNote),
                 legacyVariants: []
             };
+            const candidateIssueAuditRaw = readReportCell(row, columns.candidateIssueAudit);
+            if (candidateIssueAuditRaw) {
+                try {
+                    const audit = JSON.parse(candidateIssueAuditRaw);
+                    entry.previousIssueIds = Array.isArray(audit.previous) ? audit.previous : [];
+                    entry.candidateIssueIds = Array.isArray(audit.candidate) ? audit.candidate : [];
+                    entry.introducedHardIssueIds = Array.isArray(audit.introducedHard) ? audit.introducedHard : [];
+                    entry.resolvedIssueIds = Array.isArray(audit.resolved) ? audit.resolved : [];
+                } catch {
+                    entry.previousIssueIds = [];
+                    entry.candidateIssueIds = [];
+                    entry.introducedHardIssueIds = [];
+                    entry.resolvedIssueIds = [];
+                }
+            }
+            Object.assign(entry, sanitizeTranslationCandidateAudit(entry));
+            entry.executionOutcome = TRANSLATION_EXECUTION_OUTCOMES.has(entry.executionOutcome)
+                ? entry.executionOutcome
+                : '';
+            entry.resultOrigin = TRANSLATION_RESULT_ORIGINS.has(entry.resultOrigin)
+                ? entry.resultOrigin
+                : '';
+            // Imported reports are user-editable. Runtime diagnostics are deliberately
+            // not rehydrated from workbook JSON, preventing arbitrary text injection.
+            entry.responseDiagnostic = null;
             const legacyVariantsRaw = readReportCell(row, columns.legacyVariants);
             if (legacyVariantsRaw) {
                 try {
@@ -10721,6 +10867,9 @@ function initTranslateTool() {
 
     function isActualTranslationFailureReportEntry(entry) {
         if (!entry) return false;
+        if (['not_processed', 'import_missing', 'candidate_rejected'].includes(String(entry.executionOutcome || ''))) {
+            return false;
+        }
         const status = String(entry.status || '').trim().toLowerCase();
         return status === 'failed' ||
             status === 'error' ||
@@ -10735,7 +10884,14 @@ function initTranslateTool() {
             return '人工已确认 · 接受现译';
         }
         const kind = classifyTranslationReportEntry(entry);
-        if (kind === 'missing') return '未返回译文';
+        if (kind === 'missing') {
+            const outcome = String(entry?.executionOutcome || '');
+            if (outcome === 'not_processed') return '尚未处理';
+            if (outcome === 'import_missing') return '导入报告缺少任务';
+            if (outcome === 'candidate_rejected') return '候选未采用 · 保留此前结果';
+            if (outcome === 'no_content') return '模型未返回可用译文';
+            return '未获得可用译文';
+        }
         if (kind === 'hard') {
             return isActualTranslationFailureReportEntry(entry)
                 ? '翻译失败'
@@ -11035,7 +11191,7 @@ function initTranslateTool() {
         });
     }
 
-    function ensureTranslationReportCoversExpectedTasks(reason = '本轮预期任务未写入结果，可能通道中断、取消或结果未提交') {
+    function ensureTranslationReportCoversExpectedTasks(reason = '本轮预期任务尚未处理或未提交') {
         if (!translationRunReport || translationExpectedTaskMap.size === 0) return;
         const entries = Array.isArray(translationRunReport.entries) ? translationRunReport.entries : [];
         const entriesByKey = new Map(entries.filter(entry => entry?.taskKey).map(entry => [entry.taskKey, entry]));
@@ -11043,35 +11199,25 @@ function initTranslateTool() {
             const snapshot = expectedTask?.snapshot || expectedTask;
             const task = expectedTask?.task || null;
             const existingEntry = entriesByKey.get(taskKey);
-            if (existingEntry) {
-                if (isBlankTranslationResult(existingEntry.translatedText)) {
-                    const failureText = makeTranslateFailureText(snapshot.sourceText, '未返回结果');
-                    if (task) writeTranslationResult(task, failureText, existingEntry.qaStatus || '未返回结果');
-                    Object.assign(existingEntry, snapshot, {
-                        status: 'missing',
-                        translatedText: failureText,
-                        qaStatus: existingEntry.qaStatus || '未返回结果',
-                        completenessRisk: existingEntry.completenessRisk || '',
-                        actionSuggestion: '建议补译',
-                        error: existingEntry.error || reason,
-                        userDecision: '',
-                        revisedText: '',
-                        decisionNote: '',
-                        manualResolutionValid: false,
-                        revisionApplied: false
-                    });
-                }
-                return;
-            }
-            const failureText = makeTranslateFailureText(snapshot.sourceText, '未返回结果');
-            if (task) writeTranslationResult(task, failureText, '未返回结果');
+            if (existingEntry) return;
+            const failureText = makeTranslateFailureText(snapshot.sourceText, '任务未执行');
+            if (task) writeTranslationResult(task, failureText, '尚未处理');
             const missingEntry = {
                 ...snapshot,
                 status: 'missing',
+                profile: '',
+                model: '',
+                executorProfile: '',
+                executorModel: '',
+                executionOutcome: 'not_processed',
+                resultOrigin: 'none',
+                candidateReturned: null,
+                candidateDecision: 'not_attempted',
+                candidateRejectReason: '',
                 translatedText: failureText,
-                qaStatus: '未返回结果',
+                qaStatus: '尚未处理',
                 completenessRisk: '',
-                actionSuggestion: '建议补译',
+                actionSuggestion: '继续未完成任务',
                 error: reason,
                 userDecision: '',
                 revisedText: '',
@@ -11204,17 +11350,19 @@ function initTranslateTool() {
             const requestKind = ['batch', 'single', 'qa-repair'].includes(kind) ? kind : 'other';
             const requestStats = { ...(previous.requestStats || {}) };
             const previousKindStats = requestStats[requestKind] || {};
+            const requestSucceeded = outcome === 'success' || outcome === 'partial';
             requestStats[requestKind] = {
                 requestCount: Number(previousKindStats.requestCount || 0) + 1,
-                successCount: Number(previousKindStats.successCount || 0) + (outcome === 'success' ? 1 : 0),
-                errorCount: Number(previousKindStats.errorCount || 0) + (outcome === 'success' ? 0 : 1),
+                successCount: Number(previousKindStats.successCount || 0) + (requestSucceeded ? 1 : 0),
+                partialCount: Number(previousKindStats.partialCount || 0) + (outcome === 'partial' ? 1 : 0),
+                errorCount: Number(previousKindStats.errorCount || 0) + (requestSucceeded ? 0 : 1),
                 durationMs: Number(previousKindStats.durationMs || 0) + durationMs,
                 submittedItemCount: Number(previousKindStats.submittedItemCount || 0) + Math.max(1, Number(details.itemCount || 1))
             };
             translateChannelProgressState.set(key, {
                 ...previous,
                 profile,
-                consecutiveInterruptions: outcome === 'success'
+                consecutiveInterruptions: requestSucceeded
                     ? 0
                     : Number(previous.consecutiveInterruptions || 0),
                 requestCount,
@@ -11637,7 +11785,9 @@ function initTranslateTool() {
                 format: globalThis.NexusTranslationFormatTokenPolicy?.POLICY_VERSION || '',
                 number: globalThis.NexusTranslationNumberPolicy?.POLICY_VERSION || '',
                 attempt: globalThis.NexusTranslationRepairAttemptPolicy?.POLICY_VERSION || '',
-                repairBatch: globalThis.NexusTranslationRepairBatchPolicy?.POLICY_VERSION || ''
+                repairBatch: globalThis.NexusTranslationRepairBatchPolicy?.POLICY_VERSION || '',
+                translationBatchResponse: globalThis.NexusTranslationBatchResponsePolicy?.POLICY_VERSION || '',
+                providerResponse: globalThis.NexusProviderResponsePolicy?.POLICY_VERSION || ''
             },
             translateStrategy: getTranslateStrategy(),
             referenceColumn: Number.isInteger(referenceColumn) ? referenceColumn : null,
@@ -11750,6 +11900,18 @@ function initTranslateTool() {
             column: task.colIndex + 1,
             profile: resultProfile?.name || getCompactModelLabel(resultProfile),
             model: resultProfile?.model || '',
+            executorProfile: '',
+            executorModel: '',
+            executionOutcome: '',
+            resultOrigin: '',
+            candidateReturned: null,
+            candidateDecision: '',
+            candidateRejectReason: '',
+            previousIssueIds: [],
+            candidateIssueIds: [],
+            introducedHardIssueIds: [],
+            resolvedIssueIds: [],
+            responseDiagnostic: null,
             sourceText: task.text,
             referenceText: task.referenceText || '',
             translatedText: normalizedTranslated,
@@ -11856,6 +12018,7 @@ function initTranslateTool() {
                     (userDecision === 'use_revision' && isTranslationQaPassed(currentQaStatus))
                 );
             Object.assign(reportEntry, {
+                ...copyPersistableTranslationAudit(entry),
                 userDecision,
                 revisedText: entry.revisedText || '',
                 decisionNote: entry.decisionNote || '',
@@ -12071,6 +12234,7 @@ function initTranslateTool() {
                 userDecision: entry.userDecision || '',
                 revisedText: entry.revisedText || '',
                 decisionNote: entry.decisionNote || '',
+                ...copyPersistableTranslationAudit(entry),
                 legacyVariants: Array.isArray(entry.legacyVariants) ? entry.legacyVariants : [],
                 manualResolutionValid: Boolean(entry.manualResolutionValid),
                 revisionApplied: Boolean(entry.revisionApplied)
@@ -12385,8 +12549,15 @@ function initTranslateTool() {
                 rowNumber: task.originalRowNumber || task.rowIndex + 1,
                 column: task.colIndex + 1,
                 outputSlotId: 'primary',
-                profile: task.profile?.name || getCompactModelLabel(task.profile),
-                model: task.profile?.model || '',
+                profile: '',
+                model: '',
+                executorProfile: '',
+                executorModel: '',
+                executionOutcome: 'import_missing',
+                resultOrigin: 'none',
+                candidateReturned: null,
+                candidateDecision: 'not_attempted',
+                candidateRejectReason: '',
                 sourceText: task.text || '',
                 referenceText: task.referenceText || '',
                 translatedText: '',
@@ -12719,6 +12890,7 @@ function initTranslateTool() {
                     (userDecision === 'use_revision' && isTranslationQaPassed(reportEntry.qaStatus))
                 );
             Object.assign(reportEntry, {
+                ...copyPersistableTranslationAudit(existingEntry),
                 userDecision,
                 revisedText: existingEntry.revisedText || '',
                 decisionNote: existingEntry.decisionNote || '',
@@ -12802,6 +12974,7 @@ function initTranslateTool() {
                     (userDecision === 'use_revision' && isTranslationQaPassed(qaStatus))
                 );
             Object.assign(restoredReportEntry, {
+                ...copyPersistableTranslationAudit(entry),
                 userDecision,
                 revisedText: entry.revisedText || '',
                 decisionNote: entry.decisionNote || '',
@@ -12977,6 +13150,7 @@ function initTranslateTool() {
                 repairBatch: globalThis.NexusTranslationRepairBatchPolicy?.POLICY_VERSION || ''
             })],
             ['输出布局', 'canonical-primary-v1（每个逻辑单元格一个当前最佳译文）'],
+            ['结果归因说明', '通道/模型表示当前保留结果来源；本轮执行通道/模型表示最近一次实际尝试'],
             ['本轮修复账本', translationRunReport?.repairAttemptSummary
                 ? JSON.stringify(translationRunReport.repairAttemptSummary)
                 : ''],
@@ -12992,6 +13166,15 @@ function initTranslateTool() {
             '输出槽',
             '通道',
             '模型',
+            '本轮执行通道',
+            '本轮执行模型',
+            '本轮处理结果',
+            '当前结果来源',
+            '候选是否返回',
+            '候选判定',
+            '候选拒绝原因',
+            '候选问题变化',
+            '安全诊断',
             '原文',
             '参考译文',
             '译文',
@@ -13008,6 +13191,7 @@ function initTranslateTool() {
         ];
 
         (translationRunReport?.entries || []).forEach(entry => {
+            const candidateAudit = sanitizeTranslationCandidateAudit(entry);
             rows.push([
                 entry.taskKey || '',
                 getTranslationReportDisplayStatus(entry),
@@ -13019,6 +13203,22 @@ function initTranslateTool() {
                 entry.outputSlotId || 'primary',
                 entry.profile || '',
                 entry.model || '',
+                entry.executorProfile || '',
+                entry.executorModel || '',
+                entry.executionOutcome || '',
+                entry.resultOrigin || '',
+                candidateAudit.candidateReturned === true ? '是' : (candidateAudit.candidateReturned === false ? '否' : ''),
+                candidateAudit.candidateDecision || '',
+                candidateAudit.candidateRejectReason || '',
+                JSON.stringify({
+                    previous: candidateAudit.previousIssueIds,
+                    candidate: candidateAudit.candidateIssueIds,
+                    introducedHard: candidateAudit.introducedHardIssueIds,
+                    resolved: candidateAudit.resolvedIssueIds
+                }),
+                entry.responseDiagnostic && typeof entry.responseDiagnostic === 'object'
+                    ? JSON.stringify(entry.responseDiagnostic)
+                    : '',
                 entry.sourceText || '',
                 entry.referenceText || '',
                 entry.translatedText || '',
@@ -13932,7 +14132,14 @@ function initTranslateTool() {
                     return {
                         accept: false,
                         reason: 'candidate_gate_error',
-                        reasonLabel: '候选质量门禁异常，已保留当前最佳译文'
+                        reasonLabel: '候选质量门禁异常，已保留当前最佳译文',
+                        candidateReturned: true,
+                        candidateDecision: 'rejected',
+                        candidateRejectReason: 'candidate_gate_error',
+                        previousIssueIds: [],
+                        candidateIssueIds: [],
+                        introducedHardIssueIds: [],
+                        resolvedIssueIds: []
                     };
                 }
             }
@@ -14142,9 +14349,20 @@ function initTranslateTool() {
                 `本轮 ${totalTasks} 个任务，已启用 ${translateChannelProgressState.size} 个通道${consistencyMemoryStatus}${translateRunModeStatus}${importReuseStatus}${importMismatchStatus}。通道状态会在进度面板实时更新。`
             );
 
-            function evaluateTranslateResultCandidate(task, translated, qaStatusOverride = null) {
+            function evaluateTranslateResultCandidate(task, translated, qaStatusOverride = null, attemptMeta = {}) {
                 throwIfTranslationCancelled(runId);
-                const candidateTranslated = normalizeTranslateResultText(translated, task.text);
+                const declaredExecutionOutcome = attemptMeta.executionOutcome || task?.lastExecutionOutcome || '';
+                const isNonModelExecution = ['reused', 'passthrough', 'local_rule'].includes(declaredExecutionOutcome);
+                task.executorProfile = isNonModelExecution
+                    ? null
+                    : (task.profile || task.executorProfile || null);
+                const executorProfileName = task.executorProfile?.name ||
+                    (task.executorProfile ? getCompactModelLabel(task.executorProfile) : '');
+                const executorModelName = task.executorProfile?.model || '';
+                const hasExplicitCandidateOutcome = typeof attemptMeta.candidateReturned === 'boolean';
+                const candidateTranslated = hasExplicitCandidateOutcome && !attemptMeta.candidateReturned
+                    ? makeTranslateFailureText(task.text, '本轮未返回候选')
+                    : normalizeTranslateResultText(translated, task.text);
                 const qaTerms = task.glossaryTerms || [];
                 const candidateQaStatus = qaStatusOverride ?? summarizeTranslationQa(
                     task.text,
@@ -14177,6 +14395,33 @@ function initTranslateTool() {
                     candidateEntry.legacyVariants = previousEntry.legacyVariants;
                     candidateEntry.legacyVariantCount = previousEntry.legacyVariants.length;
                 }
+                const candidateReturned = hasExplicitCandidateOutcome
+                    ? attemptMeta.candidateReturned
+                    : (candidateDecision?.candidateReturned ?? !isTranslateFailureText(candidateTranslated));
+                const candidateAudit = {
+                    candidateReturned,
+                    candidateDecision: candidateDecision?.candidateDecision || (candidateReturned ? 'accepted' : 'not_returned'),
+                    candidateRejectReason: candidateDecision?.candidateRejectReason || '',
+                    previousIssueIds: Array.isArray(candidateDecision?.previousIssueIds) ? candidateDecision.previousIssueIds : [],
+                    candidateIssueIds: Array.isArray(candidateDecision?.candidateIssueIds) ? candidateDecision.candidateIssueIds : [],
+                    introducedHardIssueIds: Array.isArray(candidateDecision?.introducedHardIssueIds) ? candidateDecision.introducedHardIssueIds : [],
+                    resolvedIssueIds: Array.isArray(candidateDecision?.resolvedIssueIds) ? candidateDecision.resolvedIssueIds : []
+                };
+                const executionOutcome = attemptMeta.executionOutcome || (candidateDecision?.accept === false
+                        ? (candidateReturned ? 'candidate_rejected' : 'no_content')
+                        : (candidateReturned ? (task?.lastExecutionOutcome || 'accepted') : (task?.lastExecutionOutcome || 'request_failed')));
+                const candidateResultOrigin = executionOutcome === 'reused'
+                    ? 'reused'
+                    : (['passthrough', 'local_rule'].includes(executionOutcome)
+                        ? 'source'
+                        : (candidateReturned ? 'candidate' : 'none'));
+                Object.assign(candidateEntry, candidateAudit, {
+                    executorProfile: executorProfileName,
+                    executorModel: executorModelName,
+                    executionOutcome,
+                    resultOrigin: candidateResultOrigin,
+                    responseDiagnostic: attemptMeta.responseDiagnostic || task?.lastResponseDiagnostic || candidateEntry.responseDiagnostic || null
+                });
                 const preservePreviousRepairEntry = Boolean(
                     shouldGateRepairCandidate &&
                     (
@@ -14206,6 +14451,14 @@ function initTranslateTool() {
                         outputSlotId: getTranslateOutputSlotId(task),
                         sourceText: task.text,
                         referenceText: task.referenceText || '',
+                        executorProfile: executorProfileName,
+                        executorModel: executorModelName,
+                        executionOutcome: attemptMeta.executionOutcome || (candidateReturned ? 'candidate_rejected' : 'no_content'),
+                        resultOrigin: previousEntry?.translatedText ? 'previous' : 'none',
+                        ...candidateAudit,
+                        candidateDecision: candidateReturned ? 'rejected' : 'not_returned',
+                        candidateRejectReason: candidateDecision?.reason || (candidateReturned ? 'candidate_rejected' : 'candidate_empty_or_failed'),
+                        responseDiagnostic: attemptMeta.responseDiagnostic || task?.lastResponseDiagnostic || null,
                         repairDecision: candidateDecision?.reason || 'candidate_rejected'
                     }
                     : candidateEntry;
@@ -14264,6 +14517,8 @@ function initTranslateTool() {
                 if (existingReportIndex >= 0) reportEntries[existingReportIndex] = reportEntry;
                 else reportEntries.push(reportEntry);
                 translationRunReport.entries = reportEntries;
+                task.lastCommitExecutionOutcome = reportEntry.executionOutcome || '';
+                task.lastCommitCandidateReturned = reportEntry.candidateReturned;
                 if (status === 'success') rememberSuccessfulTranslation(task, normalizedTranslated);
                 const repairCellId = getRepairAttemptCellId(task);
                 if (repairAttemptLedger.peek(repairCellId)?.primaryClaims > 0) {
@@ -14271,7 +14526,22 @@ function initTranslateTool() {
                 }
 
                 if (shouldRenderTranslationPreview(status, completedCount)) {
-                    addTranslationItem(translationList, task.text, normalizedTranslated, task.rowIndex, task.colIndex, task.profile, targetLang);
+                    addTranslationItem(
+                        translationList,
+                        task.text,
+                        normalizedTranslated,
+                        task.rowIndex,
+                        task.colIndex,
+                        task.profile,
+                        targetLang,
+                        {
+                            executionOutcome: reportEntry.executionOutcome || '',
+                            resultOrigin: reportEntry.resultOrigin || '',
+                            resultProfile: reportEntry.profile || '',
+                            resultModel: reportEntry.model || '',
+                            candidateReturned: reportEntry.candidateReturned
+                        }
+                    );
                 }
 
                 const progress = Math.round((completedCount / totalTasks) * 100);
@@ -14309,6 +14579,9 @@ function initTranslateTool() {
                 const localTranslation = getNexusStandaloneDiscountTranslation(task?.text, targetLang);
                 if (localTranslation == null) return null;
                 throwIfTranslationCancelled(runId);
+                task.lastExecutionOutcome = 'local_rule';
+                task.lastResponseDiagnostic = null;
+                task.reportProfile = { name: '本地确定性规则', model: '' };
                 updateTranslateChannelProgress(task.profile, {
                     status: 'running',
                     message: '本地折扣规则，无需 AI'
@@ -14432,6 +14705,17 @@ function initTranslateTool() {
             }
 
             function recordChannelOutcome(task, isFailed) {
+                // A syntactically valid model response that was rejected by the
+                // candidate gate is a quality outcome, not a channel outage.
+                // Do not cool down a healthy provider merely because the
+                // previous translation was intentionally preserved.
+                if (
+                    isFailed &&
+                    task?.lastCommitExecutionOutcome === 'candidate_rejected' &&
+                    task?.lastCommitCandidateReturned === true
+                ) {
+                    isFailed = false;
+                }
                 const profileId = getProfileRunId(task.profile);
                 if (!isFailed) {
                     channelFailureStreaks.set(profileId, 0);
@@ -15285,7 +15569,7 @@ function initTranslateTool() {
                             recordChannelOutcome(job.task, Boolean(finalOutcome.failed));
                             recordTargetedRepairQuality(profile, {
                                 acceptedCount: finalOutcome.accepted ? 1 : 0,
-                                rejectedCount: finalOutcome.accepted ? 0 : 1,
+                                rejectedCount: finalOutcome.candidateReturned && !finalOutcome.accepted ? 1 : 0,
                                 fallbackCount: finalOutcome.usedSingleFallback ? 1 : 0
                             });
                             job.claim.resolve(finalOutcome);
@@ -15314,7 +15598,8 @@ function initTranslateTool() {
                     );
                     const fallbackCount = finalOutcomes.filter(outcome => outcome.usedSingleFallback).length;
                     const acceptedCount = finalOutcomes.filter(outcome => outcome.accepted).length;
-                    const rejectedCount = Math.max(0, finalOutcomes.length - acceptedCount);
+                    const rejectedCount = finalOutcomes.filter(outcome => outcome.candidateReturned && !outcome.accepted).length;
+                    const noCandidateCount = finalOutcomes.filter(outcome => !outcome.candidateReturned).length;
                     const transportErrors = requestResult.transportErrors || [];
                     if (transportErrors.length) {
                         transportErrors.forEach(() => recordChannelOutcome(operation.jobs[0].task, true));
@@ -15338,11 +15623,11 @@ function initTranslateTool() {
                         unknownIds: requestResult.unknownIds,
                         error: requestResult.requestError,
                         rejectedCount,
-                        clean: !requestResult.requestError && !requestResult.structuralError && fallbackCount === 0 && rejectedCount === 0
+                        clean: !requestResult.requestError && !requestResult.structuralError && fallbackCount === 0 && rejectedCount === 0 && noCandidateCount === 0
                     });
                     updateTranslateChannelProgress(profile, {
                         status: 'retrying',
-                        message: `定向微批提交 ${operation.jobs.length} 条，采用 ${acceptedCount}，保留 ${rejectedCount}${fallbackCount ? `，单条回退 ${fallbackCount}` : ''}；后续同类规划批宽 ${nextState.batchSize || 4}`
+                        message: `定向微批提交 ${operation.jobs.length} 条，采用 ${acceptedCount}，候选未采用 ${rejectedCount}${noCandidateCount ? `，未返回候选 ${noCandidateCount}` : ''}${fallbackCount ? `，单条回退 ${fallbackCount}` : ''}；后续同类规划批宽 ${nextState.batchSize || 4}`
                     });
                     operation.jobs.forEach((job, index) => job.claim.resolve(finalOutcomes[index]));
                 }, workerCount, { stopOnError: true }).catch(error => {
@@ -15362,7 +15647,14 @@ function initTranslateTool() {
                             const evaluation = evaluateTranslateResultCandidate(
                                 task,
                                 prepared.translated,
-                                outcome.qaStatus ?? prepared.qaStatus
+                                outcome.qaStatus ?? prepared.qaStatus,
+                                {
+                                    candidateReturned: Boolean(outcome.candidateReturned),
+                                    executionOutcome: outcome.candidateReturned
+                                        ? ''
+                                        : (outcome.failed ? 'request_failed' : 'no_content'),
+                                    responseDiagnostic: outcome.responseDiagnostic || null
+                                }
                             );
                             if (outcome.candidateReturned) {
                                 repairAttemptLedger.recordCandidate(
@@ -15470,6 +15762,7 @@ function initTranslateTool() {
 
             function replaceCommittedTranslateResult(task, translated, qaStatusOverride = null) {
                 throwIfTranslationCancelled(runId);
+                task.executorProfile = task.profile || task.executorProfile || null;
                 translationRunReport = translationRunReport || { entries: [] };
                 const reportEntries = translationRunReport.entries || [];
                 const replaceableTaskKeys = new Set([task.taskKey, task.retryOfTaskKey, task.outputTaskKey].filter(Boolean));
@@ -15488,21 +15781,64 @@ function initTranslateTool() {
                     task
                 );
                 const reportEntry = buildTranslationReportEntry(task, normalizedTranslated, qaStatus);
+                let decision = null;
                 if (previousEntry) {
-                    const decision = decideTranslateCandidateSafely({
+                    decision = decideTranslateCandidateSafely({
                         previous: { ...previousEntry, text: previousEntry.translatedText },
                         candidate: { ...reportEntry, text: reportEntry.translatedText },
                         selectedIssueIds: task.repairTargetIssueIds || options.selectedIssueIds || [],
                         mode: (task.repairTargetIssueIds?.length || options.selectedIssueIds?.length) ? 'targeted' : 'ordinary'
                     });
                     if (!decision.accept) {
+                        const audit = sanitizeTranslationCandidateAudit(decision);
+                        const preservedEntry = {
+                            ...previousEntry,
+                            taskKey: getTranslateOutputTaskKey(task),
+                            sourceFile: task.source?.fileName || previousEntry.sourceFile || '',
+                            sheetName: task.source?.sheetName || previousEntry.sheetName || '',
+                            rowNumber: task.originalRowNumber || task.rowIndex + 1,
+                            column: task.colIndex + 1,
+                            outputSlotId: getTranslateOutputSlotId(task),
+                            sourceText: task.text,
+                            referenceText: task.referenceText || '',
+                            executorProfile: task.profile?.name || getCompactModelLabel(task.profile),
+                            executorModel: task.profile?.model || '',
+                            executionOutcome: audit.candidateReturned ? 'candidate_rejected' : 'no_content',
+                            resultOrigin: previousEntry?.translatedText ? 'previous' : 'none',
+                            ...audit,
+                            responseDiagnostic: task.lastResponseDiagnostic || null,
+                            repairDecision: decision.reason
+                        };
+                        const compactEntry = compactTranslationProgressEntry(preservedEntry);
+                        translationProgressTasks.set(task.taskKey, compactEntry || preservedEntry);
+                        queueTranslationTaskProgress(preservedEntry);
+                        if (existingReportIndex >= 0) reportEntries[existingReportIndex] = preservedEntry;
+                        else reportEntries.push(preservedEntry);
+                        translationRunReport.entries = reportEntries;
                         return {
                             status: previousStatus,
-                            entry: { ...previousEntry, repairDecision: decision.reason },
+                            entry: preservedEntry,
                             changed: false
                         };
                     }
                 }
+
+                const acceptedAudit = sanitizeTranslationCandidateAudit(decision || {
+                    candidateReturned: !isTranslateFailureText(normalizedTranslated),
+                    candidateDecision: isTranslateFailureText(normalizedTranslated) ? 'not_returned' : 'accepted',
+                    candidateRejectReason: isTranslateFailureText(normalizedTranslated) ? 'request_failed' : '',
+                    previousIssueIds: [],
+                    candidateIssueIds: [],
+                    introducedHardIssueIds: [],
+                    resolvedIssueIds: []
+                });
+                Object.assign(reportEntry, acceptedAudit, {
+                    executorProfile: task.profile?.name || getCompactModelLabel(task.profile),
+                    executorModel: task.profile?.model || '',
+                    executionOutcome: acceptedAudit.candidateReturned ? 'accepted' : 'request_failed',
+                    resultOrigin: acceptedAudit.candidateReturned ? 'candidate' : 'none',
+                    responseDiagnostic: task.lastResponseDiagnostic || null
+                });
 
                 writeTranslationResult(task, normalizedTranslated, qaStatus);
                 if (task.retryOfTaskKey && task.retryOfTaskKey !== task.taskKey) {
@@ -15890,11 +16226,30 @@ function initTranslateTool() {
                             requestOwner: true
                         };
                     }
-                    const prepared = await prepareTranslationForCommit(task, repairResult.value, {
-                        deferAutoQaRepair: true,
-                        maxRepairAttempts: 0
-                    });
-                    const evaluation = evaluateTranslateResultCandidate(task, prepared.translated, prepared.qaStatus);
+                    const repairCandidateReturned = !repairResult.failed &&
+                        !isBlankTranslationResult(repairResult.value) &&
+                        !isTranslateFailureText(repairResult.value);
+                    const repairExecutionOutcome = repairResult.failed
+                        ? classifyTranslateExecutionError(repairResult.error)
+                        : (!repairResult.requestOwner ? 'reused' : 'accepted');
+                    task.lastExecutionOutcome = repairExecutionOutcome;
+                    task.lastResponseDiagnostic = repairResult.error?.safeDiagnostic || null;
+                    const prepared = repairCandidateReturned
+                        ? await prepareTranslationForCommit(task, repairResult.value, {
+                            deferAutoQaRepair: true,
+                            maxRepairAttempts: 0
+                        })
+                        : { translated: '', qaStatus: null };
+                    const evaluation = evaluateTranslateResultCandidate(
+                        task,
+                        prepared.translated,
+                        prepared.qaStatus,
+                        {
+                            candidateReturned: repairCandidateReturned,
+                            executionOutcome: repairExecutionOutcome,
+                            responseDiagnostic: task.lastResponseDiagnostic
+                        }
+                    );
                     const status = commitTranslateResult(task, prepared.translated, prepared.qaStatus, evaluation);
                     if (
                         evaluation.accepted &&
@@ -15923,6 +16278,9 @@ function initTranslateTool() {
                         status: 'running',
                         message: '无需翻译，原样写入'
                     });
+                    task.lastExecutionOutcome = 'passthrough';
+                    task.lastResponseDiagnostic = null;
+                    task.reportProfile = { name: '原文透传', model: '' };
                     return commitTranslateResult(task, task.text, '通过');
                 }
                 const memoryKey = buildTranslationMemoryKey(task);
@@ -15931,6 +16289,8 @@ function initTranslateTool() {
                         status: 'running',
                         message: '复用同文翻译'
                     });
+                    task.lastExecutionOutcome = 'reused';
+                    task.lastResponseDiagnostic = null;
                     const result = await prepareTranslationForCommit(task, translationMemory.get(memoryKey));
                     return commitTranslateResult(task, result.translated, result.qaStatus);
                 }
@@ -15941,6 +16301,8 @@ function initTranslateTool() {
                     });
                     const translated = await translationMemoryPromises.get(memoryKey);
                     throwIfTranslationCancelled(runId);
+                    task.lastExecutionOutcome = 'reused';
+                    task.lastResponseDiagnostic = null;
                     const result = await prepareTranslationForCommit(task, translated);
                     return commitTranslateResult(task, result.translated, result.qaStatus);
                 }
@@ -15986,7 +16348,6 @@ function initTranslateTool() {
 
                 async function worker() {
                     while (true) {
-                        if (firstError) return;
                         const index = nextIndex++;
                         if (index >= tasks.length) return;
                         try {
@@ -15997,6 +16358,7 @@ function initTranslateTool() {
                                 result: await prepareTranslationForCommit(task, translated)
                             };
                         } catch (error) {
+                            if (error?.name === 'AbortError' || error?.message === 'TRANSLATION_CANCELLED') throw error;
                             firstError ||= error;
                             results[index] = { error };
                         }
@@ -16046,6 +16408,9 @@ function initTranslateTool() {
                             status: 'running',
                             message: '无需翻译，原样写入'
                         });
+                        task.lastExecutionOutcome = 'passthrough';
+                        task.lastResponseDiagnostic = null;
+                        task.reportProfile = { name: '原文透传', model: '' };
                         commitTranslateResult(task, task.text, '通过');
                         continue;
                     }
@@ -16055,6 +16420,8 @@ function initTranslateTool() {
                             status: 'running',
                             message: '复用同文翻译'
                         });
+                        task.lastExecutionOutcome = 'reused';
+                        task.lastResponseDiagnostic = null;
                         const result = await prepareTranslationForCommit(task, translationMemory.get(memoryKey));
                         commitTranslateResult(task, result.translated, result.qaStatus);
                         continue;
@@ -16066,6 +16433,8 @@ function initTranslateTool() {
                         });
                         const translated = await translationMemoryPromises.get(memoryKey);
                         throwIfTranslationCancelled(runId);
+                        task.lastExecutionOutcome = 'reused';
+                        task.lastResponseDiagnostic = null;
                         const result = await prepareTranslationForCommit(task, translated);
                         commitTranslateResult(task, result.translated, result.qaStatus);
                         continue;
@@ -16121,7 +16490,7 @@ function initTranslateTool() {
                 let batchFailureSummary = '';
                 let batchFailureError = null;
                 const requestLimiter = getTranslationRequestLimiter(profile);
-                const translations = await translateBatchWithRetry(
+                const batchResult = await translateBatchWithRetry(
                     representativeTasks,
                     sourceLang,
                     targetLang,
@@ -16151,47 +16520,108 @@ function initTranslateTool() {
                 );
                 throwIfTranslationCancelled(runId);
 
-                if (translations && translations.length === representativeTasks.length) {
+                if (batchResult?.valuesById?.size) {
                     let failedInBatch = localDiscountFailureCount;
+                    const batchTranslations = representativeTasks.map((task, index) =>
+                        batchResult.valuesById.get(getTranslationBatchRequestId(task, index)) || ''
+                    );
+                    const validRepresentativeIndexes = representativeTasks
+                        .map((_, index) => index)
+                        .filter(index => !isBlankTranslationResult(batchTranslations[index]));
+                    const validRepresentativeTasks = validRepresentativeIndexes.map(index => representativeTasks[index]);
+                    const validTranslations = validRepresentativeIndexes.map(index => batchTranslations[index]);
                     const preparedBatch = await prepareTranslationBatchResults(
-                        representativeTasks,
-                        translations,
+                        validRepresentativeTasks,
+                        validTranslations,
                         profile,
                         options.qaRepairConcurrency
                     );
-                    let firstPreparationError = preparedBatch.firstError;
                     const preparedResults = preparedBatch.results;
-                    for (const [index, task] of representativeTasks.entries()) {
-                        if (preparedResults[index]?.error) {
-                            firstPreparationError ||= preparedResults[index].error;
-                            continue;
+                    const fallbackRepresentativeIndexes = new Set(
+                        representativeTasks
+                            .map((_, index) => index)
+                            .filter(index => isBlankTranslationResult(batchTranslations[index]))
+                    );
+                    for (const [preparedIndex, task] of validRepresentativeTasks.entries()) {
+                        const representativeIndex = validRepresentativeIndexes[preparedIndex];
+                        task.lastResponseDiagnostic = batchResult.responseDiagnostic || null;
+                        task.lastExecutionOutcome = 'accepted';
+                        const preparationError = preparedResults[preparedIndex]?.error ||
+                            (!preparedResults[preparedIndex] ? new Error('QA 预处理未返回结果') : null);
+                        const result = preparedResults[preparedIndex]?.result;
+                        const translatedForCommit = preparationError || !result
+                            ? batchTranslations[representativeIndex]
+                            : result.translated;
+                        const qaStatusForCommit = preparationError || !result
+                            ? '需确认：译文已返回，但本地质检未完成'
+                            : result.qaStatus;
+                        if (preparationError || !result) {
+                            batchFailureError ||= preparationError || new Error('QA 预处理未返回结果');
+                            task.lastExecutionOutcome = 'qa_processing_failed';
                         }
-                        if (!preparedResults[index]) {
-                            firstPreparationError ||= new Error('QA 预处理未返回结果');
-                            continue;
-                        }
-                        const result = preparedResults[index]?.result;
-                        if (!result) {
-                            firstPreparationError ||= new Error('QA 预处理未返回结果');
-                            continue;
-                        }
-                        const status = commitTranslateResult(task, result.translated, result.qaStatus);
-                        recordChannelOutcome(task, status === 'failed' || status === 'missing');
+                        const status = commitTranslateResult(task, translatedForCommit, qaStatusForCommit);
+                        recordChannelOutcome(task, false);
                         if (status !== 'success') failedInBatch++;
                         const memoryKey = buildTranslationMemoryKey(task);
                         for (const duplicateTask of (duplicateTasksByMemoryKey.get(memoryKey) || [])) {
-                            const duplicateStatus = commitTranslateResult(duplicateTask, result.translated, result.qaStatus);
+                            duplicateTask.lastResponseDiagnostic = null;
+                            duplicateTask.lastExecutionOutcome = 'reused';
+                            const duplicateStatus = commitTranslateResult(duplicateTask, translatedForCommit, qaStatusForCommit);
                             if (duplicateStatus !== 'success') failedInBatch++;
                         }
                     }
-                    if (firstPreparationError) throw firstPreparationError;
+
+                    const fallbackTasks = [];
+                    [...fallbackRepresentativeIndexes]
+                        .sort((left, right) => left - right)
+                        .forEach(index => {
+                            const task = representativeTasks[index];
+                            if (!task) return;
+                            fallbackTasks.push(task);
+                            const memoryKey = buildTranslationMemoryKey(task);
+                            fallbackTasks.push(...(duplicateTasksByMemoryKey.get(memoryKey) || []));
+                        });
+
+                    if (fallbackTasks.length) {
+                        const partialError = new Error(
+                            `批量翻译仅接收 ${representativeTasks.length - fallbackRepresentativeIndexes.size}/${representativeTasks.length} 条，缺失项单独补跑`
+                        );
+                        partialError.isBatchStructureError = true;
+                        partialError.batchParseSummary = {
+                            mode: batchResult.parsed?.mode || '',
+                            structuralError: batchResult.parsed?.structuralError || '',
+                            expectedCount: representativeTasks.length,
+                            validCount: representativeTasks.length - fallbackRepresentativeIndexes.size,
+                            missingCount: fallbackRepresentativeIndexes.size,
+                            unknownCount: batchResult.parsed?.unknownIds?.length || 0,
+                            duplicateCount: batchResult.parsed?.duplicateIds?.length || 0
+                        };
+                        batchFailureError = partialError;
+                        batchFailureSummary = '批量返回不完整，已保留有效译文并仅补跑缺失项';
+                        recordTranslateChannelBatchSplit(
+                            profile,
+                            fallbackTasks.length,
+                            fallbackTasks.map(() => 1),
+                            batchFailureSummary
+                        );
+                        updateTranslateChannelProgress(profile, {
+                            status: 'retrying',
+                            message: `批量缺少 ${fallbackRepresentativeIndexes.size} 项，仅对缺失项做一次单条补跑`
+                        });
+                        for (const fallbackTask of fallbackTasks) {
+                            fallbackTask.batchFallbackTriggered = true;
+                            fallbackTask.batchFallbackDiagnostic = batchResult.responseDiagnostic || null;
+                            const fallbackStatus = await processTranslateTask(fallbackTask);
+                            if (fallbackStatus !== 'success') failedInBatch++;
+                        }
+                    }
                     return {
-                        completed: representativeTasks.length,
+                        completed: tasks.length,
                         failed: failedInBatch,
                         shouldSlowDown: getTranslationChannelThrottleLevel(profile) > throttleLevelBefore,
                         throttleLevel: getTranslationChannelThrottleLevel(profile),
                         reason: hasNewChannelIncident()
-                            ? '批量翻译或 QA 修复发生通道异常'
+                            ? (fallbackTasks.length ? '批量缺失项已完成有界补跑' : '批量翻译或 QA 修复发生通道异常')
                             : (failedInBatch > 0 ? '批量结果存在失败或需确认项' : '')
                     };
                 }
@@ -16805,7 +17235,7 @@ function initTranslateTool() {
         return completedCount % TRANSLATION_PREVIEW_RENDER_EVERY === 0;
     }
 
-    function addTranslationItem(list, original, translated, row, col, profile = null, targetLang = '') {
+    function addTranslationItem(list, original, translated, row, col, profile = null, targetLang = '', audit = {}) {
         const item = document.createElement('div');
         item.className = 'translation-item';
 
@@ -16813,9 +17243,23 @@ function initTranslateTool() {
         const truncatedTranslated = translated.length > 50 ? translated.substring(0, 50) + '...' : translated;
         const modelLabel = profile ? getApiProfileLabel(profile) : '';
         const languageLabel = targetLang ? getTranslateLanguageName(targetLang) : '';
+        const originLabel = [audit.resultProfile, audit.resultModel].filter(Boolean).join(' / ');
+        const executionStateLabels = {
+            candidate_rejected: '本轮候选未通过确定性质检，已保留此前结果',
+            no_content: '本轮未获得可用候选，已保留此前结果',
+            request_failed: '本轮请求未获得可用译文',
+            batch_missing: '批量返回缺少此项，已进入单项补跑',
+            not_processed: '任务结束前尚未处理',
+            import_missing: '导入报告缺少此任务，并非模型返回失败'
+        };
+        const stateLabel = executionStateLabels[audit.executionOutcome] || '';
+        const originHint = stateLabel && audit.resultOrigin === 'previous' && originLabel
+            ? `；当前显示结果来源：${originLabel}`
+            : '';
 
         item.innerHTML = `
-            <div class="translation-row-info">行 ${row + 1}, 列 ${col + 1}${languageLabel ? ` · ${escapeHtml(languageLabel)}` : ''}${modelLabel ? ` · ${escapeHtml(modelLabel)}` : ''}</div>
+            <div class="translation-row-info">行 ${row + 1}, 列 ${col + 1}${languageLabel ? ` · ${escapeHtml(languageLabel)}` : ''}${modelLabel ? ` · 本轮执行 ${escapeHtml(modelLabel)}` : ''}</div>
+            ${stateLabel ? `<div class="translation-row-state">${escapeHtml(stateLabel + originHint)}</div>` : ''}
             <div class="translation-content">
                 <div class="translation-original">${escapeHtml(truncatedOriginal)}</div>
                 <div class="translation-arrow">→</div>
@@ -17262,26 +17706,42 @@ function initTranslateTool() {
         return message.slice(0, 80);
     }
 
-    function parseBatchTranslationResponse(text, expectedCount) {
-        const cleaned = cleanTranslationResponse(text);
-        const jsonText = cleaned.includes('[')
-            ? cleaned.slice(cleaned.indexOf('['), cleaned.lastIndexOf(']') + 1)
-            : cleaned;
-        const data = JSON.parse(jsonText);
-        if (!Array.isArray(data) || data.length !== expectedCount) {
-            throw new Error('批量翻译返回数量不一致');
+    function classifyTranslateExecutionError(error) {
+        const message = String(error?.message || '').toLowerCase();
+        if (error?.isOutputTruncated) return 'output_truncated';
+        if (error?.code === 'EMPTY_PROVIDER_CONTENT' || error?.isEmptyEndTurn || /返回为空|空译文|empty/.test(message)) {
+            return 'no_content';
         }
+        if (error?.isBatchStructureError || error?.isRepairBatchStructureError) return 'batch_structure_error';
+        if (error?.isRateLimited) return 'rate_limited';
+        if (error?.isQuotaDepleted) return 'quota_depleted';
+        if (error?.isTimeout || /timeout|timed out|超时/.test(message)) return 'timeout';
+        return 'request_failed';
+    }
 
-        return data.map(item => {
-            if (typeof item === 'string') return cleanTranslationResponse(item);
-            if (item && typeof item === 'object') {
-                const explicitTranslation = item.translation || item.translatedText || item.translated || item.target || item.result || item.output || item.value || '';
-                if (explicitTranslation) return cleanTranslationResponse(explicitTranslation);
-                const looksLikeEchoedInput = 'id' in item || 'sourceText' in item || 'referenceText' in item || 'maxVisibleLength' in item || 'glossary' in item;
-                return looksLikeEchoedInput ? '' : cleanTranslationResponse(item.text || '');
-            }
-            return '';
-        });
+    function parseBatchTranslationResponse(text, expectedIds = []) {
+        const policy = globalThis.NexusTranslationBatchResponsePolicy;
+        if (!policy?.parseTranslationBatchResponse) {
+            const error = new Error('普通批量响应策略未加载');
+            error.isBatchStructureError = true;
+            throw error;
+        }
+        return policy.parseTranslationBatchResponse(text, expectedIds);
+    }
+
+    function getTranslationBatchRequestId(task, index = 0) {
+        const taskKey = String(task?.taskKey || task?.outputTaskKey || '').trim();
+        return taskKey ? `task:${taskKey}` : `legacy:${index + 1}`;
+    }
+
+    function assertUniqueTranslationBatchIds(expectedIds = []) {
+        const normalized = expectedIds.map(id => String(id || '').trim());
+        if (normalized.some(id => !id) || new Set(normalized).size !== normalized.length) {
+            const error = new Error('批量翻译任务 ID 缺失或重复');
+            error.isBatchStructureError = true;
+            throw error;
+        }
+        return normalized;
     }
 
     function buildTranslateReferenceInstruction(context = {}, targetLang = '') {
@@ -17305,15 +17765,16 @@ function initTranslateTool() {
     }
 
     function buildTraditionalChineseBatchTranslatePromptParts(textsOrTasks, sourceLang, rules) {
-        const texts = (textsOrTasks || []).map(item => {
+        const texts = (textsOrTasks || []).map((item, index) => {
             if (item && typeof item === 'object' && 'text' in item) {
-                return String(item.text || '');
+                return { id: getTranslationBatchRequestId(item, index), text: String(item.text || '') };
             }
-            return String(item || '');
+            return { id: getTranslationBatchRequestId(null, index), text: String(item || '') };
         });
+        const expectedIds = assertUniqueTranslationBatchIds(texts.map(item => item.id));
         const formatRules = buildTraditionalChineseFormatRules(rules);
         const systemPrompt = `你是简体中文到繁体中文转换器，只做完整繁简转换。
-只返回 JSON 字符串数组，数组长度和顺序必须与 texts 完全一致。不要解释，不要 Markdown，不要返回对象。
+只返回 JSON 对象数组，每项格式必须为 {"id":"输入ID","translation":"完整繁中译文"}。必须保留输入 ID，可乱序返回，但不得遗漏、重复或新增 ID。不要解释，不要 Markdown，不要回显原文字段。
 要求：
 1. 每个输出必须覆盖整个输入，不能摘要、不能省略末尾词，不能只输出命中的术语片段。
 2. 保留 __PH_1__、%s、%d、数字、HTML/color/outline 标签和字面量 \\n。
@@ -17323,6 +17784,7 @@ ${JSON.stringify(texts)}`;
         return {
             systemPrompt,
             userPrompt,
+            expectedIds,
             cacheKey: makePromptCacheKey('translate_zh_tw_simple', `${sourceLang}:${systemPrompt}`)
         };
     }
@@ -17365,7 +17827,7 @@ ${JSON.stringify(texts)}`;
         const items = (textsOrTasks || []).map((item, index) => {
             if (item && typeof item === 'object' && 'text' in item) {
                 const row = {
-                    id: index + 1,
+                    id: getTranslationBatchRequestId(item, index),
                     text: String(item.text || ''),
                     referenceText: String(item.referenceText || ''),
                     sourceColumnName: item.sourceColumnName || '',
@@ -17380,7 +17842,7 @@ ${JSON.stringify(texts)}`;
                 return row;
             }
             const row = {
-                id: index + 1,
+                id: getTranslationBatchRequestId(null, index),
                 text: String(item || ''),
                 referenceText: '',
                 sourceColumnName: '',
@@ -17439,9 +17901,9 @@ ${JSON.stringify(texts)}`;
         const targetLanguagePurityInstruction =
             `最终译文必须严格使用${langNames[targetLang] || targetLang}，不得误用或混入其他语言；即使另一种语言使用相同字母或文字系统也不例外，受保护占位符、品牌、代码和公认游戏/UI缩写除外。`;
         const systemPrompt = `You are a batch game localization translation engine. Translate every item in texts into ${langNames[targetLang] || targetLang}.
-CRITICAL OUTPUT FORMAT: return ONLY a JSON array of translated strings, exactly the same length and order as texts. Example: ["Админ системы","Админ гильдии"]. Never return objects. Never return id/text/sourceText/referenceText/maxVisibleLength/glossary. Never echo the input JSON. No explanation. No Markdown.
+CRITICAL OUTPUT FORMAT: return ONLY a JSON array of objects shaped exactly as {"id":"input ID","translation":"complete target translation"}. Preserve every input ID. Results may be reordered, but IDs must never be omitted, duplicated, or invented. Never echo source fields. No explanation. No Markdown.
 你是批量游戏本地化翻译引擎。将 texts 中的游戏文本逐条翻译成${langNames[targetLang] || targetLang}。
-只返回 JSON 字符串数组，数组长度必须等于 texts 数量，顺序必须一致。不要返回对象数组，不要返回 id/text/sourceText/referenceText/maxVisibleLength/glossary，不要回显输入 JSON。不要解释，不要输出思考过程，不要 Markdown。
+只返回 JSON 对象数组，每项严格为 {"id":"输入ID","translation":"完整目标语译文"}。保留每个输入 ID；可以乱序，但不得遗漏、重复或新增 ID。不要回显 text/sourceText/referenceText/maxVisibleLength/glossary。不要解释，不要输出思考过程，不要 Markdown。
 要求：完整翻译；保留 __PH_1__ 这类受保护占位符或UI标记、数字、HTML/颜色/outline 标签；语言自然简洁；${targetLanguagePurityInstruction}如果原文包含字面量 \\n，译文也必须保留对应受保护占位符，不要改成真实换行；${sourceCopyGuard}${batchLengthRequirement}${compactStyleInstruction}${referenceUiInstruction ? ` ${referenceUiInstruction}` : ''}${hasReference ? ` 如果条目包含 referenceText，必须以 sourceText 理解原意，并参考 referenceText 的术语、语气、UI长度和简短表达；当普通术语表英文参考与 referenceText 不同时，以 referenceText 作为当前上下文优先参考；两者冲突时以 sourceText 含义为准。${nonEnglishReferenceCopyGuard}` : ''}${hasItemGlossary ? ' 如果条目包含 glossary，=> 是目标语硬性术语必须使用，≈ 是概念参考不能直接照抄为最终译文。' : ''}${discountSection}
 项目规则：${compactRules || '按通用游戏本地化规范执行'}${glossarySection}${consistencySection}`;
         const userPrompt = `texts:
@@ -17450,6 +17912,7 @@ ${JSON.stringify(payload)}`;
         return {
             systemPrompt,
             userPrompt,
+            expectedIds: assertUniqueTranslationBatchIds(items.map(item => item.id)),
             cacheKey: makePromptCacheKey('translate', `${sourceLang}:${targetLang}:${systemPrompt}`)
         };
     }
@@ -17483,6 +17946,7 @@ ${text}`;
 
         for (let attempt = 0; attempt < retries; attempt++) {
             let requestStartedAt = 0;
+            let responseDiagnostic = null;
             try {
                 await waitForNetwork(signal);
                 if (signal?.aborted) {
@@ -17526,6 +17990,9 @@ ${text}`;
                     batchConsistencyTerms,
                     batchConsistencyExamples
                 );
+                const protectedTaskById = new Map(
+                    protectedTasks.map((task, index) => [getTranslationBatchRequestId(task, index), task])
+                );
                 const content = await runWithTranslationRequestLimiter(
                     options.requestLimiter,
                     async () => {
@@ -17562,23 +18029,58 @@ ${text}`;
                             },
                             signal,
                             API_REQUEST_TIMEOUT_MS,
-                            { rejectTruncated: true }
+                            {
+                                rejectTruncated: true,
+                                onSafeDiagnostic: diagnostic => {
+                                    responseDiagnostic = diagnostic;
+                                }
+                            }
                         );
                     }
                 );
-                const translations = parseBatchTranslationResponse(content, tasks.length);
-                const restoredTranslations = translations.map((translation, index) =>
-                    restoreProtectedPlaceholders(translation, protectedTasks[index]?.placeholderReplacements || [])
-                );
-                if (restoredTranslations.every(translation => !isBlankTranslationResult(translation))) {
-                    recordTranslateRequestTiming(apiConfig, 'batch', requestStartedAt, {
-                        itemCount: tasks.length,
-                        attempt: attempt + 1,
-                        outcome: 'success'
-                    });
-                    return restoredTranslations;
+                const parsed = parseBatchTranslationResponse(content, promptParts.expectedIds);
+                const valuesById = new Map();
+                const rawValues = parsed?.valuesById instanceof Map
+                    ? parsed.valuesById
+                    : new Map(Object.entries(parsed?.valuesById || {}));
+                promptParts.expectedIds.forEach(id => {
+                    const rawTranslation = rawValues.get(id);
+                    if (isBlankTranslationResult(rawTranslation)) return;
+                    const protectedTask = protectedTaskById.get(id);
+                    const restored = restoreProtectedPlaceholders(
+                        cleanTranslationResponse(rawTranslation),
+                        protectedTask?.placeholderReplacements || []
+                    );
+                    if (!isBlankTranslationResult(restored)) valuesById.set(id, restored);
+                });
+                const missingIds = promptParts.expectedIds.filter(id => !valuesById.has(id));
+                if (!valuesById.size) {
+                    const structureError = new Error('批量翻译返回无有效结果');
+                    structureError.isBatchStructureError = true;
+                    structureError.batchParseSummary = {
+                        mode: parsed?.mode || '',
+                        structuralError: parsed?.structuralError || '',
+                        expectedCount: promptParts.expectedIds.length,
+                        validCount: 0,
+                        missingCount: missingIds.length,
+                        unknownCount: parsed?.unknownIds?.length || 0,
+                        duplicateCount: parsed?.duplicateIds?.length || 0
+                    };
+                    if (responseDiagnostic) structureError.safeDiagnostic = responseDiagnostic;
+                    throw structureError;
                 }
-                throw new Error('批量翻译返回空译文');
+                recordTranslateRequestTiming(apiConfig, 'batch', requestStartedAt, {
+                    itemCount: tasks.length,
+                    attempt: attempt + 1,
+                    outcome: missingIds.length ? 'partial' : 'success'
+                });
+                return {
+                    valuesById,
+                    missingIds,
+                    parsed,
+                    partial: missingIds.length > 0,
+                    responseDiagnostic
+                };
             } catch (error) {
                 if (signal?.aborted || error.name === 'AbortError' || error.message === 'TRANSLATION_CANCELLED') {
                     throw error;
@@ -17589,7 +18091,10 @@ ${text}`;
                     outcome: 'error',
                     error
                 });
-                const willRetry = attempt < retries - 1 && !isSplittableTranslationBatchError(error);
+                if (error?.safeDiagnostic) responseDiagnostic = error.safeDiagnostic;
+                const willRetry = attempt < retries - 1 && (
+                    Boolean(error?.isOutputTruncated) || !isSplittableTranslationBatchError(error)
+                );
                 console.warn(`Batch translate attempt ${attempt + 1} failed:`, error);
                 options.onBatchStatus?.({
                     attempt: attempt + 1,
@@ -17620,6 +18125,11 @@ ${text}`;
         }
 
         console.log(`🤖 正在使用翻译通道: ${apiConfig.name || getPlatformName(apiConfig.provider)} / ${model}`);
+
+        if (context && typeof context === 'object') {
+            context.lastExecutionOutcome = '';
+            context.lastResponseDiagnostic = null;
+        }
 
         let lastError = null;
         for (let attempt = 0; attempt < retries; attempt++) {
@@ -17668,6 +18178,10 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                         attempt: attempt + 1,
                         outcome: 'success'
                     });
+                    if (context && typeof context === 'object') {
+                        context.lastExecutionOutcome = context.batchFallbackTriggered ? 'accepted_after_batch_fallback' : 'accepted';
+                        context.lastResponseDiagnostic ||= context.batchFallbackDiagnostic || null;
+                    }
                     return restoredTranslation;
                 }
 
@@ -17694,7 +18208,12 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                         },
                         signal,
                         API_REQUEST_TIMEOUT_MS,
-                        { rejectTruncated: true }
+                        {
+                            rejectTruncated: true,
+                            onSafeDiagnostic: diagnostic => {
+                                if (context && typeof context === 'object') context.lastResponseDiagnostic = diagnostic;
+                            }
+                        }
                     );
                 });
                 const translated = restoreProtectedPlaceholders(
@@ -17706,6 +18225,10 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                     attempt: attempt + 1,
                     outcome: 'success'
                 });
+                if (context && typeof context === 'object') {
+                    context.lastExecutionOutcome = context.batchFallbackTriggered ? 'accepted_after_batch_fallback' : 'accepted';
+                    context.lastResponseDiagnostic ||= context.batchFallbackDiagnostic || null;
+                }
                 return translated;
 
             } catch (error) {
@@ -17718,6 +18241,10 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                     error
                 });
                 lastError = error;
+                if (context && typeof context === 'object') {
+                    context.lastExecutionOutcome = classifyTranslateExecutionError(error);
+                    if (error?.safeDiagnostic) context.lastResponseDiagnostic = error.safeDiagnostic;
+                }
                 console.error(`Translate attempt ${attempt + 1} failed:`, error);
                 recordTranslateChannelIncident(apiConfig, error, { retry: attempt < retries - 1 });
                 if (attempt === retries - 1) {
@@ -17727,6 +18254,10 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                 const waitMs = Math.max(1000 * (attempt + 1), Math.min(retryAfter, 60000));
                 await delayWithSignal(waitMs, signal);
             }
+        }
+        if (context && typeof context === 'object') {
+            context.lastExecutionOutcome = classifyTranslateExecutionError(lastError);
+            if (lastError?.safeDiagnostic) context.lastResponseDiagnostic = lastError.safeDiagnostic;
         }
         return makeTranslateFailureText(text, summarizeTranslateError(lastError));
     }
@@ -17914,6 +18445,7 @@ ${protectedContext.fields.currentTranslation}`;
 
         for (let attempt = 0; attempt < retries; attempt++) {
             let requestStartedAt = 0;
+            let responseDiagnostic = null;
             try {
                 await waitForNetwork(signal);
                 if (signal?.aborted) throw new Error('TRANSLATION_CANCELLED');
@@ -17948,7 +18480,12 @@ ${protectedContext.fields.currentTranslation}`;
                             },
                             signal,
                             API_REQUEST_TIMEOUT_MS,
-                            { rejectTruncated: true }
+                            {
+                                rejectTruncated: true,
+                                onSafeDiagnostic: diagnostic => {
+                                    responseDiagnostic = diagnostic;
+                                }
+                            }
                         );
                 });
                 const parsed = parseResponse(content, promptParts.expectedIds);

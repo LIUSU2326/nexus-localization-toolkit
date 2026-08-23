@@ -8,7 +8,7 @@
 (function installNexusTranslationIssuePolicy(root) {
     'use strict';
 
-    const POLICY_VERSION = '1.1.0';
+    const POLICY_VERSION = '1.2.0';
 
     const TIER_ORDER = Object.freeze(['required', 'project', 'review']);
 
@@ -521,12 +521,82 @@
         accepted_compact: '译文已缩短且未新增必须修复项，采用候选译文'
     });
 
+    const PERSISTABLE_CANDIDATE_DECISIONS = new Set(['accepted', 'rejected', 'not_returned', 'not_attempted']);
+    const PERSISTABLE_CANDIDATE_REASONS = new Set([
+        ...Object.keys(REASON_LABELS),
+        'candidate_gate_error',
+        'candidate_rejected',
+        'request_failed',
+        'no_content',
+        'not_attempted'
+    ]);
+
+    function sanitizePersistableIssueIds(values) {
+        const seen = new Set();
+        return Object.freeze((Array.isArray(values) ? values : [])
+            .map(value => String(value || '').trim())
+            .filter(id => DESCRIPTOR_BY_ID.has(id) && !seen.has(id) && seen.add(id)));
+    }
+
+    function sanitizePersistableCandidateAudit(value = {}) {
+        const decision = PERSISTABLE_CANDIDATE_DECISIONS.has(value.candidateDecision)
+            ? value.candidateDecision
+            : '';
+        const reason = PERSISTABLE_CANDIDATE_REASONS.has(value.candidateRejectReason)
+            ? value.candidateRejectReason
+            : '';
+        return Object.freeze({
+            candidateReturned: value.candidateReturned === true
+                ? true
+                : (value.candidateReturned === false ? false : null),
+            candidateDecision: decision,
+            candidateRejectReason: reason,
+            previousIssueIds: sanitizePersistableIssueIds(value.previousIssueIds),
+            candidateIssueIds: sanitizePersistableIssueIds(value.candidateIssueIds),
+            introducedHardIssueIds: sanitizePersistableIssueIds(value.introducedHardIssueIds),
+            resolvedIssueIds: sanitizePersistableIssueIds(value.resolvedIssueIds)
+        });
+    }
+
+    function getUniqueIssueIds(findings, findingKeys = null) {
+        const keyFilter = findingKeys instanceof Set ? findingKeys : null;
+        const ids = [];
+        const seen = new Set();
+        (findings || []).forEach(finding => {
+            if (keyFilter && !keyFilter.has(finding.key)) return;
+            if (!DESCRIPTOR_BY_ID.has(finding.id) || seen.has(finding.id)) return;
+            seen.add(finding.id);
+            ids.push(finding.id);
+        });
+        return Object.freeze(ids);
+    }
+
+    function buildCandidateAudit(accept, reason, candidate, previousFindings, candidateFindings, diff) {
+        const candidateText = getSnapshotText(candidate);
+        const candidateReturned = !isFailureSnapshot(candidate, candidateText, candidateFindings);
+        const previousFindingKeys = findingKeySet(previousFindings);
+        const candidateFindingKeys = findingKeySet(candidateFindings);
+        const introducedHardKeys = new Set(diff?.introducedHard || []);
+        const resolvedFindingKeys = new Set(difference(previousFindingKeys, candidateFindingKeys));
+        return Object.freeze({
+            candidateReturned,
+            candidateDecision: accept ? 'accepted' : (candidateReturned ? 'rejected' : 'not_returned'),
+            candidateRejectReason: accept ? '' : String(reason || 'candidate_rejected'),
+            previousIssueIds: getUniqueIssueIds(previousFindings),
+            candidateIssueIds: getUniqueIssueIds(candidateFindings),
+            introducedHardIssueIds: getUniqueIssueIds(candidateFindings, introducedHardKeys),
+            resolvedIssueIds: getUniqueIssueIds(previousFindings, resolvedFindingKeys)
+        });
+    }
+
     function buildDecision(accept, reason, selectedText, selectedEntry, previous, candidate, previousFindings, candidateFindings, diff) {
         const selectedFindings = selectedEntry === 'candidate' ? candidateFindings : previousFindings;
+        const audit = buildCandidateAudit(accept, reason, candidate, previousFindings, candidateFindings, diff);
         return {
             accept,
             reason,
             reasonLabel: REASON_LABELS[reason] || reason,
+            ...audit,
             selectedText,
             selectedEntry,
             selectedSnapshot: selectedEntry === 'candidate' ? candidate : previous,
@@ -628,6 +698,7 @@
         normalizeSelectedIssueIds,
         buildTargetedQaStatus,
         decideCandidate,
+        sanitizePersistableCandidateAudit,
         isStrictMixedChineseIssueText
     });
 })(typeof globalThis !== 'undefined' ? globalThis : window);
