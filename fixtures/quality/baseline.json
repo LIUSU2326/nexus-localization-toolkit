@@ -1,0 +1,8 @@
+{
+  "fixtureVersion": "2026-08-23.3",
+  "maxFailures": 0,
+  "maxHardFalsePositives": 0,
+  "maxAcceptedCandidateNewHardIssues": 0,
+  "maxContentCandidatesPerCell": 1,
+  "maxPerformanceRegressionPercent": 10
+}

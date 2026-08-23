@@ -14,7 +14,7 @@ const classify = entry => entry.kind;
     ], classify);
     assert.equal(gate.ready, false);
     assert.equal(gate.blockingCount, 1);
-    assert.deepEqual(policy.getAutoSaveKinds(gate), ['report']);
+    assert.deepEqual(policy.getAutoSaveKinds(gate), ['translated_unverified', 'report']);
     assert.deepEqual(policy.getManualExportKinds(gate), ['translated_unverified', 'report']);
 }
 

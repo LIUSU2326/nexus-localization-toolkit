@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+await import('../translation-strict-repair-policy.js');
+await import('../translation-issue-policy.js');
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const projectDir = path.resolve(scriptDir, '..');
 const source = fs.readFileSync(path.join(projectDir, 'script.js'), 'utf8');
@@ -36,55 +39,81 @@ const makeKeySource = extractFunction(source, 'function makeTranslateImportMatch
 const taskKeysSource = extractFunction(source, 'function getTaskImportMatchKeys(');
 const entryKeysSource = extractFunction(source, 'function getImportedEntryMatchKeys(');
 const taskIndexSource = extractFunction(source, 'function buildTranslateImportTaskIndex(');
+const importedEntryMatchesTaskSource = extractFunction(source, 'function importedEntryMatchesTask(');
 const findMatchSource = extractFunction(source, 'function findImportedTranslationTaskMatch(');
 const missingEntriesSource = extractFunction(source, 'function buildImportedReportMissingTaskEntries(');
 const mergeEntriesSource = extractFunction(source, 'function mergeImportedTranslationEntriesWithCurrentTasks(');
 const importSource = extractFunction(source, 'async function importTranslateProgressFile(');
-const issueFiltersStart = source.indexOf('const TRANSLATE_IMPORT_ISSUE_FILTERS = [');
-const issueFiltersEnd = source.indexOf('const DEFAULT_PROJECTS = [', issueFiltersStart);
-assert.ok(issueFiltersStart >= 0 && issueFiltersEnd > issueFiltersStart, 'translation import issue filters should exist');
-const issueFiltersSource = source.slice(issueFiltersStart, issueFiltersEnd);
-const filterSelectionSource = extractFunction(source, 'function getImportedIssueFilterSelection(');
 const dedupeKeySource = extractFunction(source, 'function getTranslationReportEntryDedupeKey(');
+const candidateRankSource = extractFunction(source, 'function getTranslationReportCandidateRank(');
+const candidateTieSource = extractFunction(source, 'function getTranslationReportCandidateTieKey(');
+const compactLegacyVariantSource = extractFunction(source, 'function compactLegacyTranslationVariant(');
+const mergeLegacyVariantSource = extractFunction(source, 'function mergeLegacyTranslationVariantAudit(');
+const selectPreferredEntrySource = extractFunction(source, 'function selectPreferredTranslationReportEntry(');
 const dedupeEntriesSource = extractFunction(source, 'function dedupeTranslationReportEntries(');
-const filteredEntriesSource = extractFunction(source, 'function getTranslationReportEntriesForIssueFilters(');
+const continuationPlanSource = extractFunction(source, 'function buildImportedContinuationPlan(');
 const retryPreviewSource = extractFunction(source, 'function getImportedIssueRetryPreview(');
 
 const { mergeImportedTranslationEntriesWithCurrentTasks } = new Function(
     'getCompactModelLabel',
+    'isTranslateFailureText',
+    'classifyTranslationReportEntry',
     `${normalizeKeySource}
     ${makeKeySource}
     ${taskKeysSource}
     ${entryKeysSource}
     ${taskIndexSource}
+    ${importedEntryMatchesTaskSource}
     ${findMatchSource}
     ${missingEntriesSource}
     ${dedupeKeySource}
+    ${candidateRankSource}
+    ${candidateTieSource}
+    ${compactLegacyVariantSource}
+    ${mergeLegacyVariantSource}
+    ${selectPreferredEntrySource}
     ${dedupeEntriesSource}
     ${mergeEntriesSource}
     return { mergeImportedTranslationEntriesWithCurrentTasks };`
-)(profile => profile?.name || profile?.model || '');
+)(
+    profile => profile?.name || profile?.model || '',
+    text => /^\[(?:翻译失败|TRANSLATION_FAILED)/.test(String(text || '')),
+    entry => {
+        if (entry?.manualResolutionValid || entry?.status === 'success') return 'success';
+        if (entry?.status === 'missing' || !entry?.translatedText) return 'missing';
+        return globalThis.NexusTranslationIssuePolicy.classifyEntry(entry)
+            .some(finding => finding.tier === 'required') ? 'hard' : 'soft';
+    }
+);
 
 const { getImportedIssueRetryPreview } = new Function(
-    'isRepairableTranslationReportEntry',
-    'getTranslationReportIssueText',
-    'isLengthSoftRiskTranslationReportEntry',
-    'isFailedTranslationReportEntry',
     'isMissingTranslationReportEntry',
+    'isHardTranslationReportEntry',
+    'isTranslateFailureText',
+    'classifyTranslationReportEntry',
     `${normalizeKeySource}
-    ${issueFiltersSource}
-    ${filterSelectionSource}
     ${dedupeKeySource}
+    ${candidateRankSource}
+    ${candidateTieSource}
+    ${compactLegacyVariantSource}
+    ${mergeLegacyVariantSource}
+    ${selectPreferredEntrySource}
     ${dedupeEntriesSource}
-    ${filteredEntriesSource}
+    ${continuationPlanSource}
     ${retryPreviewSource}
     return { getImportedIssueRetryPreview };`
 )(
-    entry => ['failed', 'missing', 'qa_failed'].includes(entry?.status),
-    entry => [entry?.qaStatus, entry?.completenessRisk, entry?.error].filter(Boolean).join('；'),
-    () => false,
-    entry => entry?.status !== 'success',
-    entry => entry?.status === 'missing'
+    entry => entry?.status === 'missing',
+    entry => globalThis.NexusTranslationIssuePolicy
+        .classifyEntry(entry)
+        .some(finding => finding.tier === 'required'),
+    text => String(text || '').startsWith('[TRANSLATION_FAILED]'),
+    entry => {
+        if (entry?.manualResolutionValid || entry?.status === 'success') return 'success';
+        if (entry?.status === 'missing' || !entry?.translatedText) return 'missing';
+        return globalThis.NexusTranslationIssuePolicy.classifyEntry(entry)
+            .some(finding => finding.tier === 'required') ? 'hard' : 'soft';
+    }
 );
 
 function makeTask(index, overrides = {}) {
@@ -206,15 +235,13 @@ function makeReportEntry(task, overrides = {}) {
     const merged = mergeImportedTranslationEntriesWithCurrentTasks([], [uncoveredTask]);
     const missingEntry = merged.reportMissingEntries[0];
     const retryPreview = getImportedIssueRetryPreview({
-        entries: merged.entries,
-        suspiciousEntries: merged.reportMissingEntries,
-        selectedIssueFilters: ['untranslated']
+        entries: merged.entries
     });
-    assert.equal(retryPreview.custom, true);
+    assert.equal(retryPreview.custom, false);
     assert.equal(
         retryPreview.entries.length,
         1,
-        'selecting “疑似未翻译” must include rows synthesized from report/full-text coverage gaps'
+        'the canonical continuation plan must include rows synthesized from report/full-text coverage gaps'
     );
     assert.equal(retryPreview.entries[0], missingEntry);
 }
@@ -229,18 +256,31 @@ function makeReportEntry(task, overrides = {}) {
         qaStatus: '需确认：混入中文'
     });
     const retryPreview = getImportedIssueRetryPreview({
-        entries: [missingEntry, mixedChineseEntry],
-        suspiciousEntries: [missingEntry, mixedChineseEntry],
-        selectedIssueFilters: ['mixedChinese']
+        entries: [missingEntry, mixedChineseEntry]
     });
-    assert.equal(retryPreview.selectedIssueCount, 1);
+    assert.equal(retryPreview.selectedIssueCount, 2);
     assert.equal(retryPreview.mandatoryMissingCount, 1);
     assert.equal(
         retryPreview.entries.length,
         2,
-        'targeted retry must always include blank/missing rows so a narrow issue filter cannot produce an incomplete delivery'
+        'the one-click continuation plan must include every unique required or missing row'
     );
 }
+
+{
+    const reviewOnlyTask = makeTask(2);
+    const reviewOnlyEntry = makeReportEntry(reviewOnlyTask, {
+        status: 'qa_failed',
+        qaStatus: '需确认：疑似译文过短：4/12 字符，可能存在内容流失'
+    });
+    const retryPreview = getImportedIssueRetryPreview({ entries: [reviewOnlyEntry] });
+    assert.equal(retryPreview.entries.length, 0, 'review-only heuristics must never call AI automatically');
+    assert.equal(retryPreview.plan.reviewCount, 1);
+    assert.equal(retryPreview.plan.reusableCount, 1);
+}
+
+assert.doesNotMatch(source, /TRANSLATE_IMPORT_ISSUE_FILTERS/);
+assert.doesNotMatch(source, /selectedIssueFilters/);
 
 assert.match(
     importSource,

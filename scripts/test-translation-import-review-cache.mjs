@@ -39,10 +39,18 @@ const collectTasksSource = extractFunction(source, 'function collectTranslationT
 
 {
     let glossaryLoads = 0;
+    const qualityRuntime = {
+        NexusLanguageQualityProfiles: { getProfileAuditKey: targetLang => `${targetLang}:1.0.0:format-v2:none` },
+        NexusLanguageCarryoverGuard: { POLICY_VERSION: '2.0.0' },
+        NexusTranslationIssuePolicy: { POLICY_VERSION: '1.1.0' },
+        NexusTranslationFormatTokenPolicy: { POLICY_VERSION: '2.0.0' },
+        NexusTranslationNumberPolicy: { POLICY_VERSION: '2.1.0' }
+    };
     const getReviewContextKey = new Function(
         'getSelectedTranslateGlossaryTerms',
         'getTermTranslationForLanguage',
         'currentProject',
+        'globalThis',
         `${reviewContextSource}; return getImportedTranslationReviewContextKey;`
     )(
         () => {
@@ -55,7 +63,8 @@ const collectTasksSource = extractFunction(source, 'function collectTranslationT
                 ? { value: languageValue, constraint: 'hard' }
                 : { value: term.target || '', constraint: targetLang === 'en' ? 'hard' : 'reference' };
         },
-        { id: 'project-1', rules: 'keep placeholders' }
+        { id: 'project-1', rules: 'keep placeholders' },
+        qualityRuntime
     );
 
     const baseTerm = { source: '金币', target: 'Gold' };
@@ -67,6 +76,15 @@ const collectTasksSource = extractFunction(source, 'function collectTranslationT
         'changing a target-language-specific glossary translation must invalidate reviewed imports'
     );
     assert.equal(glossaryLoads, 0, 'an explicit glossary snapshot must not reload storage for its context key');
+
+    const policyKeyBefore = getReviewContextKey('ko', [{ ...baseTerm, korean: '金币' }]);
+    qualityRuntime.NexusTranslationNumberPolicy.POLICY_VERSION = '2.1.1';
+    const policyKeyAfter = getReviewContextKey('ko', [{ ...baseTerm, korean: '金币' }]);
+    assert.notEqual(
+        policyKeyBefore,
+        policyKeyAfter,
+        'changing the canonical number policy version must invalidate reviewed imports'
+    );
 }
 
 {
@@ -146,7 +164,7 @@ const collectTasksSource = extractFunction(source, 'function collectTranslationT
 
 assert.match(
     source,
-    /reviewImportedTranslationEntries\(parsedEntries\.entries, reviewTargetLang, reviewGlossaryTerms\)/,
+    /reviewAndDedupeImportedTranslationEntries\(parsedEntries\.entries, reviewTargetLang, reviewGlossaryTerms\)/,
     'report import should bulk-review with one glossary snapshot'
 );
 assert.match(
@@ -156,12 +174,12 @@ assert.match(
 );
 assert.match(
     restoreEntriesSource,
-    /reviewImportedTranslationEntries\(state\.entries \|\| \[\], targetLang, reviewGlossaryTerms\)/,
+    /reviewAndDedupeImportedTranslationEntries\(state\.entries \|\| \[\], targetLang, reviewGlossaryTerms\)/,
     'restore should reuse one glossary snapshot when its review context changes'
 );
 assert.match(
     completenessSource,
-    /reviewImportedTranslationEntries\(state\.entries, targetLang, reviewGlossaryTerms\)/,
+    /reviewAndDedupeImportedTranslationEntries\(state\.entries, targetLang, reviewGlossaryTerms\)/,
     'manual completeness review should reuse one glossary snapshot'
 );
 assert.match(

@@ -9,12 +9,15 @@
 (function installNexusLanguageCarryoverGuard(root) {
     'use strict';
 
+    const POLICY_VERSION = '2.0.0';
+
     const LATIN_SCRIPT_TARGETS = new Set([
         'en', 'fr', 'de', 'es', 'pt', 'vi', 'id', 'it', 'tr',
         'fil', 'ms', 'nl', 'pl'
     ]);
 
     const protectedUiTokenPolicy = root.NexusProtectedUiTokenPolicy;
+    const formatTokenPolicy = root.NexusTranslationFormatTokenPolicy;
     const SAFE_PHRASES = new Set([
         'google play',
         'google play games',
@@ -31,10 +34,10 @@
 
     const GAMEPLAY_SOURCE_PATTERN = /玩法|战令|通行证|竞技场|副本|地下城|云中城|秘境|挑战|远征|模式|关卡|赛季|活动|公会战|联盟战|爬塔|塔层|排行榜|战场|试炼|锦标赛|联赛|奖励轨道/;
     const GAMEPLAY_REFERENCE_PATTERN = /\b(?:battle\s*pass|season\s*pass|pass|arena|dungeon|realm|tower|raid|challenge|expedition|campaign|game\s*mode|guild\s*war|tournament|league|reward\s*track)\b/i;
-    const FORMAT_TOKEN_PATTERN = /%(?:\d+\$)?[-+#0 ]*(?:\d+)?(?:\.\d+)?(?:ll|l|h)?[sdifux@]|__PH_\d+__|\\n|<[^>]+>|\{[^}]+\}|\[[A-Z0-9_]+\]/gi;
+    const FORMAT_TOKEN_PATTERN = /%(?:\d+\$)?[-+#0]*(?:\d+)?(?:\.\d+)?(?:ll|l|h)?[sdifux@]|__PH_\d+__|\\n|<\/?[A-Za-z][^>]*>|\{(?:\d+|[A-Za-z_][A-Za-z0-9_.:-]*)\}|\[[A-Z][A-Z0-9_]{1,}\]/g;
     const URL_EMAIL_PATTERN = /https?:\/\/\S+|www\.\S+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/gi;
-    const LATIN_RUN_PATTERN = /[A-Za-z][A-Za-z0-9_.+’'-]*(?:[\t ]+[A-Za-z][A-Za-z0-9_.+’'-]*)*/g;
-    const LATIN_TOKEN_PATTERN = /[A-Za-z][A-Za-z0-9_.+’'-]*/g;
+    const LATIN_RUN_PATTERN = /[\p{Script=Latin}][\p{Script=Latin}\p{N}_.+’'-]*(?:[\t ]+[\p{Script=Latin}][\p{Script=Latin}\p{N}_.+’'-]*)*/gu;
+    const LATIN_TOKEN_PATTERN = /[\p{Script=Latin}][\p{Script=Latin}\p{N}_.+’'-]*/gu;
     const HAN_PATTERN = /[\u3400-\u9fff\uf900-\ufaff]/;
     const KANA_PATTERN = /[\u3040-\u30ff\u31f0-\u31ff]/;
     const HANGUL_PATTERN = /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/;
@@ -196,6 +199,12 @@
         'shop', 'speed', 'stage', 'start', 'success', 'summon', 'tap', 'team',
         'unlock', 'update', 'upgrade', 'use', 'weapon', 'weekly'
     ]);
+    const CLEARLY_TRANSLATABLE_ENGLISH_WORDS = new Set([
+        ...STRONG_ENGLISH_GAME_WORDS,
+        'area', 'buff', 'buffs', 'counter', 'countered', 'dust', 'excellent',
+        'festival', 'pass', 'purchase', 'relic', 'realm', 'rush', 'spirit',
+        'wild'
+    ]);
 
     function normalizeToken(value) {
         return String(value || '')
@@ -207,16 +216,17 @@
         return String(value || '')
             .toLowerCase()
             .replace(/[’']/g, "'")
-            .replace(/[^a-z0-9+._'-]+/g, ' ')
+            .replace(/[^\p{L}\p{N}+._'-]+/gu, ' ')
             .replace(/\s+/g, ' ')
             .trim();
     }
 
     function normalizeComparable(value) {
-        return String(value || '')
+        const masked = formatTokenPolicy?.mask
+            ? formatTokenPolicy.mask(value)
+            : String(value || '').replace(FORMAT_TOKEN_PATTERN, ' ');
+        return masked
             .toLowerCase()
-            .replace(/<[^>]+>/g, ' ')
-            .replace(FORMAT_TOKEN_PATTERN, ' ')
             .replace(/[^\p{L}\p{N}]+/gu, ' ')
             .replace(/\s+/g, ' ')
             .trim();
@@ -266,6 +276,12 @@
         return String(value || '').replace(pattern, match => ' '.repeat(match.length));
     }
 
+    function maskFormatTokens(value) {
+        return formatTokenPolicy?.mask
+            ? formatTokenPolicy.mask(value)
+            : maskPattern(value, FORMAT_TOKEN_PATTERN);
+    }
+
     function maskAllowedPhrases(value, phrases) {
         let masked = String(value || '');
         [...phrases]
@@ -282,7 +298,7 @@
 
     function getMeaningfulTextAfterSafeContent(value, options = {}) {
         const allowlist = buildAllowlist(options);
-        let masked = maskPattern(value, FORMAT_TOKEN_PATTERN);
+        let masked = maskFormatTokens(value);
         masked = maskPattern(masked, URL_EMAIL_PATTERN);
         masked = maskAllowedPhrases(masked, allowlist.phrases);
         masked = masked.replace(LATIN_TOKEN_PATTERN, token => {
@@ -369,14 +385,14 @@
                 !abbreviationOnlyRemainder
             ) {
                 const legacyWrongScriptCodes = {
-                    ja: 'japanese_wrong_script',
-                    ko: 'korean_wrong_script',
-                    ar: 'arabic_wrong_script'
+                    ja: 'japanese_wrong_script_review',
+                    ko: 'korean_wrong_script_review',
+                    ar: 'arabic_wrong_script_review'
                 };
                 addIssue(
-                    'block',
+                    'review',
                     legacyWrongScriptCodes[targetLang] || 'target_wrong_script',
-                    `目标${label}疑似未翻译成${label}`
+                    `目标${label}疑似未翻译成${label}，需确认`
                 );
             }
         }
@@ -400,6 +416,13 @@
         return /^[A-Z][A-Z0-9_+-]{1,5}$/.test(value);
     }
 
+    function isLikelyProperNameCandidate(candidate) {
+        const tokens = candidate?.tokens || [];
+        return tokens.length > 0 && tokens.length <= 4 && tokens.every(token =>
+            /^[A-Z][\p{Script=Latin}’'._-]*$/u.test(String(token || ''))
+        );
+    }
+
     function uniqueBy(items, getKey) {
         const seen = new Set();
         return items.filter(item => {
@@ -418,7 +441,7 @@
 
         const sourceTokens = new Set(extractLatinTokens(sourceText).map(normalizeToken).filter(Boolean));
         const allowlist = buildAllowlist(options);
-        let maskedTarget = maskPattern(targetText, FORMAT_TOKEN_PATTERN);
+        let maskedTarget = maskFormatTokens(targetText);
         maskedTarget = maskPattern(maskedTarget, URL_EMAIL_PATTERN);
         maskedTarget = maskAllowedPhrases(maskedTarget, allowlist.phrases);
 
@@ -521,12 +544,37 @@
                 const borrowingOnly = candidate.normalizedTokens.every(token =>
                     LATIN_TARGET_COMMON_BORROWINGS.has(token)
                 );
+                const clearlyGenericCopy = candidate.normalizedTokens.length >= 2 &&
+                    candidate.normalizedTokens.every(token => CLEARLY_TRANSLATABLE_ENGLISH_WORDS.has(token)) &&
+                    (candidate.appearsInReference || targetEqualsReference || !reference);
+                if (clearlyGenericCopy) {
+                    return {
+                        kind: 'block',
+                        code: targetEqualsReference
+                            ? 'english_reference_copy'
+                            : (reference ? 'english_reference_residual' : 'english_target_residual'),
+                        phrase: candidate.phrase,
+                        message: targetEqualsReference
+                            ? `目标译文疑似照抄英文参考：${candidate.phrase}`
+                            : (reference
+                                ? `目标译文仍含明确的英文短语：${candidate.phrase}`
+                                : `目标译文仍含明确英文：${candidate.phrase}`)
+                    };
+                }
                 if (borrowingOnly) {
                     return {
                         kind: 'review',
                         code: 'english_borrowing_review',
                         phrase: candidate.phrase,
                         message: `目标语可能沿用游戏借词，需确认：${candidate.phrase}`
+                    };
+                }
+                if (candidate.normalizedTokens.length === 1 || isLikelyProperNameCandidate(candidate)) {
+                    return {
+                        kind: 'review',
+                        code: 'english_proper_name_review',
+                        phrase: candidate.phrase,
+                        message: `英文专名或同形词需确认：${candidate.phrase}`
                     };
                 }
                 if (!targetEqualsReference && candidate.appearsInSource) {
@@ -537,40 +585,13 @@
                         message: `源文英文专名需确认：${candidate.phrase}`
                     };
                 }
-                if (targetEqualsReference && referenceTokenCount >= 1) {
-                    return {
-                        kind: 'block',
-                        code: 'english_reference_copy',
-                        phrase: candidate.phrase,
-                        message: `目标译文疑似照抄英文参考：${candidate.phrase}`
-                    };
-                }
-                if (candidate.strongEnglishOnly && !candidate.appearsInSource) {
-                    const copiedFromReference = Boolean(reference) && candidate.appearsInReference;
-                    return {
-                        kind: 'block',
-                        code: copiedFromReference ? 'english_reference_residual' : 'english_target_residual',
-                        phrase: candidate.phrase,
-                        message: copiedFromReference
-                            ? `目标译文仍含英文参考：${candidate.phrase}`
-                            : `目标译文仍含英文：${candidate.phrase}`
-                    };
-                }
-                if (candidate.appearsInReference) {
-                    return {
-                        kind: 'block',
-                        code: gameplayContext ? 'english_gameplay_copy' : 'english_reference_residual',
-                        phrase: candidate.phrase,
-                        message: gameplayContext
-                            ? `玩法名疑似沿用英文：${candidate.phrase}`
-                            : `目标译文仍含英文参考：${candidate.phrase}`
-                    };
-                }
                 return {
                     kind: 'review',
-                    code: 'english_target_word_review',
+                    code: targetEqualsReference ? 'english_reference_copy_review' : 'english_target_word_review',
                     phrase: candidate.phrase,
-                    message: `目标语中的英文词需确认：${candidate.phrase}`
+                    message: targetEqualsReference
+                        ? `目标译文疑似沿用英文参考，需确认：${candidate.phrase}`
+                        : `目标语中的英文词需确认：${candidate.phrase}`
                 };
             }
 
@@ -583,21 +604,48 @@
                 };
             }
 
-            if (candidate.appearsInSource) {
-                return {
-                    kind: 'block',
-                    code: 'english_source_residual',
-                    phrase: candidate.phrase,
-                    message: `目标译文仍含英文：${candidate.phrase}`
-                };
-            }
-
-            if (gameplayContext && !candidate.appearsInSource) {
+            const clearlyTranslatable = candidate.normalizedTokens.every(token =>
+                CLEARLY_TRANSLATABLE_ENGLISH_WORDS.has(token)
+            );
+            if (
+                gameplayContext &&
+                !candidate.appearsInSource &&
+                candidate.normalizedTokens.length >= 2
+            ) {
                 return {
                     kind: 'block',
                     code: 'english_gameplay_copy',
                     phrase: candidate.phrase,
                     message: `玩法名疑似沿用英文：${candidate.phrase}`
+                };
+            }
+            if (clearlyTranslatable && candidate.appearsInReference) {
+                return {
+                    kind: 'block',
+                    code: targetEqualsReference && candidate.normalizedTokens.length >= 2
+                        ? 'english_reference_copy'
+                        : 'english_reference_residual',
+                    phrase: candidate.phrase,
+                    message: targetEqualsReference && candidate.normalizedTokens.length >= 2
+                        ? `目标译文疑似照抄英文参考：${candidate.phrase}`
+                        : `目标译文仍含英文参考：${candidate.phrase}`
+                };
+            }
+            if (clearlyTranslatable && !candidate.appearsInSource) {
+                return {
+                    kind: 'block',
+                    code: 'english_target_residual',
+                    phrase: candidate.phrase,
+                    message: `目标译文仍含明确英文：${candidate.phrase}`
+                };
+            }
+
+            if (candidate.appearsInSource || candidate.normalizedTokens.length === 1 || isLikelyProperNameCandidate(candidate)) {
+                return {
+                    kind: 'review',
+                    code: candidate.appearsInSource ? 'english_source_name_review' : 'english_proper_name_review',
+                    phrase: candidate.phrase,
+                    message: `英文专名或单词需确认：${candidate.phrase}`
                 };
             }
 
@@ -610,7 +658,7 @@
                 };
             }
 
-            return candidate.appearsInReference ? {
+            return candidate.appearsInReference && candidate.normalizedTokens.length >= 2 ? {
                 kind: 'block',
                 code: 'english_reference_residual',
                 phrase: candidate.phrase,
@@ -633,6 +681,7 @@
     }
 
     root.NexusLanguageCarryoverGuard = Object.freeze({
+        POLICY_VERSION,
         evaluateCarryover,
         evaluateScriptLeakage,
         getSupportedTargetLanguages: () => Object.keys(TARGET_SCRIPT_PROFILES),

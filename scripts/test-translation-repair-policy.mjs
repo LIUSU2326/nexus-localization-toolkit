@@ -95,8 +95,8 @@ assert.match(
 );
 assert.match(
     source,
-    /adaptive\.current = 1;\s*setTranslationRequestAdaptiveCap\(profile, adaptive\.current\);/,
-    'request limiter cap should follow adaptive concurrency reductions'
+    /adaptive\.current = normalizedLevel >= 2[\s\S]*Math\.max\(1, adaptive\.current - 1\);[\s\S]*setTranslationRequestAdaptiveCap\(profile, adaptive\.current\);/,
+    'request limiter cap should follow graded adaptive concurrency reductions'
 );
 
 {

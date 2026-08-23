@@ -368,36 +368,6 @@
             grouped.set(match.definition.key, current);
         });
 
-        const referenceCounts = new Map();
-        collectMatches(reference)
-            .filter(match => isReferencePreserveToken(match.text))
-            .forEach(match => {
-                const current = referenceCounts.get(match.key) || {
-                    definition: match.definition,
-                    label: match.label,
-                    group: match.group,
-                    count: 0,
-                    forms: []
-                };
-                current.count += 1;
-                current.forms.push(match.text);
-                referenceCounts.set(match.key, current);
-            });
-        referenceCounts.forEach((referenceMatch, key) => {
-            const current = grouped.get(key) || {
-                key,
-                label: referenceMatch.label,
-                group: referenceMatch.group,
-                kind: 'builtin',
-                definition: referenceMatch.definition,
-                requiredCount: 0,
-                sourceForms: []
-            };
-            current.requiredCount = Math.max(current.requiredCount, referenceMatch.count);
-            current.sourceForms.push(...referenceMatch.forms);
-            grouped.set(key, current);
-        });
-
         extractExplicitKeepEnglishRules(options.projectRules).forEach(phrase => {
             const sourceCount = countLiteralMatches(source, phrase);
             const referenceCount = countLiteralMatches(reference, phrase);

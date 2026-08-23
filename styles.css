@@ -8155,6 +8155,88 @@ button:disabled {
     background: #f7f6f2;
 }
 
+.translate-issue-plan-panel {
+    margin: -7px 0 14px;
+}
+
+.translate-issue-plan-body {
+    gap: 0;
+}
+
+.translate-issue-plan-group {
+    display: grid;
+    gap: 8px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--cursor-line);
+}
+
+.translate-issue-plan-group-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.translate-issue-plan-group-head h4 {
+    margin: 0;
+    color: var(--cursor-ink);
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.translate-issue-plan-group-head p {
+    margin: 3px 0 0;
+    color: var(--cursor-muted);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+#translate-tool .translate-issue-plan-panel .translate-issue-plan-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 8px;
+    margin-top: 0;
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+}
+
+.translate-issue-plan-list .checkbox-setting,
+.translate-issue-plan-list .resource-check-item {
+    min-width: 0;
+    margin: 0;
+}
+
+.translate-issue-plan-list .checkbox-setting.disabled,
+.translate-issue-plan-list .resource-check-item.disabled,
+.translate-issue-plan-list :disabled {
+    cursor: not-allowed;
+    opacity: 0.58;
+}
+
+.translate-issue-plan-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px 18px;
+    padding-top: 12px;
+}
+
+.translate-issue-plan-footer p {
+    margin: 0;
+    color: var(--cursor-body);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.translate-issue-plan-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
 .translate-hard-qa-details {
     margin: -7px 0 14px;
     padding: 10px 12px 0;
@@ -8199,6 +8281,15 @@ button:disabled {
     }
 
     .translate-unverified-confirm-actions {
+        justify-content: flex-start;
+    }
+
+    .translate-issue-plan-footer {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .translate-issue-plan-actions {
         justify-content: flex-start;
     }
 
@@ -9141,6 +9232,11 @@ body.api-config-open {
         rgba(148, 163, 184, 0.28) 100%
     );
     cursor: pointer;
+}
+
+.checkbox-setting.disabled {
+    cursor: not-allowed;
+    opacity: 0.62;
 }
 
 .setting-row > input[type="range"]::-webkit-slider-runnable-track {

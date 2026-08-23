@@ -4,6 +4,7 @@ src-tauri/target/
 src-tauri/gen/
 src-tauri/.generated-icons/
 .desktop-preview-deps/
+.playwright-cli/
 downloaded-artifacts/
 run-logs/
 __pycache__/

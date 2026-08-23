@@ -138,8 +138,8 @@ assert.ok(
 );
 assert.match(
     processBatchSource,
-    /shouldSlowDown: hasNewChannelIncident\(\)/,
-    'adaptive slowdown should follow observed transport incidents'
+    /shouldSlowDown: getTranslationChannelThrottleLevel\(profile\) > throttleLevelBefore/,
+    'adaptive slowdown should follow graded transport pressure, not any isolated incident'
 );
 assert.match(
     translateBatchSource,
@@ -153,8 +153,8 @@ assert.match(
 );
 assert.match(
     requestTimingSource,
-    /try \{[\s\S]*renderTranslateChannelProgress\(\);[\s\S]*\} catch \{/,
-    'request telemetry must be best-effort and never change translation success semantics'
+    /try \{[\s\S]*scheduleTranslateChannelProgressRender\(\);[\s\S]*\} catch \{/,
+    'request telemetry must be best-effort and schedule a throttled UI refresh without changing translation success semantics'
 );
 assert.match(
     readResponseSource,

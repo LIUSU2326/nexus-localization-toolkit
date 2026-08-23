@@ -147,7 +147,9 @@
     }
 
     function getAutoSaveKinds(gate) {
-        return gate?.ready ? ['translated', 'report'] : ['report'];
+        return gate?.ready
+            ? ['translated', 'report']
+            : ['translated_unverified', 'report'];
     }
 
     function getManualExportKinds(gate) {

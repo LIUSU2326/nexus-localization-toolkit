@@ -24,14 +24,14 @@ const cases = [
     {
         name: 'Thai mixed single gameplay name',
         args: ['云中城战令', 'Cloudspire Pass', 'บัตเติ้ลพาส Cloudspire'],
-        status: 'block',
-        code: 'english_gameplay_copy'
+        status: 'review',
+        code: 'english_proper_name_review'
     },
     {
         name: 'Thai English-only skill name',
         args: ['昆针锐意', 'Stingburst', 'Stingburst'],
-        status: 'block',
-        code: 'english_reference_residual'
+        status: 'review',
+        code: 'english_proper_name_review'
     },
     {
         name: 'Thai mixed item name',
@@ -117,10 +117,9 @@ const cases = [
         code: 'contextual_grade_marker_mismatch'
     },
     {
-        name: 'Reference-only canonical HP must be preserved',
+        name: 'Reference-only canonical HP is optional carryover',
         args: ['恢复生命值', 'Heal HP', 'ฟื้นฟูพลังชีวิต'],
-        status: 'block',
-        code: 'protected_ui_token_missing'
+        status: 'pass'
     },
     {
         name: 'Source-authored HP must be preserved',
@@ -136,14 +135,14 @@ const cases = [
     {
         name: 'Unknown source proper name',
         args: ['与Astra对话', 'Talk to Astra', 'คุยกับ Astra'],
-        status: 'block',
-        code: 'english_source_residual'
+        status: 'review',
+        code: 'english_source_name_review'
     },
     {
         name: 'Source carries English project name',
         args: ['参加Cloudspire Festival活动', 'Join Cloudspire Festival', 'เข้าร่วม Cloudspire Festival'],
-        status: 'block',
-        code: 'english_source_residual'
+        status: 'review',
+        code: 'english_source_name_review'
     },
     {
         name: 'Hard glossary term is allowed',
@@ -182,38 +181,43 @@ const cases = [
     {
         name: 'Japanese English gameplay residual',
         args: ['挑战云中城', 'Challenge Cloudspire', 'クラウドスパイアで Cloudspire に挑戦', 'ja'],
-        status: 'block',
-        code: 'english_gameplay_copy'
+        status: 'review',
+        code: 'english_proper_name_review'
     },
     {
-        name: 'French sentence with untranslated English name is blocked',
+        name: 'French sentence with an untranslated proper name is reviewed',
         args: ['挑战云中城', 'Challenge Cloudspire', 'Défiez Cloudspire', 'fr'],
-        status: 'block',
-        code: 'english_gameplay_copy'
+        status: 'review',
+        code: 'english_proper_name_review'
     },
     {
-        name: 'French whole-reference copy',
+        name: 'French whole-reference project name is reviewed',
         args: ['云中城战令', 'Cloudspire Pass', 'Cloudspire Pass', 'fr'],
-        status: 'block',
-        code: 'english_reference_copy'
+        status: 'review',
+        code: 'english_proper_name_review'
     },
     {
-        name: 'Thai Xeno Bug whole-reference copy',
+        name: 'French whole generic English UI copy is blocked',
+        args: ['领取奖励', 'Claim Reward', 'Claim Reward', 'fr'],
+        status: 'block'
+    },
+    {
+        name: 'Thai Xeno Bug whole-reference proper name is reviewed',
         args: ['异种虫', 'Xeno Bug', 'Xeno Bug'],
-        status: 'block',
-        code: 'english_reference_copy'
+        status: 'review',
+        code: 'english_proper_name_review'
     },
     {
-        name: 'Thai Xeno Bug mixed target',
+        name: 'Thai Xeno Bug mixed proper name is reviewed',
         args: ['异种虫', 'Xeno Bug', 'ใช้เพื่อรับสัตว์เลี้ยง Xeno Bug'],
-        status: 'block',
-        code: 'english_reference_residual'
+        status: 'review',
+        code: 'english_proper_name_review'
     },
     {
         name: 'Source explicitly carries Xeno Bug',
         args: ['异种虫（Xeno Bug）', 'Xeno Bug', 'ใช้เพื่อรับสัตว์เลี้ยง Xeno Bug'],
-        status: 'block',
-        code: 'english_source_residual'
+        status: 'review',
+        code: 'english_source_name_review'
     },
     {
         name: 'Hard glossary allows Xeno Bug',
@@ -235,10 +239,10 @@ const cases = [
         code: 'english_reference_residual'
     },
     {
-        name: 'Thai bracketed Xeno Bug remains blocked',
+        name: 'Thai bracketed Xeno Bug remains review-only',
         args: ['异种虫', 'Xeno Bug', 'ใช้เพื่อรับสัตว์เลี้ยง【Xeno Bug】'],
-        status: 'block',
-        code: 'english_reference_residual'
+        status: 'review',
+        code: 'english_proper_name_review'
     },
     {
         name: 'Thai bracketed localized name passes',
@@ -246,16 +250,33 @@ const cases = [
         status: 'pass'
     },
     {
-        name: 'Italian partial English reference word is blocked',
+        name: 'Italian single English reference word is reviewed',
         args: ['领取奖励', 'Claim Reward', 'Riscatta Reward', 'it'],
-        status: 'block',
-        code: 'english_reference_residual'
+        status: 'review',
+        code: 'english_proper_name_review'
     },
     {
-        name: 'Polish partial English reference word is blocked',
+        name: 'Polish single English reference word is reviewed',
         args: ['领取奖励', 'Claim Reward', 'Odbierz Reward', 'pl'],
-        status: 'block',
-        code: 'english_reference_residual'
+        status: 'review',
+        code: 'english_proper_name_review'
+    },
+    {
+        name: 'Polish proper name is reviewed instead of blocking delivery',
+        args: ['与Astra对话', 'Talk to Astra', 'Porozmawiaj z Astra', 'pl'],
+        status: 'review',
+        code: 'english_proper_name_review'
+    },
+    {
+        name: 'Polish same-script word shared with English is reviewed',
+        args: ['达到邀请上限', 'Invite limit reached', 'Osiągnięto limit zaproszeń', 'pl'],
+        status: 'review',
+        code: 'english_proper_name_review'
+    },
+    {
+        name: 'Italian embedded multiword generic English copy is blocked',
+        args: ['领取奖励', 'Claim Reward', 'Riscatta Claim Reward', 'it'],
+        status: 'block'
     },
     {
         name: 'Italian common game borrowing remains a review',
@@ -311,8 +332,8 @@ for (const [targetLang, localizedWithoutAtk] of [
     ['ar', 'زيادة قوة الهجوم']
 ]) {
     const result = evaluate('提升攻击力', 'Increase ATK', localizedWithoutAtk, targetLang);
-    assert.equal(result.status, 'block', `${targetLang}: canonical reference ATK should be preserved`);
-    assert.equal(result.issues[0]?.code, 'protected_ui_token_missing', `${targetLang}: ATK issue code`);
+    assert.equal(result.status, 'pass', `${targetLang}: reference-only ATK may be localized`);
+    assert.deepEqual(result.issues, [], `${targetLang}: localized reference-only ATK should not create issues`);
 }
 
 const scriptLeakageCases = [
@@ -485,12 +506,8 @@ for (const targetLang of expectedSupportedTargetLanguages) {
         localized,
         targetLang
     );
-    assert.equal(missingProtectedAtk.status, 'block', `${targetLang}: missing canonical ATK should block`);
-    assert.equal(
-        missingProtectedAtk.issues[0]?.code,
-        'protected_ui_token_missing',
-        `${targetLang}: missing ATK issue code`
-    );
+    assert.equal(missingProtectedAtk.status, 'pass', `${targetLang}: reference-only ATK may be translated away`);
+    assert.deepEqual(missingProtectedAtk.issues, [], `${targetLang}: translated reference-only ATK should not create issues`);
 
     if (targetLang !== 'en') {
         const englishResidual = evaluate(

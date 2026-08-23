@@ -72,10 +72,15 @@ assert.deepEqual(issueCodes('A/B测试', 'การทดสอบ A/B'), []);
 
 assert.deepEqual(
     issueCodes('恢复生命值', 'ฟื้นฟูพลังชีวิต', 'Heal HP'),
-    ['protected_ui_token_missing'],
-    'reference-only canonical combat abbreviations should remain stable'
+    [],
+    'reference-only canonical combat abbreviations should be optional carryover'
 );
 assert.deepEqual(issueCodes('恢复生命值', 'ฟื้นฟู HP', 'Heal HP'), []);
+assert.deepEqual(
+    issueCodes('9级龙巢福袋', 'حقيبة حظ متاهة عش التنين المستوى 9', 'Dragon Nest Lucky Bag LV 9'),
+    [],
+    'reference-only LV should not block a localized level label'
+);
 assert.deepEqual(issueCodes('HP+10%', 'พลังชีวิต +10%'), ['protected_ui_token_missing']);
 assert.deepEqual(issueCodes('HP+10%', 'HP +10%'), []);
 assert.deepEqual(issueCodes('CD中', 'อยู่ในช่วงพัก'), ['protected_ui_token_missing']);
@@ -108,8 +113,8 @@ for (const token of [
     );
     assert.deepEqual(
         issueCodes('显示数值', 'แสดงค่า', `Show ${token}`),
-        policy.isReferencePreserveToken(token) ? ['protected_ui_token_missing'] : [],
-        `${token} reference behavior should follow the canonical abbreviation policy`
+        [],
+        `${token} should not become mandatory when it appears only in the reference`
     );
     assert.deepEqual(
         issueCodes('显示数值', `แสดงค่า ${token}`, `Show ${token}`),
@@ -143,6 +148,28 @@ assert.deepEqual(
 assert.deepEqual(
     issueCodes('云中城战令', 'บัตรผ่านการรบ Cloudspire Pass', 'Cloudspire Pass', '保留英文：Cloudspire Pass'),
     []
+);
+assert.deepEqual(
+    issueCodes('恢复生命值', 'ฟื้นฟูพลังชีวิต', 'Heal HP', '保留英文：HP'),
+    ['protected_ui_token_missing'],
+    'an explicit project rule should still make a reference token mandatory'
+);
+assert.deepEqual(
+    issueCodes('恢复生命值', 'ฟื้นฟู HP', 'Heal HP', '保留英文：HP'),
+    [],
+    'an explicitly required reference token should pass when preserved'
+);
+
+assert.deepEqual(policy.getRequirements('恢复生命值', 'Heal HP'), []);
+assert.match(
+    policy.buildPromptInstruction('恢复生命值', 'Heal HP'),
+    /可按界面语境原样保留[^\n]*HP/,
+    'reference-only HP should be presented as optional carryover guidance'
+);
+assert.doesNotMatch(
+    policy.buildPromptInstruction('恢复生命值', 'Heal HP'),
+    /受保护UI标记必须原样保留/,
+    'reference-only HP should not be presented as a hard requirement'
 );
 
 const requirements = policy.getRequirements('战斗号角lv%s，HP+10%', '');

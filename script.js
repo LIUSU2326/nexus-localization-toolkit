@@ -682,15 +682,23 @@ const TRANSLATION_PROGRESS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const TRANSLATION_PROGRESS_SAVE_INTERVAL = 25;
 const TRANSLATION_CHANNEL_FAILURE_LIMIT = 8;
 const TRANSLATION_ADAPTIVE_SUCCESS_TO_INCREASE = 4;
-const TRANSLATION_ADAPTIVE_COOLDOWN_MS = 120000;
 const TRANSLATION_BATCH_SETTLE_DELAY_MS = 800;
 const TRANSLATION_BATCH_FAILURE_SETTLE_DELAY_MS = 5000;
 const TRANSLATION_BATCH_SPLIT_MAX_DEPTH = 2;
 const TRANSLATION_CHANNEL_RECOVERY_COOLDOWN_MS = 180000;
-const TRANSLATION_QA_REPAIR_MAX_ATTEMPTS = 2;
+const TRANSLATION_QA_REPAIR_MAX_ATTEMPTS = 1;
 const TRANSLATION_QA_REPAIR_MAX_CONCURRENCY = 2;
+const TRANSLATION_TARGETED_REPAIR_MAX_CONCURRENCY = 3;
+const TRANSLATION_TARGETED_REPAIR_INITIAL_BATCH_SIZE = 4;
+const TRANSLATION_TARGETED_REPAIR_MAX_BATCH_SIZE = 6;
+const TRANSLATION_TARGETED_REPAIR_BATCH_CHAR_BUDGET = 4800;
+const TRANSLATION_TARGETED_REPAIR_PROMPT_CHAR_LIMIT = 12000;
 const TRANSLATION_RETRY_DEEP_REPAIR_LIMIT = 60;
 const TRANSLATION_AGNES_TARGET_RPM = 17;
+const TRANSLATION_INTERRUPTION_SOFT_COOLDOWN_MS = 30000;
+const TRANSLATION_INTERRUPTION_HARD_COOLDOWN_MS = 45000;
+const TRANSLATION_CONGESTION_COOLDOWN_MS = 60000;
+const TRANSLATION_THROUGHPUT_WINDOW_MS = 120000;
 const TRANSLATION_PREVIEW_MAX_ITEMS = 60;
 const TRANSLATION_PREVIEW_RENDER_EVERY = 5;
 const TRANSLATION_TASK_CHECKPOINT_BATCH_SIZE = 50;
@@ -729,6 +737,42 @@ function getTranslationQaRepairConcurrency(configuredLimit, adaptiveLimit, taskC
     ));
 }
 
+async function runBoundedTranslationWorkers(items = [], worker, concurrency = 1, options = {}) {
+    const queue = Array.isArray(items) ? items : [];
+    if (!queue.length) return [];
+    if (typeof worker !== 'function') throw new TypeError('worker must be a function');
+    const workerCount = Math.max(1, Math.min(
+        Math.floor(Number(concurrency) || 1),
+        queue.length
+    ));
+    const results = new Array(queue.length);
+    let nextIndex = 0;
+    let fatalError = null;
+    const stopOnError = Boolean(options.stopOnError);
+    async function runWorker() {
+        while (true) {
+            if (stopOnError && fatalError) return;
+            const index = nextIndex++;
+            if (index >= queue.length) return;
+            try {
+                results[index] = await worker(queue[index], index);
+            } catch (error) {
+                fatalError ||= error;
+                if (stopOnError) return;
+                throw error;
+            }
+        }
+    }
+    const workers = Array.from({ length: workerCount }, () => runWorker());
+    if (stopOnError) {
+        await Promise.allSettled(workers);
+        if (fatalError) throw fatalError;
+    } else {
+        await Promise.all(workers);
+    }
+    return results;
+}
+
 function isSplittableTranslationBatchError(error) {
     if (!error || error?.name === 'AbortError' || error?.message === 'TRANSLATION_CANCELLED') return false;
     if (typeof error === 'string') return false;
@@ -737,10 +781,10 @@ function isSplittableTranslationBatchError(error) {
     if ((httpStatus >= 400 && httpStatus <= 599) || error?.isRateLimited || error?.isTimeout || error?.isQuotaDepleted) {
         return false;
     }
-    if (error instanceof SyntaxError || error?.isOutputTruncated || error?.isEmptyEndTurn) return true;
+    if (error instanceof SyntaxError || error?.isOutputTruncated || error?.isEmptyEndTurn || error?.isRepairBatchStructureError) return true;
 
     const diagnostic = `${error?.message || ''} ${error?.rawText || ''}`;
-    return /批量翻译返回(?:数量不一致|空译文)|接口返回(?:为空|被截断)|JSON|Unexpected\s+(?:token|end)|unterminated|string array|数组.{0,8}(?:数量|长度|格式)|(?:parse|解析).{0,8}(?:JSON|数组)/i.test(diagnostic);
+    return /批量(?:翻译|修复)返回(?:数量不一致|空译文|结构异常|无有效结果)|接口返回(?:为空|被截断)|JSON|Unexpected\s+(?:token|end)|unterminated|string array|数组.{0,8}(?:数量|长度|格式)|(?:parse|解析).{0,8}(?:JSON|数组)/i.test(diagnostic);
 }
 
 function splitTranslationTaskBatch(tasks = []) {
@@ -767,7 +811,7 @@ function shouldDeferRetryQaRepair(options = {}) {
 }
 
 function shouldUseTwoStageTranslationRetry(retryTasks, options = {}) {
-    return Boolean(Array.isArray(retryTasks) && retryTasks.length > 0 && options.twoStageRetry !== false);
+    return options.twoStageRetry !== false;
 }
 
 function shouldRunDeferredTranslationRepair(taskCount, limit = TRANSLATION_RETRY_DEEP_REPAIR_LIMIT) {
@@ -1033,6 +1077,10 @@ function compactTranslationProgressEntry(entry) {
         : (isMarkedTranslationFailure(translatedText) ? 'failed' : '');
     return {
         taskKey: entry.taskKey,
+        outputSlotId: entry.outputSlotId || 'primary',
+        profile: entry.profile || '',
+        model: entry.model || '',
+        legacyVariants: Array.isArray(entry.legacyVariants) ? entry.legacyVariants : [],
         status: entry.manualResolutionValid
             ? 'success'
             : (statusFromText || entry.status || 'success'),
@@ -1061,10 +1109,11 @@ function buildTranslationProgressRecord(data, includeTasksForFallback = false) {
         : [];
     return {
         id: TRANSLATION_PROGRESS_ACTIVE_ID,
-        version: 3,
+        version: 5,
         timestamp: Date.now(),
         fileName: data.fileName,
         sourceSignature: data.sourceSignature || '',
+        contextSignature: data.contextSignature || '',
         totalRows: data.totalRows,
         totalTasks: data.totalTasks || 0,
         currentRow: data.currentRow,
@@ -1515,6 +1564,25 @@ function makeStableId(text) {
     return hash.toString(36);
 }
 
+async function makeFileContentSignature(value) {
+    const bytes = typeof value === 'string'
+        ? new TextEncoder().encode(value)
+        : new Uint8Array(value instanceof ArrayBuffer ? value : (value?.buffer || new ArrayBuffer(0)));
+    if (globalThis.crypto?.subtle) {
+        const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+        return [...new Uint8Array(digest)]
+            .map(byte => byte.toString(16).padStart(2, '0'))
+            .join('');
+    }
+    let hashA = 2166136261;
+    let hashB = 0;
+    for (const byte of bytes) {
+        hashA = Math.imul(hashA ^ byte, 16777619) >>> 0;
+        hashB = ((hashB << 5) - hashB + byte) >>> 0;
+    }
+    return `${bytes.length.toString(36)}-${hashA.toString(36)}-${hashB.toString(36)}`;
+}
+
 function makePromptCacheKey(namespace, text) {
     return `${namespace}_${makeStableId(String(text || ''))}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
 }
@@ -1839,12 +1907,14 @@ async function readSpreadsheetSheets(file) {
 
     if (extension === 'csv') {
         const { text, encoding } = await readCSVWithEncoding(file);
+        const contentSignature = await makeFileContentSignature(text);
         const workbook = XLSX.read(text, { type: 'string', cellDates: true });
         const sheetName = workbook.SheetNames[0] || 'CSV';
         const sheet = workbook.Sheets[sheetName];
         const sheetRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
         return {
             encoding,
+            contentSignature,
             workbook,
             sheets: [{
                 sheetName: 'CSV',
@@ -1856,10 +1926,12 @@ async function readSpreadsheetSheets(file) {
     }
 
     const arrayBuffer = await file.arrayBuffer();
+    const contentSignature = await makeFileContentSignature(arrayBuffer);
     const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
     const workbookSheets = workbook?.Workbook?.Sheets || [];
     return {
         encoding: 'N/A (Excel)',
+        contentSignature,
         workbook,
         sheets: workbook.SheetNames.map((sheetName, sheetIndex) => {
             const sheetMeta = workbookSheets[sheetIndex] ||
@@ -3471,6 +3543,7 @@ function normalizeApiProfile(profile) {
     const model = rawModel || getDefaultModelForProvider(provider);
     const name = normalizeProfileName(provider, profile?.name);
     const concurrency = Math.max(1, Math.min(10, Number(profile?.concurrency || 3)));
+    const translationRpm = Math.max(0, Math.min(600, Number(profile?.translationRpm || profile?.requestsPerMinute || 0)));
     let baseUrl = normalizeProviderBaseUrl(provider, profile?.baseUrl || PLATFORM_CONFIG[provider]?.baseUrl || '');
     if (provider === 'youdao' && /^https:\/\/openapi\.youdao\.com\/api\/?$/i.test(baseUrl)) {
         baseUrl = PLATFORM_CONFIG.youdao.baseUrl;
@@ -3491,6 +3564,7 @@ function normalizeApiProfile(profile) {
         baseUrl,
         model,
         concurrency: Number.isFinite(concurrency) ? concurrency : 3,
+        translationRpm: Number.isFinite(translationRpm) ? translationRpm : 0,
         updatedAt: profile?.updatedAt || Date.now()
     };
 }
@@ -6710,29 +6784,15 @@ function initTranslateTool() {
     const downloadProgressBtn = document.getElementById('translateDownloadProgressBtn');
     const downloadReportBtn = document.getElementById('translateDownloadReportBtn');
     const downloadFinalReportBtn = document.getElementById('translateDownloadFinalReportBtn');
-    const retryFailedBtn = document.getElementById('translateRetryFailedBtn');
     const translateRetryImportShortcutBtn = document.getElementById('translateRetryImportShortcutBtn');
     const cancelTranslateBtn = document.getElementById('translateCancelBtn');
     const translateProfileList = document.getElementById('translateProfileList');
     const translateProfileSummary = document.getElementById('translateProfileSummary');
     const translateSubmitPlanHint = document.getElementById('translateSubmitPlanHint');
-    const translateDiscountCheckBtn = document.getElementById('translateDiscountCheckBtn');
-    const translateDiscountCheckStatus = document.getElementById('translateDiscountCheckStatus');
-    const translateDiscountCheckActions = document.getElementById('translateDiscountCheckActions');
-    const translateDiscountRepairBtn = document.getElementById('translateDiscountRepairBtn');
-    const translateDiscountDownloadBtn = document.getElementById('translateDiscountDownloadBtn');
-    const translateDiscountCheckDetails = document.getElementById('translateDiscountCheckDetails');
-    const translateDiscountCheckDetailsSummary = document.getElementById('translateDiscountCheckDetailsSummary');
-    const translateDiscountCheckDetailsBody = document.getElementById('translateDiscountCheckDetailsBody');
     const translateProgressImportInput = document.getElementById('translateProgressImportInput');
     const translateProgressImportStatus = document.getElementById('translateProgressImportStatus');
     const translateClearImportedProgressBtn = document.getElementById('translateClearImportedProgressBtn');
     const translateReviewImportedProgressBtn = document.getElementById('translateReviewImportedProgressBtn');
-    const translateRetrySuspiciousBtn = document.getElementById('translateRetrySuspiciousBtn');
-    const translateCompactLongImportedBtn = document.getElementById('translateCompactLongImportedBtn');
-    const translateImportIssueFilterPanel = document.getElementById('translateImportIssueFilterPanel');
-    const translateImportIssueFilterSummary = document.getElementById('translateImportIssueFilterSummary');
-    const translateImportIssueFilterList = document.getElementById('translateImportIssueFilterList');
     const translateGlossaryList = document.getElementById('translateGlossaryList');
     const translateSheetSelectPanel = document.getElementById('translateSheetSelectPanel');
     const translateSheetSelectList = document.getElementById('translateSheetSelectList');
@@ -6754,9 +6814,6 @@ function initTranslateTool() {
     const translateSelectAllLangBtn = document.getElementById('translateSelectAllLangBtn');
     const translateClearLangBtn = document.getElementById('translateClearLangBtn');
     const translateConsistencyMemoryInput = document.getElementById('translateConsistencyMemory');
-    const translateFastBatchModeInput = document.getElementById('translateFastBatchMode');
-    const translateAutoCompactLongInput = document.getElementById('translateAutoCompactLong');
-    const translateAutoRetryMultiTargetInput = document.getElementById('translateAutoRetryMultiTarget');
     const translateQualitySummary = document.getElementById('translateQualitySummary');
     const translateConcurrencyInput = document.getElementById('translateConcurrency');
     const translateConcurrencyOutput = document.getElementById('translateConcurrencyValue');
@@ -6802,13 +6859,14 @@ function initTranslateTool() {
     let translationProgressTasks = new Map();
     let translationExpectedTaskMap = new Map();
     let translateChannelProgressState = new Map();
+    let translateChannelRenderTimer = null;
     let translateRunStartedAt = 0;
     let translateElapsedTimer = null;
+    let translateCompletionHistory = [];
     let translateHardQaDetailsFingerprint = '';
     let translateRunSummaryState = { completed: 0, total: 0, phase: '等待开始' };
     let translateRunConsistencyTerms = [];
     let importedTranslateProgressState = createEmptyTranslateProgressImportState();
-    let translateDiscountCheckState = createEmptyTranslateDiscountCheckState();
     let translateLanguageRunState = {
         targets: [],
         currentIndex: -1,
@@ -6816,82 +6874,27 @@ function initTranslateTool() {
         failed: [],
         status: 'idle'
     };
-    const TRANSLATE_IMPORT_ISSUE_FILTERS = [
-        {
-            id: 'retryable',
-            label: '可自动处理',
-            description: '翻译失败、结果缺失或硬质检未通过',
-            match: entry => isRepairableTranslationReportEntry(entry)
-        },
-        {
-            id: 'mixedChinese',
-            label: '混入中文',
-            description: '目标译文仍含中文字符或中文汉字',
-            match: entry => /混入中文|中文汉字|与中文原文高度一致/.test(getTranslationReportIssueText(entry))
-        },
-        {
-            id: 'mixedEnglish',
-            label: '英文沿用',
-            description: '目标译文仍含英文参考，或英文专名需要确认',
-            match: entry => /混入英文|疑似照抄英文|目标译文仍含英文|玩法名疑似沿用英文|英文玩法名需确认|英文专名需确认|英文参考短语需确认|英文参考词需确认|源文英文专名需确认|游戏借词|英文词需确认/.test(getTranslationReportIssueText(entry))
-        },
-        {
-            id: 'mixedJapanese',
-            label: '混入日文',
-            description: '目标译文中出现日文假名等跨语种残留',
-            match: entry => /混入日文|日文假名/.test(getTranslationReportIssueText(entry))
-        },
-        {
-            id: 'placeholder',
-            label: '占位符 / UI 标记',
-            description: '格式占位符，或 LV、HP、CD、S/SS/SSS、A/B 等 UI 与等级标记被改动',
-            match: entry => /格式\/占位符|缺少格式|多出格式|占位符顺序|受保护UI标记/.test(getTranslationReportIssueText(entry))
-        },
-        {
-            id: 'number',
-            label: '数字不一致',
-            description: '译文里的数字、倍率、时间等与原文不一致',
-            match: entry => /数字不一致/.test(getTranslationReportIssueText(entry))
-        },
-        {
-            id: 'discount',
-            label: '折扣语义',
-            description: '折扣方向、支付比例或折扣表达缺失',
-            match: entry => /折扣语义不一致|折扣翻译缺失|折扣表达需确认/.test(getTranslationReportIssueText(entry))
-        },
-        {
-            id: 'term',
-            label: '术语未遵守',
-            description: '命中的硬性术语没有按术语表输出',
-            match: entry => /术语未遵守/.test(getTranslationReportIssueText(entry))
-        },
-        {
-            id: 'length',
-            label: '译文超长',
-            description: '只重跑报告中“译文长度超出建议”的行',
-            match: entry => isLengthSoftRiskTranslationReportEntry(entry)
-        },
-        {
-            id: 'untranslated',
-            label: '疑似未翻译',
-            description: '输出为空、截断、漏译或疑似保留原文',
-            match: entry =>
-                isMissingTranslationReportEntry(entry) ||
-                /疑似未翻译|报告缺失|返回空译文|输出被截断|内容流失|译文过短/.test(getTranslationReportIssueText(entry))
-        },
-        {
-            id: 'zhConversion',
-            label: '繁简转换问题',
-            description: '繁中转换不完整或关键语义缺失',
-            match: entry => /繁简转换不完整|繁中关键语义缺失/.test(getTranslationReportIssueText(entry))
-        },
-        {
-            id: 'spacing',
-            label: '逐字空格',
-            description: '译文出现逐字分隔、异常空格等格式问题',
-            match: entry => /逐字空格|异常空格/.test(getTranslationReportIssueText(entry))
+    function getTranslationStrictRepairPolicy() {
+        return globalThis.NexusTranslationStrictRepairPolicy || null;
+    }
+
+    function isStrictMixedChineseTranslationReportEntry(entry) {
+        const issueText = getTranslationReportIssueText(entry);
+        const policy = getTranslationStrictRepairPolicy();
+        if (policy?.isStrictMixedChineseIssueText) {
+            return policy.isStrictMixedChineseIssueText(issueText);
         }
-    ];
+        const withoutJapaneseReview = String(issueText || '')
+            .replace(/目标日文与中文原文高度一致[^；;]*/g, '');
+        return /混入中文(?:字符|汉字)?|中文汉字残留/.test(withoutJapaneseReview);
+    }
+
+    function getStrictMixedChineseTranslationReportEntries(entries = translationRunReport?.entries || []) {
+        return (entries || []).filter(entry =>
+            isFailedTranslationReportEntry(entry) &&
+            isStrictMixedChineseTranslationReportEntry(entry)
+        );
+    }
 
     const DEFAULT_PROJECTS = [
         {
@@ -6920,9 +6923,6 @@ function initTranslateTool() {
     let successCount = 0;
     let failCount = 0;
     const TRANSLATE_CONSISTENCY_MEMORY_KEY = 'nexus_translate_consistency_memory_enabled';
-    const TRANSLATE_FAST_BATCH_MODE_KEY = 'nexus_translate_fast_batch_mode_enabled';
-    const TRANSLATE_AUTO_COMPACT_LONG_KEY = 'nexus_translate_auto_compact_long_enabled';
-    const TRANSLATE_AUTO_RETRY_MULTI_TARGET_KEY = 'nexus_translate_auto_retry_multi_target_enabled';
     const TRANSLATE_CONSISTENCY_TERM_POOL_LIMIT = 160;
     const TRANSLATE_CONSISTENCY_TASK_TERM_LIMIT = 12;
     const TRANSLATE_CONSISTENCY_PROMPT_TERM_LIMIT = 12;
@@ -6983,56 +6983,10 @@ function initTranslateTool() {
         });
     }
 
-    function initTranslateFastBatchModePreference() {
-        if (!translateFastBatchModeInput) return;
-        translateFastBatchModeInput.checked = localStorage.getItem(TRANSLATE_FAST_BATCH_MODE_KEY) !== 'false';
-        translateFastBatchModeInput.addEventListener('change', () => {
-            localStorage.setItem(TRANSLATE_FAST_BATCH_MODE_KEY, translateFastBatchModeInput.checked ? 'true' : 'false');
-            updateTranslateSubmitPlanHint();
-            updateTranslateSettingsSummaries();
-        });
-    }
-
-    function initTranslateAutoCompactLongPreference() {
-        if (!translateAutoCompactLongInput) return;
-        translateAutoCompactLongInput.checked = localStorage.getItem(TRANSLATE_AUTO_COMPACT_LONG_KEY) === 'true';
-        translateAutoCompactLongInput.addEventListener('change', () => {
-            localStorage.setItem(TRANSLATE_AUTO_COMPACT_LONG_KEY, translateAutoCompactLongInput.checked ? 'true' : 'false');
-            updateTranslateSettingsSummaries();
-        });
-    }
-
-    function initTranslateAutoRetryMultiTargetPreference() {
-        if (!translateAutoRetryMultiTargetInput) return;
-        translateAutoRetryMultiTargetInput.checked = localStorage.getItem(TRANSLATE_AUTO_RETRY_MULTI_TARGET_KEY) === 'true';
-        translateAutoRetryMultiTargetInput.addEventListener('change', () => {
-            localStorage.setItem(TRANSLATE_AUTO_RETRY_MULTI_TARGET_KEY, translateAutoRetryMultiTargetInput.checked ? 'true' : 'false');
-            updateTranslateSettingsSummaries();
-        });
-    }
-
     function isTranslateConsistencyMemoryEnabled() {
         return translateConsistencyMemoryInput
             ? translateConsistencyMemoryInput.checked
             : localStorage.getItem(TRANSLATE_CONSISTENCY_MEMORY_KEY) !== 'false';
-    }
-
-    function isTranslateFastBatchModeEnabled() {
-        return translateFastBatchModeInput
-            ? translateFastBatchModeInput.checked
-            : localStorage.getItem(TRANSLATE_FAST_BATCH_MODE_KEY) !== 'false';
-    }
-
-    function isTranslateAutoCompactLongEnabled() {
-        return translateAutoCompactLongInput
-            ? translateAutoCompactLongInput.checked
-            : localStorage.getItem(TRANSLATE_AUTO_COMPACT_LONG_KEY) === 'true';
-    }
-
-    function isTranslateAutoRetryMultiTargetEnabled() {
-        return translateAutoRetryMultiTargetInput
-            ? translateAutoRetryMultiTargetInput.checked
-            : localStorage.getItem(TRANSLATE_AUTO_RETRY_MULTI_TARGET_KEY) === 'true';
     }
 
     function normalizeTranslateConsistencyTerm(term) {
@@ -7251,18 +7205,72 @@ function initTranslateTool() {
         return source.outputRows;
     }
 
+    function getTranslateResultProfile(task) {
+        return task?.reportProfile || task?.executorProfile || task?.profile || {};
+    }
+
+    function getTranslateOutputSlotId() {
+        return 'primary';
+    }
+
+    function getTranslateOutputTaskKey(task) {
+        return task?.outputTaskKey || task?.retryOfTaskKey || task?.taskKey || '';
+    }
+
+    function createTranslateResultProfileFromReportEntry(entry = {}, fallbackProfile = {}) {
+        const entryName = String(entry.profile || '').trim();
+        const entryModel = String(entry.model || '').trim();
+        const fallbackName = String(fallbackProfile?.name || '').trim();
+        const fallbackModel = String(fallbackProfile?.model || '').trim();
+        if (
+            (!entryName || entryName === fallbackName) &&
+            (!entryModel || entryModel === fallbackModel)
+        ) {
+            return fallbackProfile;
+        }
+        const stableLabel = [entryName || fallbackName, entryModel || fallbackModel]
+            .filter(Boolean)
+            .join('\u001f') || 'report-output';
+        return {
+            ...fallbackProfile,
+            id: `report-result:${stableLabel}`,
+            name: entryName || fallbackName || stableLabel,
+            model: entryModel || fallbackModel || ''
+        };
+    }
+
+    function getStableReportOutputTaskKey(entry = {}, fallbackTask = {}) {
+        if (fallbackTask.taskKey) return fallbackTask.taskKey;
+        const identity = [
+            entry.sourceFile || fallbackTask.source?.fileName || '',
+            entry.sheetName || fallbackTask.source?.sheetName || '',
+            entry.rowNumber || fallbackTask.originalRowNumber || fallbackTask.rowIndex || '',
+            entry.column || (Number.isInteger(fallbackTask.colIndex) ? fallbackTask.colIndex + 1 : ''),
+            entry.sourceText || fallbackTask.text || ''
+        ].join('\u001f');
+        return `translation-cell:${makeStableId(identity)}`;
+    }
+
     function ensureTranslateOutputColumn(task) {
         const source = task.source;
         const outputRows = getTranslateSourceOutput(source);
         const header = outputRows[0] || [];
-        const key = `${task.colIndex}:${task.profile.id}`;
+        const outputSlotId = getTranslateOutputSlotId(task);
+        const key = `${task.colIndex}:${outputSlotId}`;
         if (!source.outputColMap.has(key)) {
             const targetLangName = getTranslateLanguageName(document.getElementById('targetLang').value);
             const sourceHeader = header[task.colIndex] || `列${task.colIndex + 1}`;
-            const profileLabel = getCompactModelLabel(task.profile);
-            const translationHeader = `${sourceHeader} (${targetLangName} · ${profileLabel})`;
-            const qaHeader = `${sourceHeader} (${targetLangName} · ${profileLabel} · 检测)`;
-            const hasQa = Boolean(translatePostCheckInput?.checked);
+            const originalHeader = Array.isArray(source.rows?.[0]) ? source.rows[0] : header;
+            const duplicateSourceHeaderCount = originalHeader.reduce(
+                (count, value) => count + (String(value || '').trim() === String(sourceHeader || '').trim() ? 1 : 0),
+                0
+            );
+            const outputHeaderBase = duplicateSourceHeaderCount > 1
+                ? `${sourceHeader} [列${task.colIndex + 1}]`
+                : sourceHeader;
+            const translationHeader = `${outputHeaderBase} (${targetLangName})`;
+            const qaHeader = `${outputHeaderBase} (${targetLangName} · 检测)`;
+            const hasQa = true;
             let targetColIndex = header.findIndex(value => String(value || '').trim() === translationHeader);
             let qaColIndex = hasQa
                 ? header.findIndex(value => String(value || '').trim() === qaHeader)
@@ -7293,13 +7301,9 @@ function initTranslateTool() {
     loadProjects();
     renderProjects();
     initTranslateConsistencyPreference();
-    initTranslateFastBatchModePreference();
-    initTranslateAutoCompactLongPreference();
-    initTranslateAutoRetryMultiTargetPreference();
     renderTranslateTargetLanguageList();
     renderTranslateProfileList();
     updateTranslateProgressImportStatus();
-    renderTranslateDiscountCheckState();
     renderTranslateGlossaryList();
     renderReferenceColumnOptions();
     document.addEventListener('nexus:api-profiles-updated', () => {
@@ -7326,9 +7330,6 @@ function initTranslateTool() {
     viewProjectBtn.addEventListener('click', toggleViewMode);
     editProjectBtn.addEventListener('click', toggleEditMode);
     translateBtn.addEventListener('click', handleTranslatePrimaryAction);
-    translateDiscountCheckBtn?.addEventListener('click', () => runLocalDiscountCheck());
-    translateDiscountRepairBtn?.addEventListener('click', repairDetectedDiscountIssues);
-    translateDiscountDownloadBtn?.addEventListener('click', downloadTranslated);
     downloadBtn.addEventListener('click', downloadTranslated);
     translateDownloadUnverifiedBtn?.addEventListener('click', showUnverifiedTranslationExportConfirmation);
     translateConfirmUnverifiedExportBtn?.addEventListener('click', downloadUnverifiedTranslation);
@@ -7339,10 +7340,6 @@ function initTranslateTool() {
     downloadProgressBtn.addEventListener('click', downloadCurrentProgress);
     downloadReportBtn?.addEventListener('click', downloadTranslationReport);
     downloadFinalReportBtn?.addEventListener('click', downloadTranslationReport);
-    retryFailedBtn?.addEventListener('click', () => retryFailedTranslations({
-        skipConfirm: true,
-        suppressAutoSave: false
-    }));
     translateProgressImportInput?.addEventListener('change', (event) => {
         const files = [...(event.target.files || [])];
         if (!files.length) return;
@@ -7357,15 +7354,12 @@ function initTranslateTool() {
         setStatus('success', '已清除导入进度', '本次翻译不会再复用外部翻译报告。');
     });
     translateReviewImportedProgressBtn?.addEventListener('click', reviewImportedTranslationCompleteness);
-    translateRetrySuspiciousBtn?.addEventListener('click', () => retrySuspiciousImportedTranslations());
-    translateCompactLongImportedBtn?.addEventListener('click', compactLongImportedTranslations);
     translatePostCheckInput?.addEventListener('change', updateTranslateSubmitPlanHint);
     translateCompletenessCheckInput?.addEventListener('change', updateTranslateSettingsSummaries);
     cancelTranslateBtn.addEventListener('click', cancelTranslateTask);
     targetLangSelect?.addEventListener('change', () => {
         const value = targetLangSelect.value;
         if (!value) return;
-        resetTranslateDiscountCheck();
         if (selectedTranslateTargetLangs.size <= 1) {
             selectedTranslateTargetLangs = new Set([value]);
         } else {
@@ -7406,97 +7400,13 @@ function initTranslateTool() {
         if (e.target === projectModal) closeModal();
     });
 
-    function getDiscountGuardTextSnippet(value, maxLength = 78) {
+    function getTranslationIssueTextSnippet(value, maxLength = 78) {
         const text = String(value || '').replace(/\s+/g, ' ').trim();
         if (!text) return '（空）';
         return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
     }
 
-    function collectDiscountGuardSourceHits() {
-        const guard = getNexusDiscountGuard();
-        if (!guard) return { count: 0, samples: [] };
-        const sources = getSelectedTranslateSources().length
-            ? getSelectedTranslateSources()
-            : translateSources;
-        const samples = [];
-        let count = 0;
-        sources.forEach(source => {
-            const rows = Array.isArray(source?.rows) ? source.rows : [];
-            const scanColumns = selectedColumns.length
-                ? selectedColumns
-                : (rows[0] || []).map((_, index) => index);
-            rows.slice(1).forEach((row, offset) => {
-                scanColumns.forEach(columnIndex => {
-                    const sourceText = String(row?.[columnIndex] ?? '');
-                    if (!guard.hasDiscountSignal(sourceText)) return;
-                    count++;
-                    if (samples.length < 10) {
-                        samples.push({
-                            sourceFile: source?.fileName || originalFileName || '',
-                            sheetName: source?.sheetName || '',
-                            rowNumber: offset + 2,
-                            column: columnIndex + 1,
-                            sourceText
-                        });
-                    }
-                });
-            });
-        });
-        return { count, samples };
-    }
-
-    function collectDiscountGuardReportEntries(options = {}) {
-        const records = [];
-        const seen = new Set();
-        const add = (entries, fallbackTargetLang = '') => {
-            (entries || []).forEach(entry => {
-                const sourceText = String(entry?.sourceText || '');
-                if (!sourceText || !getNexusDiscountGuard()?.hasDiscountSignal(sourceText)) return;
-                const key = entry?.taskKey || [
-                    entry?.sourceFile || entry?.fileName || '',
-                    entry?.sheetName || '',
-                    entry?.rowNumber || entry?.rowIndex || '',
-                    entry?.column || entry?.colIndex || '',
-                    sourceText,
-                    entry?.translatedText || ''
-                ].join('\u001f');
-                if (seen.has(key)) return;
-                seen.add(key);
-                records.push({
-                    ...entry,
-                    sourceText,
-                    targetLang: entry?.targetLang || fallbackTargetLang || targetLangSelect?.value || ''
-                });
-            });
-        };
-        add(translationRunReport?.entries, translationRunReport?.targetLang);
-        if (options.includeImported !== false) {
-            add(importedTranslateProgressState?.entries, importedTranslateProgressState?.targetLang);
-        }
-        add([...translationProgressTasks.values()], translationRunReport?.targetLang || targetLangSelect?.value);
-        return records;
-    }
-
-    function createEmptyTranslateDiscountCheckState() {
-        return {
-            status: 'idle',
-            checkedAt: 0,
-            targetLang: '',
-            sourceHits: { count: 0, samples: [] },
-            reportEntries: [],
-            evaluatedEntries: [],
-            blocks: [],
-            reviews: [],
-            passes: [],
-            regressionFailures: [],
-            localFoldFailures: [],
-            repairSummary: null,
-            hasGeneratedFile: false,
-            errorMessage: ''
-        };
-    }
-
-    function getDiscountCheckEntryLocation(entry = {}) {
+    function getTranslationIssueEntryLocation(entry = {}) {
         return [
             entry.sourceFile || entry.fileName,
             entry.sheetName,
@@ -7505,477 +7415,6 @@ function initTranslateTool() {
         ].filter(Boolean).join(' / ') || '未记录位置';
     }
 
-    function renderDiscountCheckItems(items = [], kind = 'block') {
-        const visibleItems = items.slice(0, 20);
-        const rows = visibleItems.map(({ entry, result }) => {
-            const issue = result.issues?.[0]?.message || '需要人工确认';
-            return `
-                <li class="discount-check-item ${kind === 'review' ? 'review' : ''}">
-                    <div class="discount-check-location">${escapeHtml(getDiscountCheckEntryLocation(entry))}</div>
-                    <div class="discount-check-text">
-                        <span>${escapeHtml(getDiscountGuardTextSnippet(entry.sourceText, 96))}</span>
-                        <span class="discount-check-arrow">→</span>
-                        <span>${escapeHtml(getDiscountGuardTextSnippet(entry.translatedText || '（空）', 96))}</span>
-                    </div>
-                    <p class="discount-check-reason">${escapeHtml(issue)}</p>
-                </li>
-            `;
-        }).join('');
-        const more = items.length > visibleItems.length
-            ? `<p class="discount-check-more">另有 ${items.length - visibleItems.length} 条未展开，修复时会一并处理可确定的错误。</p>`
-            : '';
-        return `<ul class="discount-check-list">${rows}</ul>${more}`;
-    }
-
-    function renderTranslateDiscountCheckState() {
-        if (!translateDiscountCheckStatus) return;
-        const state = translateDiscountCheckState;
-        const systemFailed = state.regressionFailures.length > 0 || state.localFoldFailures.length > 0;
-        let tone = '';
-        let title = '尚未检查';
-        let description = '点击“检查折扣问题”查看当前文件是否存在折扣方向错误。';
-
-        if (state.status === 'checking') {
-            tone = 'processing';
-            title = '正在检查折扣问题';
-            description = '正在扫描当前文件和已导入的翻译报告。';
-        } else if (state.status === 'repairing') {
-            tone = 'processing';
-            title = `正在修复 ${state.blocks.length} 条折扣错误`;
-            description = '将使用当前翻译通道重新翻译并自动复检；全部阻断问题清零后才生成交付版。';
-        } else if (state.status === 'error') {
-            tone = 'issue';
-            title = '折扣检查未完成';
-            description = state.errorMessage || '请重新检查后再试。';
-        } else if (systemFailed) {
-            tone = 'issue';
-            title = '折扣规则自检失败';
-            description = '本地折扣规则当前不可用，请重新启动桌面端后再试。';
-        } else if (state.status === 'ready') {
-            const blockCount = state.blocks.length;
-            const reviewCount = state.reviews.length;
-            const checkedCount = state.evaluatedEntries.length;
-            if (state.repairSummary && blockCount === 0) {
-                tone = reviewCount > 0 ? 'warning' : 'pass';
-                title = '修复完成';
-                description = `${state.repairSummary.resolvedCount} 条确定错误已通过复检${reviewCount ? `；另有 ${reviewCount} 条无法自动判断，文件中保持不变` : ''}。`;
-            } else if (state.repairSummary && blockCount > 0) {
-                tone = 'issue';
-                title = `仍有 ${blockCount} 条需要修复`;
-                description = `本次已有 ${state.repairSummary.resolvedCount} 条通过复检；请再次修复。阻断问题清零前不能下载交付版。`;
-            } else if (blockCount > 0) {
-                tone = 'issue';
-                title = `发现 ${blockCount} 条需要修复`;
-                description = `${checkedCount} 条折扣译文中，通过 ${state.passes.length} 条${reviewCount ? `，另有 ${reviewCount} 条无法自动判断` : ''}。`;
-            } else if (reviewCount > 0) {
-                tone = 'warning';
-                title = '未发现确定的折扣错误';
-                description = `已核对 ${checkedCount} 条；其中 ${reviewCount} 条包含占位符或范围，无法自动判断，文件中保持不变。`;
-            } else if (checkedCount > 0) {
-                tone = 'pass';
-                title = '未发现折扣语义问题';
-                description = `已核对 ${checkedCount} 条折扣译文，全部通过。`;
-            } else if (state.sourceHits.count > 0) {
-                tone = 'warning';
-                title = `发现 ${state.sourceHits.count} 条折扣表达`;
-                description = '当前没有可核对的译文报告；完成翻译或导入报告后可检查并修复。';
-            } else {
-                tone = 'pass';
-                title = '未发现折扣表达';
-                description = '当前所选文件和列中没有需要检查的折扣内容。';
-            }
-        }
-
-        translateDiscountCheckStatus.className = `translate-discount-guard-result${tone ? ` ${tone}` : ''}`;
-        translateDiscountCheckStatus.innerHTML = `<strong>${escapeHtml(title)}</strong><span>${escapeHtml(description)}</span>`;
-
-        const canRepair = state.status === 'ready' && !systemFailed && state.blocks.length > 0;
-        if (translateDiscountRepairBtn) {
-            translateDiscountRepairBtn.style.display = canRepair ? 'inline-flex' : 'none';
-            translateDiscountRepairBtn.disabled = Boolean(activeTranslateRunId);
-            translateDiscountRepairBtn.textContent = state.repairSummary
-                ? `再次修复（${state.blocks.length}）`
-                : '一键修复并生成文件';
-        }
-        if (translateDiscountDownloadBtn) {
-            const deliveryGate = getTranslationDeliveryGate();
-            translateDiscountDownloadBtn.style.display = state.hasGeneratedFile && deliveryGate.ready ? 'inline-flex' : 'none';
-            translateDiscountDownloadBtn.disabled = Boolean(activeTranslateRunId) || !deliveryGate.ready;
-            translateDiscountDownloadBtn.title = deliveryGate.ready
-                ? '下载已通过硬质检的交付版'
-                : `仍有 ${deliveryGate.blockingCount} 条阻断问题，不能下载交付版`;
-        }
-        if (translateDiscountCheckActions) {
-            const hasVisibleAction = canRepair || (state.hasGeneratedFile && getTranslationDeliveryGate().ready);
-            translateDiscountCheckActions.style.display = hasVisibleAction ? 'flex' : 'none';
-        }
-
-        const detailCount = state.blocks.length + state.reviews.length +
-            state.regressionFailures.length + state.localFoldFailures.length;
-        if (translateDiscountCheckDetails) {
-            translateDiscountCheckDetails.style.display = detailCount > 0 ? 'block' : 'none';
-        }
-        if (translateDiscountCheckDetailsSummary) {
-            translateDiscountCheckDetailsSummary.textContent = detailCount > 0
-                ? `查看详情（${detailCount}）`
-                : '查看详情';
-        }
-        if (translateDiscountCheckDetailsBody) {
-            const groups = [];
-            if (state.blocks.length) {
-                groups.push(`
-                    <section class="discount-check-group">
-                        <h5>需要修复 · ${state.blocks.length} 条</h5>
-                        ${renderDiscountCheckItems(state.blocks, 'block')}
-                    </section>
-                `);
-            }
-            if (state.reviews.length) {
-                groups.push(`
-                    <section class="discount-check-group">
-                        <h5>无法自动判断 · ${state.reviews.length} 条</h5>
-                        ${renderDiscountCheckItems(state.reviews, 'review')}
-                    </section>
-                `);
-            }
-            if (systemFailed) {
-                const diagnostics = [
-                    ...state.regressionFailures.map(item => `规则异常：${item.label}，预期 ${item.expected}，实际 ${item.actual}`),
-                    ...state.localFoldFailures.map(item => `换算异常：${item.source} → ${item.target || '无本地模板'}（${item.status}）`)
-                ];
-                groups.push(`
-                    <section class="discount-check-group">
-                        <h5>规则诊断</h5>
-                        <ul class="discount-check-list">
-                            ${diagnostics.map(message => `<li class="discount-check-item"><p class="discount-check-reason">${escapeHtml(message)}</p></li>`).join('')}
-                        </ul>
-                    </section>
-                `);
-            }
-            translateDiscountCheckDetailsBody.innerHTML = groups.join('');
-        }
-
-        if (translateDiscountCheckBtn) {
-            translateDiscountCheckBtn.disabled = state.status === 'checking' || state.status === 'repairing' || Boolean(activeTranslateRunId);
-            translateDiscountCheckBtn.textContent = state.status === 'checking'
-                ? '检查中...'
-                : (state.checkedAt ? '重新检查' : '检查折扣问题');
-        }
-    }
-
-    function resetTranslateDiscountCheck() {
-        translateDiscountCheckState = createEmptyTranslateDiscountCheckState();
-        if (translateDiscountCheckDetails) translateDiscountCheckDetails.open = false;
-        renderTranslateDiscountCheckState();
-    }
-
-    function runLocalDiscountCheck(options = {}) {
-        if (!translateDiscountCheckStatus) return translateDiscountCheckState;
-        const previousState = translateDiscountCheckState;
-        translateDiscountCheckState = {
-            ...createEmptyTranslateDiscountCheckState(),
-            status: 'checking',
-            hasGeneratedFile: Boolean(options.hasGeneratedFile ?? previousState.hasGeneratedFile)
-        };
-        renderTranslateDiscountCheckState();
-
-        const guard = getNexusDiscountGuard();
-        if (!guard) {
-            translateDiscountCheckState = {
-                ...translateDiscountCheckState,
-                status: 'error',
-                errorMessage: '本地折扣规则未加载，请重新启动桌面端后再试。'
-            };
-            renderTranslateDiscountCheckState();
-            return translateDiscountCheckState;
-        }
-
-        /* These cases exercise both directions. Expected "block" and
-         * "review" outcomes are successful diagnostics, not file failures. */
-        const regressionCases = [
-            { label: '英语：3折 → 70% off', source: '3折', target: '70% off', lang: 'en', expected: 'pass' },
-            { label: '英语：3折 → 30% off', source: '3折', target: '30% off', lang: 'en', expected: 'block' },
-            { label: '英语：3折 → 支付原价30%', source: '3折', target: '30% of the original price', lang: 'en', expected: 'pass' },
-            { label: '英语：3折 → 裸30%', source: '3折', target: '30%', lang: 'en', expected: 'review' },
-            { label: '泰语：三折 → ลด 70%', source: '三折', target: 'ลด 70%', lang: 'th', expected: 'pass' },
-            { label: '泰语：三折 → ลด 30%', source: '三折', target: 'ลด 30%', lang: 'th', expected: 'block' },
-            { label: '日语：3折 → 7割引', source: '3折', target: '7割引', lang: 'ja', expected: 'pass' },
-            { label: '占位符：%s折', source: '%s折', target: '%s OFF', lang: 'en', expected: 'review' }
-        ];
-        const regressionResults = regressionCases.map(test => ({
-            ...test,
-            actual: evaluateNexusDiscountTranslation(test.source, test.target, test.lang).status
-        }));
-        const regressionFailures = regressionResults.filter(test => test.actual !== test.expected);
-
-        const currentTargetLang = targetLangSelect?.value || 'en';
-        const localFoldResults = [8, 6, 3, 1].map(fold => {
-            const source = `${fold}折`;
-            const target = getNexusStandaloneDiscountTranslation(source, currentTargetLang);
-            const status = target == null
-                ? 'review'
-                : evaluateNexusDiscountTranslation(source, target, currentTargetLang).status;
-            return { fold, source, target, status };
-        });
-        const localFoldFailures = localFoldResults.filter(item => item.status !== 'pass');
-
-        const sourceHits = collectDiscountGuardSourceHits();
-        const reportEntries = collectDiscountGuardReportEntries({
-            includeImported: options.includeImported !== false
-        });
-        const evaluatedEntries = reportEntries.map(entry => ({
-            entry,
-            result: evaluateNexusDiscountTranslation(entry.sourceText, entry.translatedText || '', entry.targetLang)
-        }));
-        const blocks = evaluatedEntries.filter(item => item.result.status === 'block');
-        const reviews = evaluatedEntries.filter(item => item.result.status === 'review');
-        const passes = evaluatedEntries.filter(item => item.result.status === 'pass');
-        const repairSummary = options.repairSummary
-            ? {
-                ...options.repairSummary,
-                resolvedCount: Math.max(0, Number(options.repairSummary.beforeBlockCount || 0) - blocks.length)
-            }
-            : null;
-
-        translateDiscountCheckState = {
-            status: 'ready',
-            checkedAt: Date.now(),
-            targetLang: currentTargetLang,
-            sourceHits,
-            reportEntries,
-            evaluatedEntries,
-            blocks,
-            reviews,
-            passes,
-            regressionFailures,
-            localFoldFailures,
-            repairSummary,
-            hasGeneratedFile: Boolean(options.hasGeneratedFile ?? previousState.hasGeneratedFile),
-            errorMessage: ''
-        };
-        renderTranslateDiscountCheckState();
-        return translateDiscountCheckState;
-    }
-
-    function findTaskForDiscountCheckEntry(entry, tasks = [], taskByKey = null, fallbackIndex = null) {
-        if (!entry || !tasks.length) return null;
-        const resolvedTaskByKey = taskByKey || new Map(tasks.map(task => [task.taskKey, task]));
-        const resolvedFallbackIndex = fallbackIndex || buildTranslateImportTaskIndex(tasks);
-        const importedMatch = findImportedTranslationTaskMatch(entry, resolvedTaskByKey, resolvedFallbackIndex);
-        if (importedMatch) return importedMatch;
-
-        const entryRow = Number(entry.rowNumber || 0);
-        const entryColumn = Number(entry.column || 0);
-        const entrySource = normalizeTranslateImportKeyPart(entry.sourceText);
-        const entrySheet = normalizeTranslateImportKeyPart(entry.sheetName);
-        const candidates = tasks.filter(task => {
-            const taskRow = Number(task.originalRowNumber || task.rowIndex + 1);
-            const taskColumn = Number(task.colIndex + 1);
-            if (entryRow && taskRow !== entryRow) return false;
-            if (entryColumn && taskColumn !== entryColumn) return false;
-            if (entrySource && normalizeTranslateImportKeyPart(task.text) !== entrySource) return false;
-            if (
-                entrySheet &&
-                task.source?.sheetName &&
-                normalizeTranslateImportKeyPart(task.source.sheetName) !== entrySheet
-            ) {
-                return false;
-            }
-            return Boolean(entryRow || entryColumn || entrySource);
-        });
-        if (!candidates.length) return null;
-
-        const modelKeys = new Set(
-            [entry.model, entry.profile]
-                .filter(Boolean)
-                .map(normalizeTranslateImportKeyPart)
-        );
-        return candidates.find(task =>
-            modelKeys.has(normalizeTranslateImportKeyPart(task.profile?.model || '')) ||
-            modelKeys.has(normalizeTranslateImportKeyPart(task.profile?.name || getCompactModelLabel(task.profile)))
-        ) || candidates[0];
-    }
-
-    function refreshDiscountQaInOutput(evaluatedEntries = [], tasks = [], targetLang = '') {
-        if (!evaluatedEntries.length || !tasks.length) return { refreshed: 0, unmatched: 0 };
-        const taskByKey = new Map(tasks.map(task => [task.taskKey, task]));
-        const fallbackIndex = buildTranslateImportTaskIndex(tasks);
-        const usedTaskKeys = new Set();
-        let refreshed = 0;
-        let unmatched = 0;
-
-        evaluatedEntries.forEach(({ entry }) => {
-            if (!entry?.translatedText || isTranslateFailureText(entry.translatedText)) return;
-            const task = findTaskForDiscountCheckEntry(entry, tasks, taskByKey, fallbackIndex);
-            if (!task || usedTaskKeys.has(task.taskKey)) {
-                unmatched++;
-                return;
-            }
-            usedTaskKeys.add(task.taskKey);
-            const qaStatus = summarizeTranslationQa(
-                task.text,
-                entry.translatedText,
-                task.glossaryTerms || [],
-                targetLang,
-                task
-            );
-            writeTranslationResult(task, entry.translatedText, qaStatus);
-            upsertTranslationRunReportEntry(task, entry.translatedText, qaStatus, {
-                preserveResolution: true
-            });
-            refreshed++;
-        });
-        refreshTranslationRunCountsFromReport();
-        return { refreshed, unmatched };
-    }
-
-    async function repairDetectedDiscountIssues() {
-        if (activeTranslateRunId) {
-            setStatus('warning', '已有翻译任务正在运行', '请等待当前任务完成后再修复折扣问题。');
-            return;
-        }
-        if (!translateDiscountCheckState.blocks.length) {
-            runLocalDiscountCheck();
-            if (!translateDiscountCheckState.blocks.length) {
-                setStatus('success', '没有需要自动修复的折扣错误', '当前检查结果中没有确定的折扣语义错误。');
-            }
-            return;
-        }
-        if (!sheetData || !translateSources.length) {
-            setStatus('warning', '无法修复折扣问题', '请先上传与翻译报告对应的原文件。');
-            return;
-        }
-        if (selectedColumns.length === 0) {
-            columnSelectSection.style.display = 'block';
-            renderColumnList();
-            columnSelectSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            setStatus('warning', '请选择原文列', '工具需要原文列来定位并修复折扣问题。');
-            return;
-        }
-
-        const activeProfiles = getSelectedTranslateProfiles();
-        if (!activeProfiles.length) {
-            setStatus('error', '未选择可用修复通道', '请先勾选至少一个翻译模型通道。', revealApiConfigPanel, '去配置');
-            return;
-        }
-
-        const reportTargetLang = translateDiscountCheckState.blocks
-            .map(item => item.entry?.targetLang)
-            .find(Boolean) ||
-            importedTranslateProgressState?.targetLang ||
-            translationRunReport?.targetLang ||
-            targetLangSelect?.value ||
-            '';
-        if (reportTargetLang && targetLangSelect && targetLangSelect.value !== reportTargetLang) {
-            targetLangSelect.value = reportTargetLang;
-            selectedTranslateTargetLangs = new Set([reportTargetLang]);
-            renderTranslateTargetLanguageList();
-        }
-
-        const allTasks = collectTranslationTasks(activeProfiles);
-        const taskByKey = new Map(allTasks.map(task => [task.taskKey, task]));
-        const fallbackIndex = buildTranslateImportTaskIndex(allTasks);
-        const retryTasks = [];
-        const usedTaskKeys = new Set();
-        translateDiscountCheckState.blocks.forEach(({ entry }) => {
-            const matchedTask = findTaskForDiscountCheckEntry(entry, allTasks, taskByKey, fallbackIndex);
-            const task = matchedTask
-                ? {
-                    ...matchedTask,
-                    retryOfTaskKey: entry.taskKey || matchedTask.taskKey
-                }
-                : null;
-            if (!task || usedTaskKeys.has(task.taskKey)) return;
-            retryTasks.push(task);
-            usedTaskKeys.add(task.taskKey);
-        });
-
-        if (!retryTasks.length) {
-            setStatus('error', '没有定位到可修复的行', '请确认当前文件、工作表和所选原文列与翻译报告一致。');
-            return;
-        }
-
-        const beforeBlockCount = translateDiscountCheckState.blocks.length;
-        const unmappedCount = Math.max(0, beforeBlockCount - retryTasks.length);
-        if (importedTranslateProgressState?.entries?.length) {
-            initializeTranslateOutputFromImportedReport(
-                allTasks,
-                reportTargetLang || targetLangSelect?.value || '',
-                { includeQaFailed: true }
-            );
-        }
-        refreshDiscountQaInOutput(
-            translateDiscountCheckState.evaluatedEntries,
-            allTasks,
-            reportTargetLang || targetLangSelect?.value || ''
-        );
-        failedTranslationTasks = retryTasks;
-        updateTranslationRunActions();
-        translateDiscountCheckState = {
-            ...translateDiscountCheckState,
-            status: 'repairing'
-        };
-        renderTranslateDiscountCheckState();
-        setStatus(
-            'processing',
-            '正在修复折扣问题',
-            `已定位 ${retryTasks.length} 条，将使用当前翻译通道重新翻译并自动复检。`
-        );
-
-        const previousPostCheckEnabled = Boolean(translatePostCheckInput?.checked);
-        if (translatePostCheckInput) translatePostCheckInput.checked = true;
-        try {
-            const result = await retryFailedTranslations({
-                skipConfirm: true,
-                suppressAutoSave: true
-            });
-            if (result?.status !== 'success') {
-                translateDiscountCheckState = {
-                    ...translateDiscountCheckState,
-                    status: 'error',
-                    errorMessage: result?.status === 'cancelled' ? '修复已取消。' : '修复未完成，请稍后重试。'
-                };
-                renderTranslateDiscountCheckState();
-                return;
-            }
-            const nextState = runLocalDiscountCheck({
-                hasGeneratedFile: true,
-                includeImported: false,
-                repairSummary: {
-                    beforeBlockCount,
-                    attemptedCount: retryTasks.length,
-                    unmappedCount
-                }
-            });
-            const remainingText = nextState.blocks.length
-                ? `，仍有 ${nextState.blocks.length} 条未通过`
-                : '';
-            setStatus(
-                nextState.blocks.length ? 'warning' : 'success',
-                nextState.blocks.length ? '折扣修复已完成，仍有问题' : '折扣修复完成',
-                nextState.blocks.length
-                    ? `已修复并复检 ${retryTasks.length} 条${remainingText}；当前只保留问题报告，不生成交付版。`
-                    : `已修复并复检 ${retryTasks.length} 条；硬问题已清零，可下载交付版。`
-            );
-            if (nextState.blocks.length) {
-                finishInspectorTaskTimer('warning', '折扣修复已完成，仍有问题');
-            }
-        } catch (error) {
-            console.error('Discount repair error:', error);
-            recordClientError('discount-repair', error);
-            translateDiscountCheckState = {
-                ...translateDiscountCheckState,
-                status: 'error',
-                errorMessage: error?.message || '修复未完成，请稍后重试。'
-            };
-            renderTranslateDiscountCheckState();
-            setStatus('error', '折扣修复失败', error?.message || '未知错误');
-        } finally {
-            if (translatePostCheckInput) {
-                translatePostCheckInput.checked = previousPostCheckEnabled;
-            }
-        }
-    }
 
     async function pauseTranslate() {
         if (isTranslationCancelled) return;
@@ -8073,6 +7512,7 @@ function initTranslateTool() {
         translateChannelProgressState = new Map();
         translateRunSummaryState = { completed: 0, total: 0, phase: '等待开始' };
         translateRunConsistencyTerms = [];
+        translateCompletionHistory = [];
         successCount = 0;
         failCount = 0;
         document.getElementById('translateProgressFill').style.width = '0%';
@@ -8145,19 +7585,11 @@ function initTranslateTool() {
             const disabled = [];
             if (!isTranslateConsistencyMemoryEnabled()) disabled.push('一致性');
             if (!translatePostCheckInput?.checked) disabled.push('轻量检测');
-            if (!isTranslateFastBatchModeEnabled()) disabled.push('快速模式');
             if (!translateCompletenessCheckInput?.checked) disabled.push('漏译检查');
-            const compactEnabled = isTranslateAutoCompactLongEnabled();
-            const autoRetryEnabled = isTranslateAutoRetryMultiTargetEnabled();
-            if (disabled.length === 0 && !compactEnabled && !autoRetryEnabled) {
+            if (disabled.length === 0) {
                 translateQualitySummary.textContent = '推荐策略已启用';
-            } else if (disabled.length === 0) {
-                translateQualitySummary.textContent = `推荐策略 + ${[
-                    compactEnabled ? '超长精简' : '',
-                    autoRetryEnabled ? '自动重译硬问题' : ''
-                ].filter(Boolean).join(' + ')}`;
             } else {
-                translateQualitySummary.textContent = `已调整：关闭 ${disabled.join('、')}${compactEnabled ? '，开启超长精简' : ''}${autoRetryEnabled ? '，开启自动重译硬问题' : ''}`;
+                translateQualitySummary.textContent = `已调整：关闭 ${disabled.join('、')}`;
             }
         }
     }
@@ -8273,18 +7705,18 @@ function initTranslateTool() {
                 : '') || entry.error || entry.completenessRisk || '硬质检未通过';
             return `
                 <li class="discount-check-item">
-                    <div class="discount-check-location">${escapeHtml(getDiscountCheckEntryLocation(entry))}</div>
+                    <div class="discount-check-location">${escapeHtml(getTranslationIssueEntryLocation(entry))}</div>
                     <div class="discount-check-text">
-                        <span>${escapeHtml(getDiscountGuardTextSnippet(entry.sourceText || '（原文为空）', 160))}</span>
+                        <span>${escapeHtml(getTranslationIssueTextSnippet(entry.sourceText || '（原文为空）', 160))}</span>
                         <span class="discount-check-arrow">→</span>
-                        <span>${escapeHtml(getDiscountGuardTextSnippet(entry.translatedText || '（译文为空）', 160))}</span>
+                        <span>${escapeHtml(getTranslationIssueTextSnippet(entry.translatedText || '（译文为空）', 160))}</span>
                     </div>
                     <p class="discount-check-reason">${escapeHtml(reason)}</p>
                 </li>
             `;
         }).join('');
         const more = entries.length > visibleEntries.length
-            ? `<p class="discount-check-more">另有 ${entries.length - visibleEntries.length} 条未展开；点击“一键修复”时会一并处理。</p>`
+            ? `<p class="discount-check-more">另有 ${entries.length - visibleEntries.length} 条未展开；完整位置与原因请查看问题报告。</p>`
             : '';
 
         translateHardQaDetails.style.display = 'block';
@@ -8398,14 +7830,14 @@ function initTranslateTool() {
                 : `${getTranslateLanguageName(currentLang)}已完成`;
         } else if (translateLanguageRunState.status === 'needs_action') {
             translateLanguageRunMeta.textContent = isMulti
-                ? `队列处理完成；以下语言仍有阻断问题，只生成报告：${failedNames.join('、') || '请查看报告'}`
-                : `${getTranslateLanguageName(currentLang)}仍有阻断问题，只生成报告`;
+                ? `队列处理完成；以下语言仍有阻断问题：${failedNames.join('、') || '请查看报告'}。实际保存结果请查看单语言完成状态或“最近任务/文件”。`
+                : `${getTranslateLanguageName(currentLang)}仍有阻断问题；实际保存结果请查看完成状态或“最近任务/文件”。`;
         } else if (translateLanguageRunState.status === 'stopped') {
             translateLanguageRunMeta.textContent = `队列已停止，已完成 ${completed.size}/${targets.length} 种语言${failedNames.length ? `，异常：${failedNames.join('、')}` : ''}`;
         } else if (isMulti) {
             translateLanguageRunMeta.textContent = `已完成 ${completed.size}/${targets.length} 种语言${completedNames.length ? `：${completedNames.join('、')}` : ''}${nextLang ? `；下一种：${getTranslateLanguageName(nextLang)}` : ''}`;
         } else {
-            translateLanguageRunMeta.textContent = `${getTranslateLanguageName(currentLang)}翻译进行中；硬错误清零后自动保存交付版，否则只保存问题报告。`;
+            translateLanguageRunMeta.textContent = `${getTranslateLanguageName(currentLang)}翻译进行中；完成后会按质检状态尝试保存交付版，或未验证版和问题报告。`;
         }
 
         translateLanguageRunChips.innerHTML = targets.map((lang, index) => {
@@ -8547,9 +7979,7 @@ function initTranslateTool() {
             : '选择文件和翻译列后显示预计任务量';
         const settleSeconds = (TRANSLATION_BATCH_SETTLE_DELAY_MS / 1000).toFixed(1).replace(/\.0$/, '');
         const qaModeText = translatePostCheckInput?.checked
-            ? (isTranslateFastBatchModeEnabled()
-                ? '快速模式：第一轮只记录 QA，不逐条 AI 修复'
-                : '深度模式：QA 硬问题会边翻边自动修复')
+            ? '一键模式：集中首译后，在同一任务内自动处理高置信阻断项'
             : '未启用译后 QA';
 
         translateSubmitPlanHint.className = profiles.some(profile => profile.provider === 'agnes')
@@ -8572,16 +8002,18 @@ function initTranslateTool() {
             targetLang: '',
             entries: [],
             reusableEntries: [],
+            blockingEntries: [],
+            reviewEntries: [],
             suspiciousEntries: [],
             reviewedAt: 0,
             reviewContextKey: '',
             reviewSummary: null,
             importTimings: null,
             issueSummary: null,
-            selectedIssueFilters: [],
             failedOrMissingCount: 0,
             coverageCheckedAt: 0,
             coverageTaskCount: 0,
+            continuationPlan: null,
             skippedCount: 0
         };
     }
@@ -8596,155 +8028,193 @@ function initTranslateTool() {
                 return [term?.source || '', translation.value || '', translation.constraint || ''].join('\u001f');
             })
             .join('\u001e');
+        const qualityPolicySignature = [
+            globalThis.NexusLanguageQualityProfiles?.getProfileAuditKey?.(targetLang) || '',
+            globalThis.NexusLanguageCarryoverGuard?.POLICY_VERSION || '',
+            globalThis.NexusTranslationIssuePolicy?.POLICY_VERSION || '',
+            globalThis.NexusTranslationFormatTokenPolicy?.POLICY_VERSION || '',
+            globalThis.NexusTranslationNumberPolicy?.POLICY_VERSION || ''
+        ].join('\u001f');
         return [
             targetLang,
+            qualityPolicySignature,
             currentProject?.id || currentProject?.name || '',
             currentProject?.rules || '',
             glossarySignature
         ].join('\u001d');
     }
 
-    function getImportedIssueFilterSelection(state = importedTranslateProgressState) {
-        const validIds = new Set(TRANSLATE_IMPORT_ISSUE_FILTERS.map(filter => filter.id));
-        return new Set((state?.selectedIssueFilters || []).filter(id => validIds.has(id)));
-    }
-
-    function setImportedIssueFilterSelection(ids = []) {
-        const validIds = new Set(TRANSLATE_IMPORT_ISSUE_FILTERS.map(filter => filter.id));
-        importedTranslateProgressState.selectedIssueFilters = [...new Set(ids.filter(id => validIds.has(id)))];
-    }
-
     function getTranslationReportEntryDedupeKey(entry) {
         if (!entry) return '';
+        const sourceFile = normalizeTranslateImportKeyPart(entry.sourceFile);
+        const sheetName = normalizeTranslateImportKeyPart(entry.sheetName);
+        const rowNumber = normalizeTranslateImportKeyPart(entry.rowNumber);
+        const column = normalizeTranslateImportKeyPart(entry.column);
+        const sourceText = normalizeTranslateImportKeyPart(entry.sourceText);
+        if (rowNumber && column && (sourceFile || sheetName)) {
+            return `cell|${[sourceFile, sheetName, rowNumber, column, sourceText].join('|')}`;
+        }
+        return entry.taskKey ? `task|${normalizeTranslateImportKeyPart(entry.taskKey)}` : '';
+    }
+
+    function getTranslationReportCandidateRank(entry = {}) {
+        const translatedText = String(entry.translatedText || '').trim();
+        const hasUsableText = Boolean(translatedText && !isTranslateFailureText(translatedText));
+        const kind = classifyTranslationReportEntry(entry);
+        const kindRank = {
+            success: 500,
+            soft: 400,
+            length: 400,
+            hard: 200,
+            missing: 0
+        }[kind] ?? 100;
+        const decision = globalThis.NexusTranslationDeliveryPolicy?.normalizeDecision
+            ? globalThis.NexusTranslationDeliveryPolicy.normalizeDecision(entry.userDecision)
+            : String(entry.userDecision || '').trim();
+        return kindRank +
+            (hasUsableText ? 50 : 0) +
+            (entry.manualResolutionValid ? 1000 : 0) +
+            (entry.manualResolutionValid && entry.revisionApplied && decision === 'use_revision' ? 100 : 0);
+    }
+
+    function getTranslationReportCandidateTieKey(entry = {}) {
         return [
-            entry.taskKey,
-            entry.sourceFile,
-            entry.sheetName,
-            entry.rowNumber,
-            entry.column,
+            entry.translatedText,
+            entry.qaStatus,
             entry.profile,
             entry.model,
-            entry.sourceText
-        ].map(value => normalizeTranslateImportKeyPart(value)).join('|');
+            entry.taskKey
+        ].map(value => normalizeTranslateImportKeyPart(value)).join('\u001f');
+    }
+
+    function compactLegacyTranslationVariant(entry = {}) {
+        return {
+            taskKey: entry.taskKey || '',
+            profile: entry.profile || '',
+            model: entry.model || '',
+            status: entry.status || '',
+            translatedText: entry.translatedText || '',
+            qaStatus: entry.qaStatus || '',
+            userDecision: entry.userDecision || '',
+            revisedText: entry.revisedText || ''
+        };
+    }
+
+    function mergeLegacyTranslationVariantAudit(preferred, left, right) {
+        const variants = [
+            ...(Array.isArray(left?.legacyVariants) ? left.legacyVariants : [compactLegacyTranslationVariant(left)]),
+            ...(Array.isArray(right?.legacyVariants) ? right.legacyVariants : [compactLegacyTranslationVariant(right)])
+        ];
+        const seen = new Set();
+        const uniqueVariants = variants.filter(variant => {
+            const key = JSON.stringify(variant);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+        return {
+            ...preferred,
+            legacyVariants: uniqueVariants,
+            legacyVariantCount: uniqueVariants.length
+        };
+    }
+
+    function selectPreferredTranslationReportEntry(left, right) {
+        if (!left) return right;
+        if (!right) return left;
+        const leftRank = getTranslationReportCandidateRank(left);
+        const rightRank = getTranslationReportCandidateRank(right);
+        let preferred = left;
+        if (rightRank > leftRank) preferred = right;
+        else if (rightRank === leftRank && getTranslationReportCandidateTieKey(right) < getTranslationReportCandidateTieKey(left)) {
+            preferred = right;
+        }
+        const sameCandidate = JSON.stringify(compactLegacyTranslationVariant(left)) ===
+            JSON.stringify(compactLegacyTranslationVariant(right));
+        const hasExistingAudit = (Array.isArray(left.legacyVariants) && left.legacyVariants.length > 1) ||
+            (Array.isArray(right.legacyVariants) && right.legacyVariants.length > 1);
+        if (sameCandidate && !hasExistingAudit) return preferred;
+        return mergeLegacyTranslationVariantAudit(preferred, left, right);
     }
 
     function dedupeTranslationReportEntries(entries = []) {
-        const seen = new Set();
         const unique = [];
+        const indexByKey = new Map();
         (entries || []).forEach(entry => {
             const key = getTranslationReportEntryDedupeKey(entry);
-            if (key && seen.has(key)) return;
-            if (key) seen.add(key);
+            if (key && indexByKey.has(key)) {
+                const index = indexByKey.get(key);
+                unique[index] = selectPreferredTranslationReportEntry(unique[index], entry);
+                return;
+            }
+            if (key) indexByKey.set(key, unique.length);
             unique.push(entry);
         });
         return unique;
     }
 
-    function getTranslationReportIssueFilterStats(state = importedTranslateProgressState) {
-        const failedEntries = (state?.entries || []).filter(isFailedTranslationReportEntry);
-        return TRANSLATE_IMPORT_ISSUE_FILTERS
-            .map(filter => {
-                const entries = dedupeTranslationReportEntries(failedEntries.filter(entry => filter.match(entry)));
-                return { filter, entries, count: entries.length };
-            })
-            .filter(stat => stat.count > 0);
-    }
-
-    function getTranslationReportEntriesForIssueFilters(state = importedTranslateProgressState, selectedIds = getImportedIssueFilterSelection(state)) {
-        const selectedSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds || []);
-        if (!selectedSet.size) return [];
-        const activeFilters = TRANSLATE_IMPORT_ISSUE_FILTERS.filter(filter => selectedSet.has(filter.id));
-        if (!activeFilters.length) return [];
-        const failedEntries = (state?.entries || []).filter(isFailedTranslationReportEntry);
-        return dedupeTranslationReportEntries(failedEntries.filter(entry =>
-            activeFilters.some(filter => filter.match(entry))
-        ));
-    }
-
-    function getImportedIssueRetryPreview(state = importedTranslateProgressState) {
-        const selectedIds = getImportedIssueFilterSelection(state);
-        const selectedFilters = TRANSLATE_IMPORT_ISSUE_FILTERS.filter(filter => selectedIds.has(filter.id));
-        const mandatoryMissingEntries = dedupeTranslationReportEntries(
-            (state?.entries || []).filter(entry =>
-                isFailedTranslationReportEntry(entry) && isMissingTranslationReportEntry(entry)
+    function buildImportedContinuationPlan(state = importedTranslateProgressState) {
+        const issuePolicy = globalThis.NexusTranslationIssuePolicy;
+        const entries = dedupeTranslationReportEntries(state?.entries || []);
+        if (!issuePolicy?.buildPlan) {
+            const repairEntries = entries.filter(entry =>
+                isMissingTranslationReportEntry(entry) || isHardTranslationReportEntry(entry)
+            );
+            const repairKeys = new Set(repairEntries.map(getTranslationReportEntryDedupeKey));
+            return {
+                repairEntries,
+                reviewEntries: [],
+                reusableEntries: entries.filter(entry => !repairKeys.has(getTranslationReportEntryDedupeKey(entry))),
+                repairIssueIds: [],
+                repairCount: repairEntries.length,
+                reviewCount: 0,
+                reusableCount: Math.max(0, entries.length - repairEntries.length),
+                verified: repairEntries.length === 0
+            };
+        }
+        const canonicalPlan = issuePolicy.buildPlan(entries, getTranslationReportEntryDedupeKey);
+        const repairIssueIds = canonicalPlan.defaultSelectedIds;
+        const requiredEntries = issuePolicy.getSelectedEntryUnion(canonicalPlan, repairIssueIds);
+        const missingEntries = entries.filter(isMissingTranslationReportEntry);
+        const repairEntries = dedupeTranslationReportEntries([...missingEntries, ...requiredEntries]);
+        const repairKeys = new Set(repairEntries.map(getTranslationReportEntryDedupeKey));
+        const reviewEntries = canonicalPlan.items
+            .filter(item =>
+                item.findings.length > 0 &&
+                item.findings.every(finding => finding.tier !== 'required') &&
+                !repairKeys.has(getTranslationReportEntryDedupeKey(item.entry))
             )
+            .map(item => item.entry);
+        const reusableEntries = entries.filter(entry =>
+            entry.translatedText &&
+            !isTranslateFailureText(entry.translatedText) &&
+            !repairKeys.has(getTranslationReportEntryDedupeKey(entry))
         );
-        const selectedEntries = selectedIds.size
-            ? getTranslationReportEntriesForIssueFilters(state, selectedIds)
-            : [];
-        const entries = selectedIds.size
-            ? dedupeTranslationReportEntries([...mandatoryMissingEntries, ...selectedEntries])
-            : dedupeTranslationReportEntries(state?.suspiciousEntries || []);
         return {
-            custom: selectedIds.size > 0,
-            entries,
-            count: entries.length,
-            mandatoryMissingCount: mandatoryMissingEntries.length,
-            selectedIssueCount: selectedEntries.length,
-            selectedFilters
+            repairEntries,
+            reviewEntries,
+            reusableEntries,
+            repairIssueIds,
+            repairCount: repairEntries.length,
+            reviewCount: reviewEntries.length,
+            reusableCount: reusableEntries.length,
+            verified: repairEntries.length === 0,
+            canonicalPlan
         };
     }
 
-    function formatImportedIssueFilterSelection(preview) {
-        const labels = (preview?.selectedFilters || []).map(filter => filter.label);
-        if (!labels.length) return '';
-        return labels.length <= 3 ? labels.join('、') : `${labels.slice(0, 3).join('、')}等 ${labels.length} 类`;
-    }
-
-    function renderTranslateImportIssueFilters(state = importedTranslateProgressState) {
-        if (!translateImportIssueFilterPanel || !translateImportIssueFilterList || !translateImportIssueFilterSummary) return;
-        const stats = getTranslationReportIssueFilterStats(state);
-        if (!state?.entries?.length || !stats.length) {
-            translateImportIssueFilterPanel.style.display = 'none';
-            translateImportIssueFilterList.innerHTML = '';
-            translateImportIssueFilterSummary.textContent = '暂无可筛选问题';
-            return;
-        }
-
-        const availableIds = new Set(stats.map(stat => stat.filter.id));
-        const selectedIds = getImportedIssueFilterSelection(state);
-        const prunedSelection = [...selectedIds].filter(id => availableIds.has(id));
-        if (prunedSelection.length !== selectedIds.size) {
-            setImportedIssueFilterSelection(prunedSelection);
-        }
-
-        const preview = getImportedIssueRetryPreview(state);
-        translateImportIssueFilterPanel.style.display = 'block';
-        translateImportIssueFilterSummary.textContent = preview.custom
-            ? (preview.mandatoryMissingCount > 0
-                ? `已选 ${preview.selectedFilters.length} 类；另含必补缺失 ${preview.mandatoryMissingCount} 条，合计 ${preview.count} 条`
-                : `已选 ${preview.selectedFilters.length} 类，约 ${preview.count} 条`)
-            : (state.suspiciousEntries?.length
-                ? `未选择时按可疑行 ${state.suspiciousEntries.length} 条`
-                : '勾选类型后启用定向重译');
-
-        const activeSelection = getImportedIssueFilterSelection(state);
-        translateImportIssueFilterList.innerHTML = stats.map(({ filter, count }) => {
-            const checked = activeSelection.has(filter.id);
-            const inputId = `translateImportIssueFilter_${filter.id}`;
-            return `
-                <label class="resource-check-item translate-issue-filter-item${checked ? ' selected' : ''}" for="${escapeAttribute(inputId)}">
-                    <input type="checkbox" id="${escapeAttribute(inputId)}" data-issue-filter="${escapeAttribute(filter.id)}" ${checked ? 'checked' : ''} ${activeTranslateRunId ? 'disabled' : ''}>
-                    <span class="resource-main">
-                        <span class="resource-title-line">
-                            <span class="resource-title">${escapeHtml(filter.label)}</span>
-                            <span class="translate-issue-filter-count">${count}</span>
-                        </span>
-                        <span class="resource-meta">${escapeHtml(filter.description)}</span>
-                    </span>
-                </label>
-            `;
-        }).join('');
-
-        translateImportIssueFilterList.querySelectorAll('input[data-issue-filter]').forEach(input => {
-            input.addEventListener('change', () => {
-                const selected = [...translateImportIssueFilterList.querySelectorAll('input[data-issue-filter]:checked')]
-                    .map(item => item.dataset.issueFilter)
-                    .filter(Boolean);
-                setImportedIssueFilterSelection(selected);
-                updateTranslateProgressImportStatus();
-            });
-        });
+    function getImportedIssueRetryPreview(state = importedTranslateProgressState) {
+        const plan = buildImportedContinuationPlan(state);
+        return {
+            custom: false,
+            entries: plan.repairEntries,
+            count: plan.repairCount,
+            mandatoryMissingCount: plan.repairEntries.filter(isMissingTranslationReportEntry).length,
+            selectedIssueCount: plan.repairCount,
+            selectedFilters: [],
+            selectedIssueIds: plan.repairIssueIds,
+            plan
+        };
     }
 
     function updateTranslateProgressImportStatus() {
@@ -8752,15 +8222,11 @@ function initTranslateTool() {
         const state = importedTranslateProgressState;
         if (!state?.entries?.length) {
             translateProgressImportStatus.className = 'translate-import-status';
-            translateProgressImportStatus.textContent = '导入旧报告后复用成功译文，仅处理失败、缺失和指定问题。';
+            translateProgressImportStatus.textContent = '导入旧报告后自动复用可用译文，仅处理高置信必须项；建议复核不会调用 AI。';
             if (translateBtnLabel) translateBtnLabel.textContent = '开始翻译';
             if (translateClearImportedProgressBtn) translateClearImportedProgressBtn.style.display = 'none';
             if (translateReviewImportedProgressBtn) translateReviewImportedProgressBtn.disabled = true;
             if (translateReviewImportedProgressBtn) translateReviewImportedProgressBtn.style.display = 'none';
-            if (translateRetrySuspiciousBtn) translateRetrySuspiciousBtn.style.display = 'none';
-            if (translateCompactLongImportedBtn) translateCompactLongImportedBtn.style.display = 'none';
-            if (translateImportIssueFilterPanel) translateImportIssueFilterPanel.style.display = 'none';
-            if (translateImportIssueFilterList) translateImportIssueFilterList.innerHTML = '';
             updateTranslateSubmitPlanHint();
             return;
         }
@@ -8768,19 +8234,17 @@ function initTranslateTool() {
         const languageText = state.targetLang
             ? `目标语言 ${getTranslateLanguageName(state.targetLang)}`
             : '未识别目标语言，请确认当前目标语言与报告一致';
-        const suspiciousCount = state.suspiciousEntries?.length || 0;
-        const issueSummary = state.issueSummary || getTranslationReportIssueSummary(state.entries);
         const reportMissingCount = state.reviewSummary?.reportMissing || 0;
         const coverageChecked = Boolean(state.coverageCheckedAt);
+        const continuationPlan = buildImportedContinuationPlan(state);
         const reviewText = state.reviewedAt
             ? (coverageChecked
-                ? ` 已自动重检并核对原文件：发现 ${issueSummary.autoRepairable || 0} 条可自动修复、${issueSummary.softRisk || 0} 条需确认${reportMissingCount ? `，另有 ${reportMissingCount} 条报告缺失` : ''}。`
+                ? ` 已自动重检并核对原文件${reportMissingCount ? `，补识别 ${reportMissingCount} 条报告缺失` : ''}。`
                 : ` 已自动重检旧译文；尚未核对原文件完整覆盖，开始处理前会自动扫描缺失行。`)
             : ' 目标语言尚未确认，将在开始处理时自动重检旧译文。';
-        const hasRisk = suspiciousCount > 0 || issueSummary.softRisk > 0;
-        const issueText = formatTranslationReportIssueSummary(issueSummary);
-        translateProgressImportStatus.className = `translate-import-status ready${state.targetLang ? '' : ' warning'}${hasRisk ? ' danger' : ''}`;
-        translateProgressImportStatus.textContent = `已导入 ${state.reusableEntries.length} 条可复用译文；${languageText}。${reviewText} ${issueText}。点击主按钮后只处理明确问题，其余译文继续复用。`;
+        const hasBlocking = continuationPlan.repairCount > 0;
+        translateProgressImportStatus.className = `translate-import-status ready${state.targetLang ? '' : ' warning'}${hasBlocking ? ' danger' : ''}`;
+        translateProgressImportStatus.textContent = `已复用 ${continuationPlan.reusableCount} 条｜必须处理 ${continuationPlan.repairCount} 条｜建议复核 ${continuationPlan.reviewCount} 条。${languageText}。${reviewText} 建议项不会调用 AI 或阻断交付。`;
         if (translateClearImportedProgressBtn) translateClearImportedProgressBtn.style.display = 'inline-flex';
         if (translateReviewImportedProgressBtn) translateReviewImportedProgressBtn.disabled = false;
         if (translateReviewImportedProgressBtn) {
@@ -8789,39 +8253,10 @@ function initTranslateTool() {
                 ? '核对原文件缺失任务'
                 : '按当前语言检查旧译文';
         }
-        renderTranslateImportIssueFilters(state);
-        const retryPreview = getImportedIssueRetryPreview(state);
         if (translateBtnLabel) {
-            translateBtnLabel.textContent = retryPreview.custom
-                ? (retryPreview.mandatoryMissingCount > 0
-                    ? `补齐缺失并重译选中（${retryPreview.count}）`
-                    : `按选中类型重译（${retryPreview.count}）`)
-                : (state.failedOrMissingCount > 0
-                    ? `一键修复并生成交付版（${state.failedOrMissingCount}）`
-                    : '复用译文并生成交付版');
-        }
-        if (translateRetrySuspiciousBtn) {
-            translateRetrySuspiciousBtn.style.display = retryPreview.custom && retryPreview.count > 0 ? 'inline-flex' : 'none';
-            translateRetrySuspiciousBtn.disabled = Boolean(activeTranslateRunId) || retryPreview.count === 0;
-            translateRetrySuspiciousBtn.textContent = retryPreview.custom
-                ? (retryPreview.mandatoryMissingCount > 0
-                    ? `补齐缺失并重译选中（${retryPreview.count}）`
-                    : `按选中类型重译（${retryPreview.count}）`)
-                : (suspiciousCount > 0 ? `只补译可疑行（${suspiciousCount}）` : '选择问题类型后重译');
-            translateRetrySuspiciousBtn.title = retryPreview.custom
-                ? (retryPreview.mandatoryMissingCount > 0
-                    ? `必补所有缺失行，并额外重译：${formatImportedIssueFilterSelection(retryPreview)}`
-                    : `只重译：${formatImportedIssueFilterSelection(retryPreview)}`)
-                : '不勾选问题类型时，仍按复查出的可疑行补译。';
-        }
-        if (translateCompactLongImportedBtn) {
-            const lengthCount = Number(issueSummary.length || 0);
-            translateCompactLongImportedBtn.style.display = lengthCount > 0 ? 'inline-flex' : 'none';
-            translateCompactLongImportedBtn.disabled = Boolean(activeTranslateRunId) || state.targetLang === 'zh-TW';
-            translateCompactLongImportedBtn.textContent = lengthCount > 0 ? `精简超长译文（${lengthCount}）` : '精简超长译文';
-            translateCompactLongImportedBtn.title = state.targetLang === 'zh-TW'
-                ? '繁中只做完整繁简转换，不做长度压缩。'
-                : '只处理报告里“译文长度超出建议”的行，成功译文会复用。';
+            translateBtnLabel.textContent = continuationPlan.repairCount > 0
+                ? `继续处理（${continuationPlan.repairCount} 个必须项）`
+                : '复用译文并生成交付版';
         }
         updateTranslateSubmitPlanHint();
     }
@@ -8830,7 +8265,37 @@ function initTranslateTool() {
         importedTranslateProgressState = createEmptyTranslateProgressImportState();
         if (!options.keepInput && translateProgressImportInput) translateProgressImportInput.value = '';
         updateTranslateProgressImportStatus();
-        if (!options.keepDiscountCheck) resetTranslateDiscountCheck();
+    }
+
+    function syncImportedTranslateProgressFromRunReport() {
+        if (!importedTranslateProgressState?.entries?.length || !translationRunReport?.entries?.length) return;
+        const entries = dedupeTranslationReportEntries(translationRunReport.entries);
+        const continuationPlan = buildImportedContinuationPlan({ entries });
+        const reusableEntries = continuationPlan.reusableEntries;
+        const blockingEntries = continuationPlan.repairEntries;
+        const reviewEntries = continuationPlan.reviewEntries;
+        const issueSummary = getTranslationReportIssueSummary(entries);
+        importedTranslateProgressState = {
+            ...importedTranslateProgressState,
+            targetLang: translationRunReport.targetLang || importedTranslateProgressState.targetLang,
+            entries,
+            reusableEntries,
+            blockingEntries,
+            reviewEntries,
+            suspiciousEntries: blockingEntries,
+            reviewedAt: Date.now(),
+            issueSummary,
+            failedOrMissingCount: continuationPlan.repairCount,
+            continuationPlan,
+            reviewSummary: {
+                ...(importedTranslateProgressState.reviewSummary || {}),
+                total: entries.length,
+                reusable: reusableEntries.length,
+                suspicious: blockingEntries.length,
+                failedOrMissing: continuationPlan.repairCount
+            }
+        };
+        updateTranslateProgressImportStatus();
     }
 
     function releaseTranslateRunBuffers(options = {}) {
@@ -8846,6 +8311,7 @@ function initTranslateTool() {
         translateChannelProgressState = new Map();
         translateRunSummaryState = { completed: 0, total: 0, phase: '等待开始' };
         translateRunConsistencyTerms = [];
+        translateCompletionHistory = [];
         successCount = 0;
         failCount = 0;
         if (clearOutputRows) {
@@ -8910,6 +8376,184 @@ function initTranslateTool() {
         return -1;
     }
 
+    function stripLegacyTranslationArtifactColumns(rows = [], entries = [], targetLang = '') {
+        if (!Array.isArray(rows) || !rows.length || !Array.isArray(entries) || !entries.length) {
+            return { rows, removedColumns: [] };
+        }
+        const header = Array.isArray(rows[0]) ? rows[0] : [];
+        const sourceColumns = [...new Set(entries
+            .map(entry => Number(entry?.column) - 1)
+            .filter(index => Number.isInteger(index) && index >= 0 && index < header.length))];
+        if (!sourceColumns.length) return { rows, removedColumns: [] };
+
+        const sourceColumnSet = new Set(sourceColumns);
+        const targetLabels = new Set([
+            targetLang,
+            getTranslateLanguageName(targetLang)
+        ].map(value => String(value || '').trim()).filter(Boolean));
+        const provenanceLabels = new Set(entries.flatMap(entry => [entry?.profile, entry?.model])
+            .map(value => String(value || '').trim())
+            .filter(Boolean));
+        const removedColumns = new Set();
+        const normalizeArtifactCell = value => String(value ?? '').replace(/\r\n/g, '\n').trim();
+
+        function getEntryRecoveryTexts(entry) {
+            return [
+                entry?.translatedText,
+                entry?.revisedText,
+                ...(Array.isArray(entry?.legacyVariants)
+                    ? entry.legacyVariants.flatMap(variant => [variant?.translatedText, variant?.revisedText])
+                    : [])
+            ].map(normalizeArtifactCell).filter(Boolean);
+        }
+
+        function canSafelyRemoveGeneratedColumns(sourceColumn, candidateColumns) {
+            if (!candidateColumns.length) return false;
+            const entriesByRow = new Map();
+            entries.forEach(entry => {
+                if (Number(entry?.column) !== sourceColumn + 1) return;
+                const rowNumber = Number(entry?.rowNumber);
+                if (!Number.isInteger(rowNumber) || rowNumber < 2) return;
+                if (!entriesByRow.has(rowNumber)) entriesByRow.set(rowNumber, []);
+                entriesByRow.get(rowNumber).push(entry);
+            });
+            if (!entriesByRow.size) return false;
+
+            return candidateColumns.every(columnIndex => {
+                const isQaColumn = /检测\s*\)$/.test(String(header[columnIndex] || '').trim());
+                for (let rowIndex = 1; rowIndex < rows.length; rowIndex++) {
+                    const artifactValue = normalizeArtifactCell(rows[rowIndex]?.[columnIndex]);
+                    if (!artifactValue) continue;
+                    const matchingEntries = entriesByRow.get(rowIndex + 1) || [];
+                    if (!matchingEntries.length) return false;
+                    const sourceValue = normalizeArtifactCell(rows[rowIndex]?.[sourceColumn]);
+                    const sourceMatches = matchingEntries.filter(entry => {
+                        const reportSource = normalizeArtifactCell(entry?.sourceText);
+                        return !reportSource || !sourceValue || reportSource === sourceValue;
+                    });
+                    if (!sourceMatches.length) return false;
+                    if (isQaColumn) continue;
+                    const recoverableTexts = new Set(sourceMatches.flatMap(getEntryRecoveryTexts));
+                    if (!recoverableTexts.has(artifactValue)) return false;
+                }
+                return true;
+            });
+        }
+
+        sourceColumns.forEach(sourceColumn => {
+            const sourceHeader = String(header[sourceColumn] || '').trim();
+            if (!sourceHeader) return;
+            const candidateColumns = [];
+            header.forEach((value, columnIndex) => {
+                if (sourceColumnSet.has(columnIndex)) return;
+                const columnHeader = String(value || '').trim();
+                if (!columnHeader.startsWith(`${sourceHeader} (`) || !columnHeader.endsWith(')')) return;
+                const targetMatch = [...targetLabels].some(label =>
+                    columnHeader.startsWith(`${sourceHeader} (${label}`)
+                );
+                const provenanceMatch = [...provenanceLabels].some(label =>
+                    columnHeader.includes(`· ${label}`)
+                );
+                const canonicalMatch = [...targetLabels].some(label =>
+                    columnHeader === `${sourceHeader} (${label})` ||
+                    columnHeader === `${sourceHeader} (${label} · 检测)`
+                );
+                if ((targetMatch && (canonicalMatch || provenanceMatch)) || (!targetLabels.size && provenanceMatch)) {
+                    candidateColumns.push(columnIndex);
+                }
+            });
+            if (canSafelyRemoveGeneratedColumns(sourceColumn, candidateColumns)) {
+                candidateColumns.forEach(columnIndex => removedColumns.add(columnIndex));
+            }
+        });
+
+        if (!removedColumns.size) return { rows, removedColumns: [] };
+        const keepColumns = header.map((_, index) => index).filter(index => !removedColumns.has(index));
+        return {
+            rows: rows.map(row => keepColumns.map(index => row?.[index] ?? '')),
+            removedColumns: [...removedColumns].sort((left, right) => left - right)
+        };
+    }
+
+    function getTranslateMigrationSourceFileKey(fileName = '') {
+        const baseName = String(fileName || '').split(/[\\/]/).pop().replace(/\.(?:csv|xlsx|xls)$/i, '');
+        const sourceStem = baseName.replace(
+            /_(?:[a-z]{2,3}(?:[-_][a-z]{2,4})?_)?(?:translated(?:_unverified)?|translation_report)(?:-\d+)?$/i,
+            ''
+        );
+        return normalizeTranslateImportKeyPart(sourceStem);
+    }
+
+    function normalizeLoadedTranslateSourcesFromImportedReport(entries = [], targetLang = '') {
+        if (!translateSources.length || !Array.isArray(entries) || !entries.length) {
+            return { removedColumnCount: 0, normalizedSourceCount: 0 };
+        }
+        const reportEntries = dedupeTranslationReportEntries(entries);
+        const headerSource = getSelectedTranslateSources()
+            .find(source => Array.isArray(source.rows) && source.rows.length > 0) || null;
+        let removedColumnCount = 0;
+        let normalizedSourceCount = 0;
+        let selectedSourceIndexMap = null;
+
+        translateSources.forEach(source => {
+            const sourceFileKey = getTranslateMigrationSourceFileKey(source.fileName);
+            const sourceEntries = reportEntries.filter(entry =>
+                (
+                    !entry.sourceFile ||
+                    (
+                        sourceFileKey &&
+                        getTranslateMigrationSourceFileKey(entry.sourceFile) === sourceFileKey
+                    )
+                ) &&
+                (
+                    !entry.sheetName ||
+                    normalizeTranslateImportKeyPart(entry.sheetName) === normalizeTranslateImportKeyPart(source.sheetName)
+                )
+            );
+            const normalized = stripLegacyTranslationArtifactColumns(source.rows, sourceEntries, targetLang);
+            if (!normalized.removedColumns.length) return;
+
+            const oldHeaderLength = Array.isArray(source.rows?.[0]) ? source.rows[0].length : 0;
+            const removedSet = new Set(normalized.removedColumns);
+            if (!selectedSourceIndexMap && source === headerSource) {
+                selectedSourceIndexMap = new Map();
+                let nextIndex = 0;
+                for (let oldIndex = 0; oldIndex < oldHeaderLength; oldIndex++) {
+                    if (removedSet.has(oldIndex)) continue;
+                    selectedSourceIndexMap.set(oldIndex, nextIndex++);
+                }
+            }
+
+            source.rows = normalized.rows;
+            source.outputRows = null;
+            source.outputHeader = null;
+            source.outputColMap = new Map();
+            removedColumnCount += normalized.removedColumns.length;
+            normalizedSourceCount++;
+        });
+
+        if (!removedColumnCount) return { removedColumnCount, normalizedSourceCount };
+        if (selectedSourceIndexMap) {
+            selectedColumns = selectedColumns
+                .map(index => selectedSourceIndexMap.get(index))
+                .filter(Number.isInteger);
+            referenceColumn = Number.isInteger(referenceColumn)
+                ? (selectedSourceIndexMap.get(referenceColumn) ?? null)
+                : null;
+        }
+        rebuildTranslateSheetData();
+        translatedDataLocal = null;
+        translatedWorkbook = null;
+        renderTranslateSheetSelectList();
+        renderColumnList();
+        const totalRowsElement = document.getElementById('translateTotalRows');
+        const totalColsElement = document.getElementById('translateTotalCols');
+        if (totalRowsElement) totalRowsElement.textContent = Math.max(0, (sheetData?.length || 1) - 1);
+        if (totalColsElement) totalColsElement.textContent = sheetData?.[0] ? sheetData[0].length : 0;
+        updateTranslateSubmitPlanHint();
+        return { removedColumnCount, normalizedSourceCount };
+    }
+
     function getTranslationReportColumnMap(headerRow = []) {
         const headers = headerRow.map(normalizeHeaderText);
         const machineStatusColumn = findHeaderColumn(headers, ['机器状态', 'machine status', 'machinestatus']);
@@ -8922,6 +8566,7 @@ function initTranslateTool() {
             sheetName: findHeaderColumn(headers, ['工作表', 'sheet', 'worksheet', 'sheet name', 'sheetname']),
             rowNumber: findHeaderColumn(headers, ['原始行号', '行号', 'row number', 'rownumber', 'row']),
             column: findHeaderColumn(headers, ['列', 'column', 'col']),
+            outputSlotId: findHeaderColumn(headers, ['输出槽', 'output slot', 'outputslot', 'output slot id', 'outputslotid']),
             profile: findHeaderColumn(headers, ['通道', 'profile', 'channel']),
             model: findHeaderColumn(headers, ['模型', 'model']),
             sourceText: findHeaderColumnAvoiding(headers, ['原文', 'source text', 'source', 'original text', 'sourcetext'], ['来源文件', 'source file', 'sourcefile', 'file']),
@@ -8934,7 +8579,8 @@ function initTranslateTool() {
             error: findHeaderColumn(headers, ['错误', 'error']),
             userDecision: findHeaderColumn(headers, ['处理决定', '用户决定', '人工决定', 'decision', 'user decision', 'userdecision']),
             revisedText: findHeaderColumn(headers, ['修订译文', '人工修订译文', 'revised translation', 'revision', 'revisedtext']),
-            decisionNote: findHeaderColumn(headers, ['处理备注', '决定备注', '人工备注', 'decision note', 'note', 'decisionnote'])
+            decisionNote: findHeaderColumn(headers, ['处理备注', '决定备注', '人工备注', 'decision note', 'note', 'decisionnote']),
+            legacyVariants: findHeaderColumn(headers, ['历史候选迁移审计', 'legacy variants', 'legacyvariants'])
         };
     }
 
@@ -8950,17 +8596,12 @@ function initTranslateTool() {
     function normalizeImportedTranslationStatus(entry) {
         if (entry?.manualResolutionValid === true) return 'success';
         const status = normalizeHeaderText(entry.status);
-        const qaStatus = normalizeHeaderText(entry.qaStatus);
         if (status === 'missing' || status.includes('缺失') || status.includes('未返回')) return 'missing';
         if (status === 'failed' || status.includes('失败') || status.includes('error')) return 'failed';
         if (isMissingTranslationResult(entry.translatedText)) return 'missing';
         if (isMarkedTranslationFailure(entry.translatedText)) return 'failed';
-        if (entry.completenessRisk && !/无|通过|pass/i.test(entry.completenessRisk)) return 'qa_failed';
-        if (qaStatus.includes('需确认') || qaStatus.includes('待确认') || qaStatus.includes('qa_failed')) return 'qa_failed';
-        if (status === 'success' || status === '通过' || status === 'passed' || status === 'pass') return 'success';
-        if (status === 'qa_failed' || status.includes('需确认') || status.includes('待确认')) return 'qa_failed';
-        if (entry.translatedText && !isTranslateFailureText(entry.translatedText)) return 'success';
-        return status || 'missing';
+        const issueText = [entry.qaStatus, entry.completenessRisk, entry.error].filter(Boolean).join('；');
+        return getTranslationReportStatus(entry.translatedText, issueText);
     }
 
     function isReusableImportedTranslationEntry(entry) {
@@ -9000,6 +8641,7 @@ function initTranslateTool() {
                 sheetName: readReportCell(row, columns.sheetName),
                 rowNumber: parseReportInteger(readReportCell(row, columns.rowNumber)),
                 column: parseReportInteger(readReportCell(row, columns.column)),
+                outputSlotId: readReportCell(row, columns.outputSlotId) || 'primary',
                 profile: readReportCell(row, columns.profile),
                 model: readReportCell(row, columns.model),
                 sourceText: readReportCell(row, columns.sourceText),
@@ -9012,8 +8654,18 @@ function initTranslateTool() {
                 error: readReportCell(row, columns.error),
                 userDecision: readReportCell(row, columns.userDecision),
                 revisedText: readReportCell(row, columns.revisedText),
-                decisionNote: readReportCell(row, columns.decisionNote)
+                decisionNote: readReportCell(row, columns.decisionNote),
+                legacyVariants: []
             };
+            const legacyVariantsRaw = readReportCell(row, columns.legacyVariants);
+            if (legacyVariantsRaw) {
+                try {
+                    const parsedVariants = JSON.parse(legacyVariantsRaw);
+                    if (Array.isArray(parsedVariants)) entry.legacyVariants = parsedVariants;
+                } catch {
+                    entry.legacyVariants = [];
+                }
+            }
             entry.userDecision = globalThis.NexusTranslationDeliveryPolicy?.normalizeDecision
                 ? globalThis.NexusTranslationDeliveryPolicy.normalizeDecision(entry.userDecision)
                 : entry.userDecision;
@@ -9135,7 +8787,6 @@ function initTranslateTool() {
     async function importTranslateProgressFile(file) {
         const importStartedAt = Date.now();
         try {
-            resetTranslateDiscountCheck();
             setStatus('processing', '正在导入翻译报告', file.name);
             if (translateProgressImportStatus) {
                 translateProgressImportStatus.className = 'translate-import-status loading';
@@ -9157,12 +8808,17 @@ function initTranslateTool() {
             if (importedTargetLang && targetLangSelect) {
                 targetLangSelect.value = importedTargetLang;
             }
+            const importedReportEntries = dedupeTranslationReportEntries(parsedEntries.entries);
+            const normalizedLegacyOutput = normalizeLoadedTranslateSourcesFromImportedReport(
+                importedReportEntries,
+                importedTargetLang
+            );
             const reviewTargetLang = importedTargetLang;
             const shouldAutoReview = Boolean(reviewTargetLang);
             const reviewGlossaryTerms = shouldAutoReview ? getSelectedTranslateGlossaryTerms() : [];
             const reviewedReportEntries = shouldAutoReview
-                ? reviewImportedTranslationEntries(parsedEntries.entries, reviewTargetLang, reviewGlossaryTerms)
-                : parsedEntries.entries;
+                ? reviewAndDedupeImportedTranslationEntries(parsedEntries.entries, reviewTargetLang, reviewGlossaryTerms)
+                : importedReportEntries;
             let reviewedEntries = reviewedReportEntries;
             let reportMissingEntries = [];
             let coverageCheckedAt = 0;
@@ -9180,24 +8836,21 @@ function initTranslateTool() {
                 coverageTaskCount = currentTasks.length;
             }
             const reviewCompletedAt = Date.now();
-            const reusableEntries = reviewedEntries.filter(isReusableImportedTranslationEntry);
-            const suspiciousEntries = reviewedEntries.filter(entry =>
-                entry.status === 'missing' ||
-                (
-                    entry.status === 'qa_failed' &&
-                    entry.translatedText &&
-                    !isTranslateFailureText(entry.translatedText)
-                )
-            );
+            const continuationPlan = buildImportedContinuationPlan({ entries: reviewedEntries });
+            const reusableEntries = continuationPlan.reusableEntries;
+            const blockingEntries = continuationPlan.repairEntries;
+            const reviewEntries = continuationPlan.reviewEntries;
             const issueSummary = getTranslationReportIssueSummary(reviewedEntries);
-            const failedOrMissingCount = issueSummary.retryable;
+            const failedOrMissingCount = continuationPlan.repairCount;
             importedTranslateProgressState = {
                 fileName: file.name,
                 importedAt: Date.now(),
                 targetLang: importedTargetLang,
                 entries: reviewedEntries,
                 reusableEntries,
-                suspiciousEntries,
+                blockingEntries,
+                reviewEntries,
+                suspiciousEntries: blockingEntries,
                 reviewedAt: shouldAutoReview ? Date.now() : 0,
                 reviewContextKey: shouldAutoReview
                     ? getImportedTranslationReviewContextKey(reviewTargetLang, reviewGlossaryTerms)
@@ -9205,15 +8858,15 @@ function initTranslateTool() {
                 reviewSummary: shouldAutoReview || coverageCheckedAt ? {
                     total: reviewedEntries.length,
                     reusable: reusableEntries.length,
-                    suspicious: suspiciousEntries.length,
+                    suspicious: blockingEntries.length,
                     failedOrMissing: failedOrMissingCount,
                     reportMissing: reportMissingEntries.length
                 } : null,
                 issueSummary,
-                selectedIssueFilters: [],
                 failedOrMissingCount,
                 coverageCheckedAt,
                 coverageTaskCount,
+                continuationPlan,
                 skippedCount: parsedEntries.skippedCount
             };
             if (importedTargetLang && targetLangSelect) {
@@ -9242,10 +8895,13 @@ function initTranslateTool() {
                     ? `已对照原文件补识别 ${reportMissingEntries.length} 条报告缺失任务；`
                     : '已对照原文件确认报告覆盖完整；')
                 : '选择原文列和翻译通道后，将在开始前自动核对报告覆盖；';
+            const normalizedLegacyText = normalizedLegacyOutput.removedColumnCount
+                ? `已安全归并移除 ${normalizedLegacyOutput.removedColumnCount} 个旧版生成列；`
+                : '';
             setStatus(
                 'success',
                 '翻译报告已导入',
-                `${shouldAutoReview ? '已按当前规则自动重检；' : ''}${coverageText}可复用 ${reusableEntries.length} 条通过译文；只需补译/修复 ${failedOrMissingCount} 条（${formatTranslationReportIssueSummary(issueSummary)}）。软性需确认不会自动重译${issueSummary.length ? `；其中超长 ${issueSummary.length} 条可单独精简` : ''}。${languageText} ${timingText}。`
+                `${normalizedLegacyText}${shouldAutoReview ? '已按当前规则自动重检；' : ''}${coverageText}已复用 ${reusableEntries.length} 条；必须处理 ${failedOrMissingCount} 条；建议复核 ${reviewEntries.length} 条。建议项不会调用 AI 或阻断交付。${languageText} ${timingText}。`
             );
             return {
                 status: 'success',
@@ -9292,12 +8948,6 @@ function initTranslateTool() {
             if (translateProgressImportInput) translateProgressImportInput.value = '';
             return;
         }
-        const confirmed = confirm(`将按顺序导入 ${reportFiles.length} 个翻译报告，并按报告语言逐个处理翻译失败、结果缺失和硬质检问题。\n\n通过译文会复用，不会全量重跑；软性需确认和超长行不会在批量处理中自动消耗 API。未从文件名识别出语言的报告会跳过。\n\n是否开始批量处理？`);
-        if (!confirmed) {
-            if (translateProgressImportInput) translateProgressImportInput.value = '';
-            return;
-        }
-
         const originalTargetLang = targetLangSelect?.value || '';
         const originalSelectedTargetLangs = new Set(selectedTranslateTargetLangs);
         let completed = 0;
@@ -9334,9 +8984,14 @@ function initTranslateTool() {
                         `正在重译 ${getTranslateLanguageName(importResult.targetLang)} 的硬问题 (${index + 1}/${reportFiles.length})`,
                         `已复用 ${importResult.reusableCount} 条通过译文；${importResult.failedOrMissingCount} 条翻译失败、结果缺失或硬质检问题会重新处理，${importResult.issueSummary?.softRisk || 0} 条软性需确认保留当前译文。`
                     );
-                    const runResult = await startTranslate({
-                        skipMultiTarget: true,
-                        ignoreSavedProgress: true
+                    const repairableEntries = importedTranslateProgressState.entries.filter(isRepairableTranslationReportEntry);
+                    const runResult = await retrySuspiciousImportedTranslations({
+                        custom: false,
+                        entries: repairableEntries,
+                        count: repairableEntries.length,
+                        mandatoryMissingCount: repairableEntries.filter(isMissingTranslationReportEntry).length,
+                        selectedIssueCount: 0,
+                        selectedFilters: []
                     });
                     if (runResult?.status === 'success') {
                         completed++;
@@ -9629,7 +9284,7 @@ function initTranslateTool() {
     }
 
     async function downloadCurrentProgress() {
-        const workbook = buildTranslationWorkbook();
+        const workbook = buildTranslationWorkbook({ includeReport: true });
         if (!workbook) {
             alert('没有可下载的进度数据');
             return;
@@ -9895,8 +9550,8 @@ function initTranslateTool() {
         pendingRetryTranslationTasks = null;
         translationProgressTasks = new Map();
         translateRunConsistencyTerms = [];
+        translateCompletionHistory = [];
         clearImportedTranslateProgress({ keepInput: true });
-        resetTranslateDiscountCheck();
         updateTranslationRunActions();
         fileInfo.style.display = 'none';
         columnSelectSection.style.display = 'none';
@@ -9913,18 +9568,22 @@ function initTranslateTool() {
             const embeddedReportTargetLangs = new Set();
             let embeddedReportSkippedCount = 0;
             let embeddedReportFileName = '';
+            let legacyGeneratedColumnCount = 0;
             let sourceIndex = 0;
 
             for (const file of fileList) {
                 const parsed = await readSpreadsheetSheets(file);
                 if (parsed.encoding) encodings.add(parsed.encoding);
                 const embeddedReport = findTranslationReportSheet(parsed.sheets || []);
+                let fileEmbeddedReportEntries = [];
+                let fileEmbeddedTargetLang = '';
                 if (embeddedReport) {
                     const parsedReport = parseTranslationReportEntries(
                         embeddedReport.rows,
                         embeddedReport.headerIndex
                     );
                     if (parsedReport.entries.length) {
+                        fileEmbeddedReportEntries = dedupeTranslationReportEntries(parsedReport.entries);
                         embeddedReportEntries.push(...parsedReport.entries);
                         embeddedReportSkippedCount += parsedReport.skippedCount;
                         embeddedReportFileName = embeddedReportFileName || file.name;
@@ -9932,23 +9591,35 @@ function initTranslateTool() {
                             file.name,
                             embeddedReport.rows
                         );
+                        fileEmbeddedTargetLang = inferredTarget;
                         if (inferredTarget) embeddedReportTargetLangs.add(inferredTarget);
                     }
                 }
                 parsed.sheets.forEach(sheet => {
                     if (embeddedReport?.sheet === sheet) return;
+                    if (embeddedReport && /^(?:未验证说明|unverified(?:\s+translation)?\s+notice)$/i.test(String(sheet.sheetName || '').trim())) return;
                     if (sheet.hidden) {
                         skippedHiddenSheets.push(`${file.name} / ${sheet.sheetName}`);
                         return;
                     }
                     if (!sheet.rows || sheet.rows.length === 0) return;
+                    const reportEntriesForSheet = fileEmbeddedReportEntries.filter(entry =>
+                        !entry.sheetName || normalizeTranslateImportKeyPart(entry.sheetName) === normalizeTranslateImportKeyPart(sheet.sheetName)
+                    );
+                    const normalizedArtifact = stripLegacyTranslationArtifactColumns(
+                        sheet.rows,
+                        reportEntriesForSheet,
+                        fileEmbeddedTargetLang
+                    );
+                    legacyGeneratedColumnCount += normalizedArtifact.removedColumns.length;
                     sourceGroups.push({
                         id: makeTranslateSourceId(file.name, sheet.sheetName, sourceIndex),
                         fileName: file.name,
                         fileSize: file.size || 0,
                         fileLastModified: file.lastModified || 0,
+                        contentSignature: parsed.contentSignature || '',
                         sheetName: sheet.sheetName || 'Sheet1',
-                        rows: sheet.rows,
+                        rows: normalizedArtifact.rows,
                         outputRows: null,
                         outputHeader: null,
                         outputColMap: new Map(),
@@ -9990,7 +9661,6 @@ function initTranslateTool() {
                     reviewContextKey: '',
                     reviewSummary: null,
                     issueSummary,
-                    selectedIssueFilters: [],
                     failedOrMissingCount: issueSummary.retryable,
                     coverageCheckedAt: 0,
                     coverageTaskCount: 0,
@@ -10025,7 +9695,10 @@ function initTranslateTool() {
             const embeddedReportText = embeddedReportEntries.length
                 ? `；已自动载入内嵌翻译报告 ${dedupeTranslationReportEntries(embeddedReportEntries).length} 条`
                 : '';
-            setStatus('success', '已载入新文件', `${fileList.length === 1 ? fileList[0].name : `${fileList.length} 个文件`}${hiddenSkipText}${embeddedReportText}`);
+            const normalizedColumnsText = legacyGeneratedColumnCount
+                ? `；已归并移除 ${legacyGeneratedColumnCount} 个旧版生成列，将重建单一译文/检测列`
+                : '';
+            setStatus('success', '已载入新文件', `${fileList.length === 1 ? fileList[0].name : `${fileList.length} 个文件`}${hiddenSkipText}${embeddedReportText}${normalizedColumnsText}`);
             columnSelectSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         } catch (error) {
             console.error('Translate file load error:', error);
@@ -10081,7 +9754,6 @@ function initTranslateTool() {
                 rebuildTranslateSheetData();
                 selectedColumns = [];
                 referenceColumn = null;
-                resetTranslateDiscountCheck();
                 renderTranslateSheetSelectList();
                 renderColumnList();
                 document.getElementById('translateTotalRows').textContent = Math.max(0, (sheetData?.length || 1) - 1);
@@ -10300,7 +9972,6 @@ function initTranslateTool() {
         } else {
             selectedColumns.push(index);
         }
-        resetTranslateDiscountCheck();
         renderColumnList();
     }
 
@@ -10563,10 +10234,13 @@ function initTranslateTool() {
             .filter(Boolean);
     }
 
-    const TRANSLATE_FORMAT_TOKEN_PATTERN = /%(?:\d+\$)?[-+#0 ]*(?:\d+)?(?:\.\d+)?(?:ll|l|h)?[sdifux@]|\\n|<[^>]+>|\{[^}]+\}|\[[A-Z0-9_]+\]/gi;
+    const TRANSLATE_FORMAT_TOKEN_PATTERN = /%(?:\d+\$)?[-+#0]*(?:\d+)?(?:\.\d+)?(?:ll|l|h)?[sdifux@]|\\n|<\/?[A-Za-z][^>]*>|\{(?:\d+|[A-Za-z_][A-Za-z0-9_.:-]*)\}|\[[A-Z][A-Z0-9_]{1,}\]/g;
 
     function extractFormatTokens(text) {
-        return String(text || '').match(TRANSLATE_FORMAT_TOKEN_PATTERN) || [];
+        const policy = globalThis.NexusTranslationFormatTokenPolicy;
+        return policy?.extract
+            ? policy.extract(text).map(token => token.value)
+            : (String(text || '').match(TRANSLATE_FORMAT_TOKEN_PATTERN) || []);
     }
 
     function createPlaceholderProtectionContext(fields = {}, options = {}) {
@@ -10588,10 +10262,10 @@ function initTranslateTool() {
             return placeholder;
         };
         const protect = (value, key) => {
-            let protectedValue = String(value || '').replace(
-                TRANSLATE_FORMAT_TOKEN_PATTERN,
-                token => makePlaceholder(token)
-            );
+            const formatPolicy = globalThis.NexusTranslationFormatTokenPolicy;
+            let protectedValue = formatPolicy?.replaceTokens
+                ? formatPolicy.replaceTokens(value, token => makePlaceholder(token))
+                : String(value || '').replace(TRANSLATE_FORMAT_TOKEN_PATTERN, token => makePlaceholder(token));
             if (
                 key === sourceFieldKey &&
                 protectedUiRequirements.length &&
@@ -10628,39 +10302,27 @@ function initTranslateTool() {
     }
 
     function getFormatTokenIssues(sourceText, translatedText) {
-        const sourceTokens = extractFormatTokens(sourceText);
-        const targetTokens = extractFormatTokens(translatedText);
-        const issues = [];
-        if (!sourceTokens.length && !targetTokens.length) return issues;
-
-        const sourceCounts = countTokens(sourceTokens);
-        const targetCounts = countTokens(targetTokens);
-        const missingTokens = [];
-        const extraTokens = [];
-        sourceCounts.forEach((count, token) => {
-            const targetCount = targetCounts.get(token) || 0;
-            for (let i = targetCount; i < count; i++) missingTokens.push(token);
-        });
-        targetCounts.forEach((count, token) => {
-            const sourceCount = sourceCounts.get(token) || 0;
-            for (let i = sourceCount; i < count; i++) extraTokens.push(token);
-        });
-
-        if (missingTokens.length) issues.push(`缺少格式/占位符：${[...new Set(missingTokens)].join(', ')}`);
-        if (extraTokens.length) issues.push(`多出格式/占位符：${[...new Set(extraTokens)].join(', ')}`);
-        if (!missingTokens.length && !extraTokens.length && sourceTokens.length > 1 && sourceTokens.join('\u001f') !== targetTokens.join('\u001f')) {
-            issues.push(`格式/占位符顺序不一致：应保持 ${sourceTokens.join(' → ')}`);
+        const policy = globalThis.NexusTranslationFormatTokenPolicy;
+        if (policy?.evaluate) {
+            const result = policy.evaluate(sourceText, translatedText);
+            return [...result.hardIssues, ...result.reviewIssues];
         }
-        return issues;
+        return [];
     }
 
-    function extractNumberTokens(text) {
-        return String(text || '').match(/\d+(?:[.,]\d+)?%?/g) || [];
+    function getNumberTokenIssues(sourceText, translatedText, targetLang = '') {
+        const policy = globalThis.NexusTranslationNumberPolicy;
+        if (!policy?.evaluate) return [];
+        const result = policy.evaluate(sourceText, translatedText, targetLang);
+        return [...result.hardIssues, ...result.reviewIssues];
     }
 
     function getVisibleTextForLength(text) {
-        return String(text || '')
-            .replace(TRANSLATE_FORMAT_TOKEN_PATTERN, '')
+        const formatPolicy = globalThis.NexusTranslationFormatTokenPolicy;
+        const visible = formatPolicy?.mask
+            ? formatPolicy.mask(text)
+            : String(text || '').replace(TRANSLATE_FORMAT_TOKEN_PATTERN, '');
+        return visible
             .replace(/\s+/g, ' ')
             .trim();
     }
@@ -10981,40 +10643,21 @@ function initTranslateTool() {
 
     function shouldAutoRepairTranslationQa(qaStatus, targetLang = '') {
         if (isTranslationQaPassed(qaStatus)) return false;
-        const text = String(qaStatus || '');
-        const hardIssuePatterns = [
-            /缺少格式\/占位符/,
-            /多出格式\/占位符/,
-            /格式\/占位符顺序不一致/,
-            /受保护UI标记缺失或被翻译/,
-            /数字不一致/,
-            /折扣语义不一致/,
-            /折扣翻译缺失/,
-            /术语未遵守/,
-            /玩法名疑似沿用英文/,
-            /目标译文疑似照抄英文参考/,
-            /目标译文仍含英文/,
-            /疑似照抄英文参考术语/,
-            /混入中文/,
-            /混入英文/,
-            /混入日文/,
-            /目标.+中混入/,
-            /疑似未翻译/,
-            /繁简转换不完整/,
-            /繁中关键语义缺失/,
-            /逐字空格/
-        ];
-        if (targetLang === 'zh-TW' && /疑似内容流失|疑似译文过短/.test(text)) return true;
-        if (hardIssuePatterns.some(pattern => pattern.test(text))) return true;
-        return targetLang !== 'zh-TW' &&
-            isTranslateAutoCompactLongEnabled() &&
-            /译文长度超出建议/.test(text);
+        const findings = globalThis.NexusTranslationIssuePolicy?.classifyEntry?.({
+            status: 'success',
+            qaStatus
+        }) || [];
+        return findings.some(finding => finding.tier === 'required');
     }
 
     function getTranslationReportStatus(translatedText, qaStatus) {
         if (isMissingTranslationResult(translatedText)) return 'missing';
         if (isTranslateFailureText(translatedText)) return 'failed';
-        if (!isTranslationQaPassed(qaStatus)) return 'qa_failed';
+        const findings = globalThis.NexusTranslationIssuePolicy?.classifyEntry?.({
+            status: 'success',
+            qaStatus
+        }) || [];
+        if (findings.some(finding => finding.tier === 'required')) return 'qa_failed';
         return 'success';
     }
 
@@ -11022,9 +10665,10 @@ function initTranslateTool() {
         if (!entry) return false;
         if (entry.manualResolutionValid === true) return false;
         const status = String(entry.status || '').trim().toLowerCase();
-        if (status && status !== 'success') return true;
+        if (['failed', 'missing', 'error'].includes(status)) return true;
         if (isTranslateFailureText(entry.translatedText)) return true;
-        return !isTranslationQaPassed(entry.qaStatus);
+        const findings = globalThis.NexusTranslationIssuePolicy?.classifyEntry?.(entry) || [];
+        return findings.some(finding => finding.tier === 'required');
     }
 
     function getTranslationReportIssueText(entry) {
@@ -11032,9 +10676,7 @@ function initTranslateTool() {
             entry?.status,
             entry?.qaStatus,
             entry?.completenessRisk,
-            entry?.actionSuggestion,
-            entry?.error,
-            entry?.translatedText
+            entry?.error
         ].filter(Boolean).join(' ');
     }
 
@@ -11054,22 +10696,27 @@ function initTranslateTool() {
     function isHardTranslationReportEntry(entry) {
         if (!entry || isMissingTranslationReportEntry(entry)) return false;
         const status = String(entry.status || '').trim().toLowerCase();
-        const issueText = getTranslationReportIssueText(entry);
         if (status === 'failed' || status === 'error') return true;
         if (isTranslateFailureText(entry.translatedText)) return true;
-        if (/模型翻译失败|输出被截断|返回空译文|请求超时|限流|网络异常|通道异常|格式\/占位符|缺少格式|多出格式|数字不一致|折扣语义不一致|折扣翻译缺失|术语未遵守|玩法名疑似沿用英文|目标译文疑似照抄英文参考|目标译文仍含英文|疑似照抄英文参考术语|混入中文|混入英文|混入日文|目标.+中混入|疑似未翻译|繁简转换不完整|繁中关键语义缺失|逐字空格|用户要求重新翻译|修订译文为空|硬错误不能直接接受/.test(issueText)) {
-            return true;
-        }
-        const targetLang = translationRunReport?.targetLang || targetLangSelect?.value || '';
-        return shouldAutoRepairTranslationQa(entry.qaStatus, targetLang) && !isLengthSoftRiskTranslationReportEntry(entry);
+        const findings = globalThis.NexusTranslationIssuePolicy?.classifyEntry?.(entry) || [];
+        return findings.some(finding => finding.tier === 'required');
     }
 
     function classifyTranslationReportEntry(entry) {
-        if (!isFailedTranslationReportEntry(entry)) return 'success';
         if (isMissingTranslationReportEntry(entry)) return 'missing';
         if (isHardTranslationReportEntry(entry)) return 'hard';
+        const findings = globalThis.NexusTranslationIssuePolicy?.classifyEntry?.(entry) || [];
         if (isLengthSoftRiskTranslationReportEntry(entry)) return 'length';
-        return 'soft';
+        return findings.length ? 'soft' : 'success';
+    }
+
+    function canAcceptCurrentTranslationEntry(entry) {
+        const findings = globalThis.NexusTranslationIssuePolicy?.classifyEntry?.(entry) || [];
+        if (findings.length) return findings.every(finding => finding.tier !== 'required');
+        const kind = classifyTranslationReportEntry(entry);
+        return globalThis.NexusTranslationDeliveryPolicy?.canAcceptCurrentKind
+            ? globalThis.NexusTranslationDeliveryPolicy.canAcceptCurrentKind(kind)
+            : ['success', 'soft', 'length'].includes(kind);
     }
 
     function isActualTranslationFailureReportEntry(entry) {
@@ -11188,9 +10835,8 @@ function initTranslateTool() {
         const sheetName = item.sheetName || item.source?.sheetName || '';
         const rowNumber = item.rowNumber || item.originalRowNumber || (Number.isInteger(item.rowIndex) ? item.rowIndex + 1 : '');
         const column = item.column || (Number.isInteger(item.colIndex) ? item.colIndex + 1 : '');
-        const model = item.model || item.profile?.model || item.profile?.name || '';
         const sourceText = item.sourceText || item.text || '';
-        return `fallback:${[sourceFile, sheetName, rowNumber, column, model, sourceText]
+        return `fallback:${[sourceFile, sheetName, rowNumber, column, sourceText]
             .map(value => String(value ?? '').trim())
             .join('\u001f')}`;
     }
@@ -11254,10 +10900,7 @@ function initTranslateTool() {
         }
         const sourceForNumberQa = maskNexusDiscountRanges(sourceText, discountQa.sourceRanges);
         const targetForNumberQa = maskNexusDiscountRanges(target, discountQa.targetRanges);
-        const sourceNumbers = extractNumberTokens(sourceForNumberQa);
-        const targetNumbers = new Set(extractNumberTokens(targetForNumberQa));
-        const missingNumbers = sourceNumbers.filter(number => !targetNumbers.has(number));
-        if (missingNumbers.length) issues.push(`数字不一致：${[...new Set(missingNumbers)].join(', ')}`);
+        issues.push(...getNumberTokenIssues(sourceForNumberQa, targetForNumberQa, targetLang));
 
         glossaryTerms.filter(term => term.constraint !== 'reference').forEach(term => {
             if (sourceText.includes(term.source) && term.target && !target.includes(term.target)) {
@@ -11279,9 +10922,7 @@ function initTranslateTool() {
             glossaryTerms
         }));
         issues.push(...getAbnormalSpacingIssues(target, targetLang));
-        if (isTranslateCompletenessCheckEnabled()) {
-            issues.push(...getTranslationCompletenessIssues(sourceText, target, targetLang, context));
-        }
+        issues.push(...getTranslationCompletenessIssues(sourceText, target, targetLang, context));
         const lengthIssue = getTranslationLengthIssue(sourceText, target, targetLang, context);
         if (lengthIssue) issues.push(lengthIssue);
 
@@ -11292,10 +10933,6 @@ function initTranslateTool() {
 
     function updateTranslationRunActions() {
         const hasReport = Boolean(translationRunReport);
-        const issueSummary = getTranslationReportIssueSummary();
-        const reportFailureCount = issueSummary.totalFailed;
-        const retryableCount = getUniqueRepairableTranslationIssueCount();
-        const hasFailures = retryableCount > 0;
         const deliveryGate = getTranslationDeliveryGate();
         const manualExportKinds = globalThis.NexusTranslationDeliveryPolicy?.getManualExportKinds
             ? globalThis.NexusTranslationDeliveryPolicy.getManualExportKinds(deliveryGate)
@@ -11339,28 +10976,10 @@ function initTranslateTool() {
             downloadFinalReportBtn.textContent = deliveryGate.ready ? '下载翻译报告' : '下载问题报告';
         }
         if (translateRetryImportShortcutBtn) {
-            translateRetryImportShortcutBtn.style.display = hasReport || downloadSection.style.display !== 'none'
+            translateRetryImportShortcutBtn.style.display = hasReport && !deliveryGate.ready
                 ? 'inline-flex'
                 : 'none';
-            translateRetryImportShortcutBtn.title = '导入 translation_report.xlsx 或带翻译报告分页的 translated.xlsx；通过项继续复用，仅重新处理翻译失败、缺失和硬质检问题。';
-        }
-        if (retryFailedBtn) {
-            retryFailedBtn.style.display = hasFailures ? 'inline-flex' : 'none';
-            retryFailedBtn.disabled = Boolean(activeTranslateRunId);
-            retryFailedBtn.classList.toggle('primary', hasFailures);
-            retryFailedBtn.classList.toggle('secondary', !hasFailures);
-            retryFailedBtn.textContent = retryableCount > 0
-                ? `一键修复并生成交付版（${retryableCount}）`
-                : '一键修复并生成交付版';
-            retryFailedBtn.title = reportFailureCount > retryableCount
-                ? `报告内共有 ${formatTranslationReportIssueSummary(issueSummary)}；只自动修复明确问题，软性需确认会保留当前译文。硬错误清零后才生成交付版。`
-                : '自动修复翻译失败、结果缺失和硬质检问题；只有复检通过后才生成交付版。';
-        }
-        if (translateCompactLongImportedBtn && !importedTranslateProgressState?.entries?.length) {
-            const lengthCount = Number(issueSummary.length || 0);
-            translateCompactLongImportedBtn.style.display = lengthCount > 0 ? 'inline-flex' : 'none';
-            translateCompactLongImportedBtn.disabled = Boolean(activeTranslateRunId) || translationRunReport?.targetLang === 'zh-TW';
-            translateCompactLongImportedBtn.textContent = lengthCount > 0 ? `精简超长译文（${lengthCount}）` : '精简超长译文';
+            translateRetryImportShortcutBtn.title = '导入 translation_report.xlsx 或带翻译报告分页的 translated.xlsx，开始新的有界处理任务；通过项继续复用，仅处理翻译失败、缺失和硬质检问题。';
         }
     }
 
@@ -11389,14 +11008,16 @@ function initTranslateTool() {
     }
 
     function createTranslationTaskSnapshot(task) {
+        const resultProfile = getTranslateResultProfile(task);
         return {
-            taskKey: task.taskKey,
+            taskKey: getTranslateOutputTaskKey(task),
+            outputSlotId: getTranslateOutputSlotId(task),
             sourceFile: task.source?.fileName || '',
             sheetName: task.source?.sheetName || '',
             rowNumber: task.originalRowNumber || task.rowIndex + 1,
             column: task.colIndex + 1,
-            profile: task.profile?.name || getCompactModelLabel(task.profile),
-            model: task.profile?.model || '',
+            profile: resultProfile?.name || getCompactModelLabel(resultProfile),
+            model: resultProfile?.model || '',
             sourceText: task.text || '',
             referenceText: task.referenceText || '',
             glossary: (task.glossaryTerms || []).map(formatTranslateGlossaryTerm).join('; ')
@@ -11490,11 +11111,19 @@ function initTranslateTool() {
             retryCount: 0,
             slowdownCount: 0,
             batchSplitCount: 0,
+            consecutiveInterruptions: 0,
+            lastCongestionAt: 0,
+            lastInterruptionAt: 0,
             requestCount: 0,
             requestDurationMs: 0,
             requestStats: {},
             qaRepairTaskCount: 0,
             qaRepairRetryCount: 0,
+            repairCacheHitCount: 0,
+            repairInflightJoinCount: 0,
+            targetedRepairAcceptedCount: 0,
+            targetedRepairRejectedCount: 0,
+            targetedRepairFallbackCount: 0,
             lastRequestDurationMs: 0,
             lastRequestKind: '',
             lastRequestOutcome: '',
@@ -11531,10 +11160,15 @@ function initTranslateTool() {
             interruptionCount: Number(previous.interruptionCount || 0) + (kind === 'interruption' ? 1 : 0),
             retryCount: Number(previous.retryCount || 0) + (options.retry ? 1 : 0),
             slowdownCount: Number(previous.slowdownCount || 0) + (options.slowdown ? 1 : 0),
+            consecutiveInterruptions: kind === 'interruption'
+                ? Number(previous.consecutiveInterruptions || 0) + 1
+                : (kind === 'congestion' ? 0 : Number(previous.consecutiveInterruptions || 0)),
+            lastCongestionAt: kind === 'congestion' ? Date.now() : Number(previous.lastCongestionAt || 0),
+            lastInterruptionAt: kind === 'interruption' ? Date.now() : Number(previous.lastInterruptionAt || 0),
             lastIncidentAt: incidentAt,
             updatedAt: Date.now()
         });
-        renderTranslateChannelProgress();
+        scheduleTranslateChannelProgressRender();
     }
 
     function getTranslateChannelIncidentCount(profile) {
@@ -11555,7 +11189,7 @@ function initTranslateTool() {
             message: `批量结构异常，自动拆分 ${sourceSize} → ${splitSizes.join('+')}${reason ? `（${reason}）` : ''}`,
             updatedAt: Date.now()
         });
-        renderTranslateChannelProgress();
+        scheduleTranslateChannelProgressRender();
     }
 
     function recordTranslateRequestTiming(profile, kind, startedAt, details = {}) {
@@ -11580,6 +11214,9 @@ function initTranslateTool() {
             translateChannelProgressState.set(key, {
                 ...previous,
                 profile,
+                consecutiveInterruptions: outcome === 'success'
+                    ? 0
+                    : Number(previous.consecutiveInterruptions || 0),
                 requestCount,
                 requestDurationMs,
                 requestStats,
@@ -11598,10 +11235,63 @@ function initTranslateTool() {
                 outcome,
                 incident: details.error ? classifyTranslateChannelIncident(details.error) : ''
             });
-            renderTranslateChannelProgress();
+            scheduleTranslateChannelProgressRender();
         } catch {
             // Telemetry must never turn a successful translation into a retry or failure.
         }
+    }
+
+    function recordTranslateRepairCacheHit(profile, inFlight = false) {
+        if (!profile) return;
+        const key = getTranslateChannelKey(profile);
+        const previous = translateChannelProgressState.get(key) || createTranslateChannelProgressRecord(profile);
+        translateChannelProgressState.set(key, {
+            ...previous,
+            profile,
+            repairCacheHitCount: Number(previous.repairCacheHitCount || 0) + (inFlight ? 0 : 1),
+            repairInflightJoinCount: Number(previous.repairInflightJoinCount || 0) + (inFlight ? 1 : 0),
+            updatedAt: Date.now()
+        });
+        scheduleTranslateChannelProgressRender();
+    }
+
+    function recordTargetedRepairQuality(profile, details = {}) {
+        if (!profile) return;
+        const key = getTranslateChannelKey(profile);
+        const previous = translateChannelProgressState.get(key) || createTranslateChannelProgressRecord(profile);
+        translateChannelProgressState.set(key, {
+            ...previous,
+            profile,
+            targetedRepairAcceptedCount: Number(previous.targetedRepairAcceptedCount || 0) + Math.max(0, Number(details.acceptedCount || 0)),
+            targetedRepairRejectedCount: Number(previous.targetedRepairRejectedCount || 0) + Math.max(0, Number(details.rejectedCount || 0)),
+            targetedRepairFallbackCount: Number(previous.targetedRepairFallbackCount || 0) + Math.max(0, Number(details.fallbackCount || 0)),
+            updatedAt: Date.now()
+        });
+        scheduleTranslateChannelProgressRender();
+    }
+
+    function getTranslationChannelThrottleLevel(profile) {
+        const state = translateChannelProgressState.get(getTranslateChannelKey(profile));
+        if (!state) return 0;
+        const now = Date.now();
+        const recentCongestion = Number(state.lastCongestionAt || 0) > 0 &&
+            now - Number(state.lastCongestionAt || 0) < TRANSLATION_CONGESTION_COOLDOWN_MS;
+        if (recentCongestion) return 2;
+        const recentInterruption = Number(state.lastInterruptionAt || 0) > 0 &&
+            now - Number(state.lastInterruptionAt || 0) < TRANSLATION_INTERRUPTION_HARD_COOLDOWN_MS;
+        const streak = Number(state.consecutiveInterruptions || 0);
+        if (recentInterruption && streak >= 3) return 2;
+        if (recentInterruption && streak >= 2) return 1;
+        return 0;
+    }
+
+    function getAdaptiveTranslationTargetRpm(profile) {
+        const baseRpm = getTranslationTargetRpm(profile);
+        if (!(baseRpm > 0)) return 0;
+        const state = translateChannelProgressState.get(getTranslateChannelKey(profile));
+        const recentCongestion = Number(state?.lastCongestionAt || 0) > 0 &&
+            Date.now() - Number(state.lastCongestionAt || 0) < TRANSLATION_CONGESTION_COOLDOWN_MS;
+        return recentCongestion ? Math.max(1, Math.floor(baseRpm * 0.7)) : baseRpm;
     }
 
     function recordTranslateQaRepairAttempt(profile, attempt = 0) {
@@ -11615,7 +11305,7 @@ function initTranslateTool() {
             qaRepairRetryCount: Number(previous.qaRepairRetryCount || 0) + (Number(attempt) > 0 ? 1 : 0),
             updatedAt: Date.now()
         });
-        renderTranslateChannelProgress();
+        scheduleTranslateChannelProgressRender();
     }
 
     function initTranslateChannelProgress(tasks = []) {
@@ -11639,7 +11329,7 @@ function initTranslateTool() {
             profile,
             updatedAt: Date.now()
         });
-        renderTranslateChannelProgress();
+        scheduleTranslateChannelProgressRender();
     }
 
     function recordTranslateChannelResult(task, status) {
@@ -11663,7 +11353,7 @@ function initTranslateTool() {
             next.status = 'running';
         }
         translateChannelProgressState.set(key, next);
-        renderTranslateChannelProgress();
+        scheduleTranslateChannelProgressRender();
     }
 
     function markUnfinishedTranslateChannels(status = 'failed', message = '任务已停止，未完成后续翻译') {
@@ -11678,6 +11368,14 @@ function initTranslateTool() {
             }
         });
         renderTranslateChannelProgress();
+    }
+
+    function scheduleTranslateChannelProgressRender(delayMs = 120) {
+        if (translateChannelRenderTimer) return;
+        translateChannelRenderTimer = setTimeout(() => {
+            translateChannelRenderTimer = null;
+            renderTranslateChannelProgress();
+        }, Math.max(0, Number(delayMs) || 0));
     }
 
     function renderTranslateChannelProgress() {
@@ -11712,18 +11410,31 @@ function initTranslateTool() {
             const batchRequestCount = Number(requestStats.batch?.requestCount || 0);
             const singleRequestCount = Number(requestStats.single?.requestCount || 0);
             const qaRepairRequestCount = Number(requestStats['qa-repair']?.requestCount || 0);
+            const qaRepairSubmittedItemCount = Number(requestStats['qa-repair']?.submittedItemCount || 0);
+            const qaRepairItemsPerRequest = qaRepairRequestCount > 0
+                ? qaRepairSubmittedItemCount / qaRepairRequestCount
+                : 0;
             const qaRepairTaskCount = Number(state.qaRepairTaskCount || 0);
             const qaRepairRetryCount = Number(state.qaRepairRetryCount || 0);
+            const repairCacheHitCount = Number(state.repairCacheHitCount || 0);
+            const repairInflightJoinCount = Number(state.repairInflightJoinCount || 0);
+            const targetedRepairAcceptedCount = Number(state.targetedRepairAcceptedCount || 0);
+            const targetedRepairRejectedCount = Number(state.targetedRepairRejectedCount || 0);
+            const targetedRepairDecisionCount = targetedRepairAcceptedCount + targetedRepairRejectedCount;
+            const targetedRepairAcceptanceRate = targetedRepairDecisionCount > 0
+                ? targetedRepairAcceptedCount / targetedRepairDecisionCount
+                : 0;
+            const adaptiveTargetRpm = getAdaptiveTranslationTargetRpm(state.profile);
             const averageRequestMs = requestCount > 0
                 ? Number(state.requestDurationMs || 0) / requestCount
                 : 0;
             const averageRequestText = averageRequestMs >= 1000
                 ? `${(averageRequestMs / 1000).toFixed(1)}秒`
                 : `${Math.round(averageRequestMs)}毫秒`;
-            const incidentCount = congestionCount + interruptionCount;
-            const healthAdvice = incidentCount >= 3 || slowdownCount >= 2
-                ? '<span class="channel-health-advice">建议降低并发</span>'
-                : '';
+            const throttleLevel = getTranslationChannelThrottleLevel(state.profile);
+            const healthAdvice = throttleLevel >= 2
+                ? '<span class="channel-health-advice">强降速保护中</span>'
+                : (throttleLevel === 1 ? '<span class="channel-health-advice">轻度降速，稳定后自动恢复</span>' : '');
             return `
                 <div class="channel-status-card ${escapeAttribute(state.status || 'waiting')}">
                     <div class="channel-status-top">
@@ -11745,6 +11456,10 @@ function initTranslateTool() {
                         <span class="channel-health-chip${slowdownCount ? ' warning' : ''}">降速 ${slowdownCount}</span>
                         ${batchSplitCount ? `<span class="channel-health-chip warning">拆批 ${batchSplitCount}</span>` : ''}
                         ${qaRepairTaskCount ? `<span class="channel-health-chip warning">QA修复 ${qaRepairTaskCount}${qaRepairRetryCount ? ` · 续修 ${qaRepairRetryCount}` : ''}</span>` : ''}
+                        ${repairCacheHitCount || repairInflightJoinCount ? `<span class="channel-health-chip">修复复用 ${repairCacheHitCount + repairInflightJoinCount}（缓存 ${repairCacheHitCount} / 合并 ${repairInflightJoinCount}）</span>` : ''}
+                        ${targetedRepairDecisionCount ? `<span class="channel-health-chip${targetedRepairAcceptanceRate < 0.8 ? ' warning' : ''}">修复采用 ${targetedRepairAcceptedCount}/${targetedRepairDecisionCount}（${Math.round(targetedRepairAcceptanceRate * 100)}%）</span>` : ''}
+                        ${qaRepairItemsPerRequest > 1.05 ? `<span class="channel-health-chip">修复批均 ${qaRepairItemsPerRequest.toFixed(1)} 项/请求</span>` : ''}
+                        ${adaptiveTargetRpm ? `<span class="channel-health-chip${throttleLevel >= 2 ? ' warning' : ''}">目标 ${adaptiveTargetRpm} RPM</span>` : ''}
                         ${requestCount ? `<span class="channel-health-chip" title="批量 ${batchRequestCount} / 单条 ${singleRequestCount} / QA修复 ${qaRepairRequestCount}">请求 ${requestCount}（批 ${batchRequestCount} / 单 ${singleRequestCount} / 修 ${qaRepairRequestCount}）· 均时 ${averageRequestText}</span>` : ''}
                         ${healthAdvice}
                     </div>
@@ -11772,6 +11487,38 @@ function initTranslateTool() {
         setInspectorField('inspectorTaskFailures', failures > 0 ? `问题 ${failures} 个` : (running || paused ? '暂无问题' : '运行中显示'));
     }
 
+    function recordTranslateTaskCompletion(count = 1, at = Date.now()) {
+        const normalizedCount = Math.max(0, Number(count) || 0);
+        if (!normalizedCount) return;
+        translateCompletionHistory.push({ at: Number(at) || Date.now(), count: normalizedCount });
+        const cutoff = Date.now() - Math.max(TRANSLATION_THROUGHPUT_WINDOW_MS * 3, 300000);
+        translateCompletionHistory = translateCompletionHistory.filter(item => item.at >= cutoff);
+    }
+
+    function getTranslateRollingThroughput(now = Date.now()) {
+        const cutoff = now - TRANSLATION_THROUGHPUT_WINDOW_MS;
+        const recent = translateCompletionHistory.filter(item => item.at >= cutoff && item.at <= now);
+        const count = recent.reduce((sum, item) => sum + Number(item.count || 0), 0);
+        if (!count || recent.length < 2) return { perMinute: 0, sampleCount: count, spanMs: 0 };
+        const firstAt = Math.min(...recent.map(item => item.at));
+        const spanMs = Math.max(10000, now - firstAt);
+        return {
+            perMinute: count * 60000 / spanMs,
+            sampleCount: count,
+            spanMs
+        };
+    }
+
+    function formatTranslateEta(remaining, perMinute) {
+        if (!(remaining > 0) || !(perMinute > 0)) return '';
+        const minutes = remaining / perMinute;
+        if (minutes < 1) return '不足1分钟';
+        if (minutes < 60) return `约${Math.ceil(minutes)}分钟`;
+        const hours = Math.floor(minutes / 60);
+        const rest = Math.ceil(minutes % 60);
+        return `约${hours}小时${rest ? `${rest}分钟` : ''}`;
+    }
+
     function updateTranslateRunSummary(completed, total, phase = '') {
         translateRunSummaryState = {
             completed: Math.max(0, Number(completed || 0)),
@@ -11788,7 +11535,12 @@ function initTranslateTool() {
         if (progressInfo && progressSection.style.display !== 'none') {
             const statusPrefix = isPaused ? '翻译已暂停' : (translateRunSummaryState.phase || '正在翻译');
             const languageText = getTranslateLanguageRunHeadline();
-            progressInfo.textContent = `${statusPrefix}${languageText ? `：${languageText}` : ''}...（已完成 ${translateRunSummaryState.completed}/${translateRunSummaryState.total} 个，用时 ${getTranslateElapsedText()}${failures ? `，发现问题 ${failures} 个` : ''}${activeText ? `，${activeText}` : ''}）`;
+            const rolling = getTranslateRollingThroughput();
+            const remaining = Math.max(0, translateRunSummaryState.total - translateRunSummaryState.completed);
+            const speedText = rolling.perMinute > 0
+                ? `，近2分钟 ${rolling.perMinute.toFixed(1)}项/分钟${remaining ? `，预计剩余 ${formatTranslateEta(remaining, rolling.perMinute)}` : ''}`
+                : '';
+            progressInfo.textContent = `${statusPrefix}${languageText ? `：${languageText}` : ''}...（已完成 ${translateRunSummaryState.completed}/${translateRunSummaryState.total} 个，用时 ${getTranslateElapsedText()}${speedText}${failures ? `，发现问题 ${failures} 个` : ''}${activeText ? `，${activeText}` : ''}）`;
         }
         renderTranslateLanguageRunStatus();
         updateTranslateInspectorRuntime();
@@ -11796,6 +11548,7 @@ function initTranslateTool() {
 
     function startTranslateElapsedTimer() {
         translateRunStartedAt = Date.now();
+        translateCompletionHistory = [];
         if (translateElapsedTimer) clearInterval(translateElapsedTimer);
         translateElapsedTimer = setInterval(() => {
             updateTranslateRunSummary(translateRunSummaryState.completed, translateRunSummaryState.total);
@@ -11817,7 +11570,19 @@ function initTranslateTool() {
         rawEntries.forEach(entry => {
             const compactEntry = compactTranslationProgressEntry(entry);
             if (!compactEntry) return;
-            entriesByKey.set(compactEntry.taskKey, compactEntry);
+            if (Number(progress?.version || 0) < 5) {
+                const legacyParts = String(compactEntry.taskKey || '').split('|');
+                if (legacyParts.length >= 7) {
+                    compactEntry.taskKey = legacyParts.slice(0, 5).join('|');
+                }
+            }
+            const existingEntry = entriesByKey.get(compactEntry.taskKey);
+            entriesByKey.set(
+                compactEntry.taskKey,
+                existingEntry
+                    ? selectPreferredTranslationReportEntry(existingEntry, compactEntry)
+                    : compactEntry
+            );
         });
         return [...entriesByKey.values()];
     }
@@ -11844,6 +11609,7 @@ function initTranslateTool() {
                 source.sheetName,
                 source.fileSize || '',
                 source.fileLastModified || '',
+                source.contentSignature || '',
                 rowCount,
                 colCount,
                 header
@@ -11852,10 +11618,59 @@ function initTranslateTool() {
         return makeStableId(signatureParts.join('\u001d'));
     }
 
+    function getTranslateProgressContextSignature(context = {}) {
+        const project = context.project || currentProject;
+        const profiles = context.profiles || getSelectedTranslateProfiles();
+        const includeExecutorProfiles = Boolean(context.includeExecutorProfiles);
+        const glossaryTerms = context.glossaryTerms || getSelectedTranslateGlossaryTerms();
+        const nextTargetLang = context.targetLang || targetLangSelect?.value || '';
+        return makeStableId(JSON.stringify({
+            sourceSignature: getTranslateSourceSignature(),
+            selectedSourceIds: [...selectedTranslateSourceIds].sort(),
+            selectedColumns: [...selectedColumns],
+            sourceLang: sourceLangSelect?.value || 'zh',
+            targetLang: nextTargetLang,
+            qualityPolicies: {
+                languageProfile: globalThis.NexusLanguageQualityProfiles?.getProfileAuditKey?.(nextTargetLang) || '',
+                carryover: globalThis.NexusLanguageCarryoverGuard?.POLICY_VERSION || '',
+                issue: globalThis.NexusTranslationIssuePolicy?.POLICY_VERSION || '',
+                format: globalThis.NexusTranslationFormatTokenPolicy?.POLICY_VERSION || '',
+                number: globalThis.NexusTranslationNumberPolicy?.POLICY_VERSION || '',
+                attempt: globalThis.NexusTranslationRepairAttemptPolicy?.POLICY_VERSION || '',
+                repairBatch: globalThis.NexusTranslationRepairBatchPolicy?.POLICY_VERSION || ''
+            },
+            translateStrategy: getTranslateStrategy(),
+            referenceColumn: Number.isInteger(referenceColumn) ? referenceColumn : null,
+            project: project ? { id: project.id || '', rules: project.rules || '' } : null,
+            profiles: includeExecutorProfiles
+                ? profiles.map(profile => ({
+                    id: profile.id || '',
+                    provider: profile.provider || '',
+                    baseUrl: profile.baseUrl || '',
+                    model: profile.model || ''
+                })).sort((left, right) => `${left.id}|${left.model}`.localeCompare(`${right.id}|${right.model}`))
+                : undefined,
+            glossary: glossaryTerms.map(term => {
+                const effective = getTermTranslationForLanguage(term, nextTargetLang);
+                return {
+                    source: term.source || '',
+                    value: effective.value || '',
+                    constraint: effective.constraint || '',
+                    valueSource: effective.source || '',
+                    type: term.type || '',
+                    note: term.note || term.qualitySuggestion || term.qualityIssues || '',
+                    referenceRows: term.referenceRows || '',
+                    referenceId: term.referenceId || ''
+                };
+            }).sort((left, right) => `${left.source}|${left.value}|${left.constraint}`.localeCompare(`${right.source}|${right.value}|${right.constraint}`))
+        }));
+    }
+
     function buildTranslationProgressPayload(currentRow = 1) {
         return {
             fileName: originalFileName,
             sourceSignature: getTranslateSourceSignature(),
+            contextSignature: getTranslateProgressContextSignature(),
             totalRows: sheetData?.length || 0,
             totalTasks: translationRunReport?.totalTasks || translationProgressTasks.size,
             currentRow,
@@ -11924,15 +11739,17 @@ function initTranslateTool() {
         const status = getTranslationReportStatus(normalizedTranslated, qaStatus);
         const qaTerms = task.glossaryTerms || [];
         const completenessRisk = getTranslationCompletenessRiskLabel(qaStatus);
+        const resultProfile = getTranslateResultProfile(task);
         return {
-            taskKey: task.taskKey,
+            taskKey: getTranslateOutputTaskKey(task),
+            outputSlotId: getTranslateOutputSlotId(task),
             status,
             sourceFile: task.source?.fileName || '',
             sheetName: task.source?.sheetName || '',
             rowNumber: task.originalRowNumber || task.rowIndex + 1,
             column: task.colIndex + 1,
-            profile: task.profile?.name || getCompactModelLabel(task.profile),
-            model: task.profile?.model || '',
+            profile: resultProfile?.name || getCompactModelLabel(resultProfile),
+            model: resultProfile?.model || '',
             sourceText: task.text,
             referenceText: task.referenceText || '',
             translatedText: normalizedTranslated,
@@ -11966,11 +11783,6 @@ function initTranslateTool() {
             selectedColumns = progress.selectedColumns
                 .map(Number)
                 .filter(index => Number.isInteger(index) && index >= 0 && index < sheetData[0].length);
-        }
-
-        if (Array.isArray(progress.selectedProfileIds)) {
-            selectedTranslateProfileIds = new Set(progress.selectedProfileIds);
-            renderTranslateProfileList();
         }
 
         const targetLangSelect = document.getElementById('targetLang');
@@ -12011,23 +11823,29 @@ function initTranslateTool() {
                 !isTranslateFailureText(entry.translatedText);
             if (!canRestoreAsCompleted) return;
 
-            const translated = normalizeTranslateResultText(entry.translatedText, task.text);
-            const currentQaStatus = options.trustSavedQa
-                ? (entry.qaStatus || '通过')
-                : summarizeTranslationQa(
-                    task.text,
-                    translated,
-                    task.glossaryTerms || [],
-                    targetLang || translationRunReport?.targetLang || targetLangSelect?.value || '',
-                    task
-                );
-            const reportEntry = buildTranslationReportEntry(task, translated, currentQaStatus);
+            const restoredTask = {
+                ...task,
+                outputSlotId: entry.outputSlotId || getTranslateOutputSlotId(task),
+                executorProfile: null,
+                reportProfile: createTranslateResultProfileFromReportEntry(entry, task.profile)
+            };
+            const translated = normalizeTranslateResultText(entry.translatedText, restoredTask.text);
+            const currentQaStatus = summarizeTranslationQa(
+                restoredTask.text,
+                translated,
+                restoredTask.glossaryTerms || [],
+                targetLang || translationRunReport?.targetLang || targetLangSelect?.value || '',
+                restoredTask
+            );
+            const reportEntry = buildTranslationReportEntry(restoredTask, translated, currentQaStatus);
             const decisionPolicy = globalThis.NexusTranslationDeliveryPolicy;
             const userDecision = decisionPolicy?.normalizeDecision
                 ? decisionPolicy.normalizeDecision(entry.userDecision)
                 : (entry.userDecision || '');
             const currentKind = classifyTranslationReportEntry(reportEntry);
-            const manualResolutionValid = decisionPolicy?.isManualResolutionValid
+            const manualResolutionValid = userDecision === 'accept_current'
+                ? canAcceptCurrentTranslationEntry(reportEntry)
+                : decisionPolicy?.isManualResolutionValid
                 ? decisionPolicy.isManualResolutionValid(
                     userDecision,
                     currentKind,
@@ -12041,6 +11859,7 @@ function initTranslateTool() {
                 userDecision,
                 revisedText: entry.revisedText || '',
                 decisionNote: entry.decisionNote || '',
+                legacyVariants: Array.isArray(entry.legacyVariants) ? entry.legacyVariants : [],
                 manualResolutionValid,
                 revisionApplied: userDecision === 'use_revision' && Boolean(entry.revisionApplied)
             });
@@ -12053,7 +11872,7 @@ function initTranslateTool() {
             } else if (reportEntry.manualResolutionValid) {
                 reportEntry.status = 'success';
             }
-            writeTranslationResult(task, translated, reportEntry.qaStatus);
+            writeTranslationResult(restoredTask, translated, reportEntry.qaStatus);
             restoredReportEntries.push(reportEntry);
             const compactEntry = compactTranslationProgressEntry(reportEntry);
             if (compactEntry) translationProgressTasks.set(task.taskKey, compactEntry);
@@ -12139,11 +11958,28 @@ function initTranslateTool() {
 
     function findImportedTranslationTaskMatch(entry, taskByKey, fallbackIndex) {
         if (entry.taskKey && taskByKey.has(entry.taskKey)) {
-            return taskByKey.get(entry.taskKey);
+            const exactTask = taskByKey.get(entry.taskKey);
+            const hasSourceContext = Boolean(
+                entry.rowNumber || entry.column || entry.sourceText || entry.sheetName || entry.sourceFile
+            );
+            if (!hasSourceContext || importedEntryMatchesTask(entry, exactTask)) {
+                return exactTask;
+            }
         }
         for (const key of getImportedEntryMatchKeys(entry)) {
             const matches = fallbackIndex.get(key) || [];
+            if (!matches.length) continue;
             if (matches.length === 1) return matches[0];
+            const modelKeys = new Set(
+                [entry.model, entry.profile]
+                    .filter(Boolean)
+                    .map(normalizeTranslateImportKeyPart)
+            );
+            const modelMatch = matches.find(task =>
+                modelKeys.has(normalizeTranslateImportKeyPart(task.profile?.model || '')) ||
+                modelKeys.has(normalizeTranslateImportKeyPart(task.profile?.name || getCompactModelLabel(task.profile)))
+            );
+            return modelMatch || matches[0];
         }
         return null;
     }
@@ -12174,25 +12010,22 @@ function initTranslateTool() {
             state.reviewContextKey === reviewContextKey
         );
         const reviewedStateEntries = targetLang && !canReuseReviewedEntries
-            ? reviewImportedTranslationEntries(state.entries || [], targetLang, reviewGlossaryTerms)
+            ? reviewAndDedupeImportedTranslationEntries(state.entries || [], targetLang, reviewGlossaryTerms)
             : (state.entries || []);
         if (targetLang && !canReuseReviewedEntries) {
             const issueSummary = getTranslationReportIssueSummary(reviewedStateEntries);
+            const continuationPlan = buildImportedContinuationPlan({ entries: reviewedStateEntries });
             state.entries = reviewedStateEntries;
             state.targetLang = state.targetLang || targetLang;
             state.reviewedAt = Date.now();
             state.reviewContextKey = reviewContextKey;
             state.issueSummary = issueSummary;
-            state.failedOrMissingCount = issueSummary.retryable;
-            state.reusableEntries = reviewedStateEntries.filter(isReusableImportedTranslationEntry);
-            state.suspiciousEntries = reviewedStateEntries.filter(entry =>
-                entry.status === 'missing' ||
-                (
-                    entry.status === 'qa_failed' &&
-                    entry.translatedText &&
-                    !isTranslateFailureText(entry.translatedText)
-                )
-            );
+            state.failedOrMissingCount = continuationPlan.repairCount;
+            state.reusableEntries = continuationPlan.reusableEntries;
+            state.blockingEntries = continuationPlan.repairEntries;
+            state.reviewEntries = continuationPlan.reviewEntries;
+            state.suspiciousEntries = continuationPlan.repairEntries;
+            state.continuationPlan = continuationPlan;
         }
 
         const taskLookup = options.taskLookup || buildTranslateImportTaskLookup(tasks);
@@ -12226,6 +12059,9 @@ function initTranslateTool() {
             usedTaskKeys.add(task.taskKey);
             entries.push({
                 taskKey: task.taskKey,
+                outputSlotId: entry.outputSlotId || 'primary',
+                profile: entry.profile || '',
+                model: entry.model || '',
                 status: entry.manualResolutionValid ? 'success' : (entry.status || 'success'),
                 translatedText: entry.translatedText,
                 qaStatus: entry.qaStatus || '',
@@ -12235,6 +12071,7 @@ function initTranslateTool() {
                 userDecision: entry.userDecision || '',
                 revisedText: entry.revisedText || '',
                 decisionNote: entry.decisionNote || '',
+                legacyVariants: Array.isArray(entry.legacyVariants) ? entry.legacyVariants : [],
                 manualResolutionValid: Boolean(entry.manualResolutionValid),
                 revisionApplied: Boolean(entry.revisionApplied)
             });
@@ -12256,6 +12093,39 @@ function initTranslateTool() {
         return (entries || []).map(entry =>
             buildReviewedImportedTranslationEntry(entry, targetLang, glossaryTerms)
         );
+    }
+
+    function expandImportedTranslationCandidateEntries(entries = []) {
+        const candidates = [];
+        (entries || []).forEach(entry => {
+            const variants = Array.isArray(entry?.legacyVariants) && entry.legacyVariants.length
+                ? entry.legacyVariants
+                : [];
+            const candidateValues = [compactLegacyTranslationVariant(entry), ...variants];
+            const seen = new Set();
+            candidateValues.forEach(candidate => {
+                const candidateKey = JSON.stringify(candidate);
+                if (seen.has(candidateKey)) return;
+                seen.add(candidateKey);
+                candidates.push({
+                    ...entry,
+                    ...candidate,
+                    legacyVariants: [],
+                    legacyVariantCount: 0
+                });
+            });
+        });
+        return candidates;
+    }
+
+    function reviewAndDedupeImportedTranslationEntries(entries = [], targetLang = '', selectedGlossaryTerms = null) {
+        const candidates = expandImportedTranslationCandidateEntries(entries);
+        const reviewedCandidates = reviewImportedTranslationEntries(
+            candidates,
+            targetLang,
+            selectedGlossaryTerms
+        );
+        return dedupeTranslationReportEntries(reviewedCandidates);
     }
 
     function buildReviewedImportedTranslationEntry(entry, targetLang = '', selectedGlossaryTerms = null) {
@@ -12340,13 +12210,15 @@ function initTranslateTool() {
             }
         );
         let reviewedEntry;
-        if (isTranslationQaPassed(qaStatus)) {
+        const reviewedStatus = getTranslationReportStatus(translatedText, qaStatus);
+        if (reviewedStatus === 'success') {
+            const hasReviewFindings = !isTranslationQaPassed(qaStatus);
             reviewedEntry = {
                 ...baseEntry,
                 status: 'success',
-                qaStatus: '通过',
-                completenessRisk: '',
-                actionSuggestion: '',
+                qaStatus: hasReviewFindings ? qaStatus : '通过',
+                completenessRisk: hasReviewFindings ? getTranslationCompletenessRiskLabel(qaStatus) : '',
+                actionSuggestion: hasReviewFindings ? '建议复核，不影响复用或交付' : '',
                 error: ''
             };
         } else {
@@ -12361,10 +12233,7 @@ function initTranslateTool() {
         }
 
         if (selection.acceptRequested) {
-            const kind = classifyTranslationReportEntry(reviewedEntry);
-            const canAccept = policy?.canAcceptCurrentKind
-                ? policy.canAcceptCurrentKind(kind)
-                : ['success', 'soft', 'length'].includes(kind);
+            const canAccept = canAcceptCurrentTranslationEntry(reviewedEntry);
             if (canAccept) {
                 return {
                     ...reviewedEntry,
@@ -12409,12 +12278,13 @@ function initTranslateTool() {
             return false;
         }
         if (state.targetLang && currentTargetLang && state.targetLang !== currentTargetLang) {
-            const confirmed = confirm(`导入报告疑似为 ${getTranslateLanguageName(state.targetLang)}，当前页面选择的是 ${getTranslateLanguageName(currentTargetLang)}。\n\n将按导入报告语言复查，是否继续？`);
-            if (!confirmed) return false;
+            if (targetLangSelect) targetLangSelect.value = state.targetLang;
+            selectedTranslateTargetLangs = new Set([state.targetLang]);
+            renderTranslateTargetLanguageList();
         }
 
         const reviewGlossaryTerms = getSelectedTranslateGlossaryTerms();
-        const reviewedEntries = reviewImportedTranslationEntries(state.entries, targetLang, reviewGlossaryTerms);
+        const reviewedEntries = reviewAndDedupeImportedTranslationEntries(state.entries, targetLang, reviewGlossaryTerms);
         let reportMissingEntries = [];
         let mergedReviewedEntries = reviewedEntries;
         let coverageCheckedAt = Number(state.coverageCheckedAt) || 0;
@@ -12428,43 +12298,41 @@ function initTranslateTool() {
             coverageTaskCount = allTasks.length;
         }
         const reportMissingCount = mergedReviewedEntries.filter(isImportedReportCoverageMissingEntry).length;
-        const reusableEntries = mergedReviewedEntries.filter(isReusableImportedTranslationEntry);
-        const suspiciousEntries = mergedReviewedEntries.filter(entry =>
-            entry.status === 'missing' ||
-            (
-                entry.status === 'qa_failed' &&
-                entry.translatedText &&
-                !isTranslateFailureText(entry.translatedText)
-            )
-        );
+        const continuationPlan = buildImportedContinuationPlan({ entries: mergedReviewedEntries });
+        const reusableEntries = continuationPlan.reusableEntries;
+        const blockingEntries = continuationPlan.repairEntries;
+        const reviewEntries = continuationPlan.reviewEntries;
         const issueSummary = getTranslationReportIssueSummary(mergedReviewedEntries);
-        const failedOrMissingCount = issueSummary.retryable;
+        const failedOrMissingCount = continuationPlan.repairCount;
         importedTranslateProgressState = {
             ...state,
             targetLang,
             entries: mergedReviewedEntries,
             reusableEntries,
-            suspiciousEntries,
+            blockingEntries,
+            reviewEntries,
+            suspiciousEntries: blockingEntries,
             reviewedAt: Date.now(),
             reviewContextKey: getImportedTranslationReviewContextKey(targetLang, reviewGlossaryTerms),
             reviewSummary: {
                 total: mergedReviewedEntries.length,
                 reusable: reusableEntries.length,
-                suspicious: suspiciousEntries.length,
+                suspicious: blockingEntries.length,
                 failedOrMissing: failedOrMissingCount,
                 reportMissing: reportMissingCount
             },
             issueSummary,
             failedOrMissingCount,
             coverageCheckedAt,
-            coverageTaskCount
+            coverageTaskCount,
+            continuationPlan
         };
         updateTranslateProgressImportStatus();
-        if (suspiciousEntries.length) {
+        if (blockingEntries.length) {
             const missingText = reportMissingCount ? `，其中 ${reportMissingCount} 条是报告缺失任务` : '';
-            setStatus('warning', '复查完成，发现可疑译文', `共 ${suspiciousEntries.length} 条疑似漏译/不完整${missingText}。可直接补译可疑行，也可在“定向重译问题类型”里只勾选混入中文等类型。`);
+            setStatus('warning', '复查完成，存在必须处理项', `必须处理 ${blockingEntries.length} 条${missingText}；另有 ${reviewEntries.length} 条建议复核，不会调用 AI。`);
         } else {
-            setStatus('success', '复查完成', '未发现明显漏译或内容不完整风险。');
+            setStatus('success', '复查完成', `没有必须处理项；${reviewEntries.length} 条建议复核不影响复用或交付。`);
         }
         return true;
     }
@@ -12484,7 +12352,7 @@ function initTranslateTool() {
     function findTaskForImportedTranslationEntry(entry, tasks = []) {
         if (entry.taskKey) {
             const exact = tasks.find(task => task.taskKey === entry.taskKey);
-            if (exact) return exact;
+            if (exact && importedEntryMatchesTask(entry, exact)) return exact;
         }
         const candidates = tasks.filter(task => importedEntryMatchesTask(entry, task));
         if (!candidates.length) return null;
@@ -12516,6 +12384,7 @@ function initTranslateTool() {
                 sheetName: task.source?.sheetName || '',
                 rowNumber: task.originalRowNumber || task.rowIndex + 1,
                 column: task.colIndex + 1,
+                outputSlotId: 'primary',
                 profile: task.profile?.name || getCompactModelLabel(task.profile),
                 model: task.profile?.model || '',
                 sourceText: task.text || '',
@@ -12548,6 +12417,38 @@ function initTranslateTool() {
         );
     }
 
+    function buildRetryTasksForReportEntries(entries = [], activeProfiles = getSelectedTranslateProfiles()) {
+        if (!sheetData || !translateSources.length || selectedColumns.length === 0 || !activeProfiles.length) {
+            return { allTasks: [], retryTasks: [], mappedPairs: [], unmappedEntries: [...(entries || [])] };
+        }
+        const allTasks = collectTranslationTasks(activeProfiles, { deferGlossary: true });
+        const taskLookup = buildTranslateImportTaskLookup(allTasks);
+        const usedOutputKeys = new Set();
+        const retryTasks = [];
+        const mappedPairs = [];
+        const unmappedEntries = [];
+        (entries || []).forEach(entry => {
+            const task = findImportedTranslationTaskMatch(entry, taskLookup.taskByKey, taskLookup.fallbackIndex);
+            const outputKey = task ? getStableReportOutputTaskKey(entry, task) : '';
+            if (!task || !outputKey || usedOutputKeys.has(outputKey)) {
+                unmappedEntries.push(entry);
+                return;
+            }
+            const retryTask = {
+                ...task,
+                retryOfTaskKey: getStableReportOutputTaskKey(entry, task),
+                outputTaskKey: getStableReportOutputTaskKey(entry, task),
+                outputSlotId: 'primary',
+                reportProfile: createTranslateResultProfileFromReportEntry(entry, task.profile),
+                sourceReportEntry: entry
+            };
+            retryTasks.push(retryTask);
+            mappedPairs.push({ entry, task: retryTask });
+            usedOutputKeys.add(outputKey);
+        });
+        return { allTasks, retryTasks, mappedPairs, unmappedEntries, taskLookup };
+    }
+
     function initializeTranslateOutputFromImportedReport(tasks = [], targetLang = '', options = {}) {
         translateSources.forEach(source => {
             source.outputRows = (source.rows || []).map(row => Array.isArray(row) ? [...row] : []);
@@ -12567,22 +12468,50 @@ function initTranslateTool() {
         };
         translationProgressTasks = new Map();
         failedTranslationTasks = [];
-        const restored = buildImportedTranslationRestoreEntries(tasks, targetLang, options);
-        if (restored.entries.length) {
-            restoreCompletedTranslationTasks(tasks, restored.entries, targetLang, {
-                trustSavedQa: restored.reviewedForCurrentContext
-            });
-        }
-        return restored;
+        const taskLookup = options.taskLookup || buildTranslateImportTaskLookup(tasks);
+        const preservedByIdentity = new Map();
+        const importedEntriesForTarget = dedupeTranslationReportEntries((
+            !importedTranslateProgressState?.targetLang ||
+            !targetLang ||
+            importedTranslateProgressState.targetLang === targetLang
+        ) ? (importedTranslateProgressState?.entries || []) : []);
+        importedEntriesForTarget.forEach(entry => {
+            const task = findImportedTranslationTaskMatch(entry, taskLookup.taskByKey, taskLookup.fallbackIndex);
+            const preserved = task
+                ? {
+                    ...entry,
+                    taskKey: getStableReportOutputTaskKey(entry, task),
+                    sourceFile: task.source?.fileName || entry.sourceFile || '',
+                    sheetName: task.source?.sheetName || entry.sheetName || '',
+                    rowNumber: task.originalRowNumber || task.rowIndex + 1,
+                    column: task.colIndex + 1,
+                    sourceText: task.text || entry.sourceText || '',
+                    referenceText: task.referenceText || entry.referenceText || ''
+                }
+                : entry;
+            const identity = preserved.taskKey || getTranslationReportEntryDedupeKey(preserved);
+            if (identity) preservedByIdentity.set(identity, preserved);
+        });
+        translationRunReport.entries = [...preservedByIdentity.values()];
+        const fullOutputRestore = restoreImportedReportEntriesToOutput(
+            tasks,
+            importedEntriesForTarget,
+            targetLang
+        );
+        return {
+            entries: translationRunReport.entries,
+            matched: fullOutputRestore.matched,
+            unmatched: fullOutputRestore.unmatched,
+            skippedTargetMismatch: importedEntriesForTarget.length ? 0 : (importedTranslateProgressState?.entries?.length || 0),
+            reviewedForCurrentContext: true,
+            fullOutputMatched: fullOutputRestore.matched,
+            fullOutputUnmatched: fullOutputRestore.unmatched
+        };
     }
 
     function setImportedRetryPreparationState(isPreparing, count = 0) {
         if (translateBtn) translateBtn.disabled = isPreparing;
         if (translateBtnLabel && isPreparing) translateBtnLabel.textContent = `正在准备 ${count} 条...`;
-        if (translateRetrySuspiciousBtn) {
-            translateRetrySuspiciousBtn.disabled = isPreparing;
-            if (isPreparing) translateRetrySuspiciousBtn.textContent = `正在准备 ${count} 条...`;
-        }
     }
 
     async function yieldTranslatePreparationPaint() {
@@ -12593,9 +12522,7 @@ function initTranslateTool() {
         const state = importedTranslateProgressState;
         const retryPreview = previewOverride || getImportedIssueRetryPreview(state);
         if (!retryPreview.entries.length) {
-            alert(retryPreview.custom
-                ? '所选问题类型没有可重译的行。请换一个报告问题类型，或先点击“复查已完成译文”。'
-                : '没有需要补译的可疑行。请先导入报告并点击“复查已完成译文”，或在“定向重译问题类型”里勾选要处理的问题。');
+            setStatus('success', '没有必须处理项', '已有译文可以直接复用；建议复核不会调用 AI。');
             return;
         }
         if (!sheetData || !translateSources.length) {
@@ -12616,39 +12543,38 @@ function initTranslateTool() {
         }
         const targetLang = state.targetLang || targetLangSelect?.value || '';
         if (state.targetLang && targetLangSelect?.value && state.targetLang !== targetLangSelect.value) {
-            const confirmed = confirm(`导入报告是 ${getTranslateLanguageName(state.targetLang)}，当前页面选择的是 ${getTranslateLanguageName(targetLangSelect.value)}。\n\n将切换到 ${getTranslateLanguageName(state.targetLang)} 后补译可疑行，是否继续？`);
-            if (!confirmed) return;
             targetLangSelect.value = state.targetLang;
             selectedTranslateTargetLangs = new Set([state.targetLang]);
             renderTranslateTargetLanguageList();
+            setStatus(
+                'processing',
+                `已按报告切换为${getTranslateLanguageName(state.targetLang)}`,
+                '目标语言以导入报告为准，工具将直接继续处理必须项。'
+            );
         }
-        const retryScope = retryPreview.custom
-            ? (retryPreview.mandatoryMissingCount > 0
-                ? `缺失项及所选问题类型（${formatImportedIssueFilterSelection(retryPreview)}）`
-                : `所选问题类型（${formatImportedIssueFilterSelection(retryPreview)}）`)
-            : '可疑行';
+        const retryScope = retryPreview.mandatoryMissingCount > 0
+            ? '缺失项及高置信必须项'
+            : '高置信必须项';
         setImportedRetryPreparationState(true, retryPreview.entries.length);
         setStatus('processing', `正在准备${retryScope}`, `正在建立源文件索引并定位 ${retryPreview.entries.length} 条报告问题，完成后会自动开始补译。`);
         await yieldTranslatePreparationPaint();
 
         let retryTasks = [];
+        let unmappedRetryCount = 0;
         try {
-            const allTasks = collectTranslationTasks(activeProfiles, { deferGlossary: true });
-            const taskLookup = buildTranslateImportTaskLookup(allTasks);
-            const usedTaskKeys = new Set();
-            retryPreview.entries.forEach(entry => {
-                const task = findImportedTranslationTaskMatch(entry, taskLookup.taskByKey, taskLookup.fallbackIndex);
-                if (!task || usedTaskKeys.has(task.taskKey)) return;
-                retryTasks.push(task);
-                usedTaskKeys.add(task.taskKey);
-            });
+            const mapping = buildRetryTasksForReportEntries(retryPreview.entries, activeProfiles);
+            retryTasks = mapping.retryTasks;
+            unmappedRetryCount = mapping.unmappedEntries.length;
 
             if (!retryTasks.length) {
                 setStatus('error', '未定位到报告问题行', '请确认当前上传文件、工作表、所选列与导入报告来自同一次翻译。');
                 return;
             }
 
-            initializeTranslateOutputFromImportedReport(allTasks, targetLang, { taskLookup });
+            initializeTranslateOutputFromImportedReport(mapping.allTasks, targetLang, {
+                taskLookup: mapping.taskLookup,
+                includeQaFailed: true
+            });
             failedTranslationTasks = retryTasks;
             updateTranslationRunActions();
         } catch (error) {
@@ -12662,7 +12588,18 @@ function initTranslateTool() {
         }
 
         setStatus('processing', `已准备${retryScope}补译`, `定位到 ${retryTasks.length}/${retryPreview.entries.length} 条报告问题行，将复用其余成功译文。`);
-        await retryFailedTranslations({ skipConfirm: true, deferAutoQaRepair: true });
+        return retryFailedTranslations({
+            skipConfirm: true,
+            deferAutoQaRepair: true,
+            twoStageRetry: true,
+            scopedTasks: retryTasks,
+            selectedIssueIds: retryPreview.selectedIssueIds || retryPreview.plan?.repairIssueIds || [],
+            preferTargetedRepair: true,
+            continuousRepairTarget: '',
+            continuousRepairLabel: '',
+            continuousRepairUnmappedCount: 0,
+            suppressAutoSave: false
+        });
     }
 
     async function handleTranslatePrimaryAction() {
@@ -12674,11 +12611,53 @@ function initTranslateTool() {
             if (!reviewCompleted) return;
         }
         const retryPreview = getImportedIssueRetryPreview(importedTranslateProgressState);
-        if (retryPreview.custom) {
-            await retrySuspiciousImportedTranslations(retryPreview);
-            return;
+        if (importedTranslateProgressState?.entries?.length) {
+            if (retryPreview.entries.length) {
+                return retrySuspiciousImportedTranslations(retryPreview);
+            }
+            const activeProfiles = getSelectedTranslateProfiles();
+            if (!activeProfiles.length) {
+                setStatus('error', '未选择输出通道', '请至少勾选一个翻译通道，用于定位原文件中的输出槽；本次不会调用 API。', revealApiConfigPanel, '去配置');
+                return;
+            }
+            const targetLang = importedTranslateProgressState.targetLang || targetLangSelect?.value || '';
+            if (targetLang && targetLangSelect?.value !== targetLang) {
+                targetLangSelect.value = targetLang;
+                selectedTranslateTargetLangs = new Set([targetLang]);
+                renderTranslateTargetLanguageList();
+            }
+            const allTasks = collectTranslationTasks(activeProfiles, { deferGlossary: true });
+            initializeTranslateOutputFromImportedReport(allTasks, targetLang, { includeQaFailed: true });
+            translatedWorkbook = buildTranslationWorkbook();
+            translatedData = translatedDataLocal;
+            progressSection.style.display = 'none';
+            downloadSection.style.display = 'block';
+            syncImportedTranslateProgressFromRunReport();
+            updateTranslationRunActions();
+            const gate = getTranslationDeliveryGate();
+            let autoSaveMessage = '';
+            try {
+                const savedPaths = await autoSaveTranslationOutputs();
+                autoSaveMessage = formatTranslationAutoSaveResult(savedPaths, gate);
+            } catch (saveError) {
+                recordClientError('translation-import-restore-auto-save', saveError, {
+                    targetLang,
+                    blockingCount: gate.blockingCount
+                });
+                autoSaveMessage = gate.ready
+                    ? '；正式交付版自动保存失败，可点击下载重试'
+                    : '；当前最佳未验证版和问题报告自动保存失败';
+            }
+            setStatus(
+                gate.ready ? 'success' : 'warning',
+                gate.ready ? '已恢复报告译文，无需调用 AI' : '已恢复报告译文，仍有阻断项',
+                gate.ready
+                    ? `完整译文和处理决定已恢复，无需再次调用 AI${autoSaveMessage}`
+                    : `当前仍有 ${gate.blockingCount} 个阻断项${autoSaveMessage}`
+            );
+            return { status: gate.ready ? 'success' : 'needs_action', repairableCount: gate.blockingCount };
         }
-        await startTranslate();
+        return startTranslate();
     }
 
     function appendTranslationQaIssue(qaStatus, issue) {
@@ -12727,7 +12706,9 @@ function initTranslateTool() {
                 ? decisionPolicy.normalizeDecision(existingEntry.userDecision)
                 : (existingEntry.userDecision || '');
             const currentKind = classifyTranslationReportEntry(reportEntry);
-            const manualResolutionValid = decisionPolicy?.isManualResolutionValid
+            const manualResolutionValid = userDecision === 'accept_current'
+                ? canAcceptCurrentTranslationEntry(reportEntry)
+                : decisionPolicy?.isManualResolutionValid
                 ? decisionPolicy.isManualResolutionValid(
                     userDecision,
                     currentKind,
@@ -12778,19 +12759,29 @@ function initTranslateTool() {
         if (!tasks.length || !entries.length) return { matched: 0, unmatched: 0 };
         const taskByKey = new Map(tasks.map(task => [task.taskKey, task]));
         const fallbackIndex = buildTranslateImportTaskIndex(tasks);
-        const usedTaskKeys = new Set();
+        const usedOutputKeys = new Set();
         let matched = 0;
         let unmatched = 0;
 
         entries.forEach(entry => {
             if (!entry?.translatedText || isTranslateFailureText(entry.translatedText)) return;
-            const task = findImportedTranslationTaskMatch(entry, taskByKey, fallbackIndex) ||
+            const matchedTask = findImportedTranslationTaskMatch(entry, taskByKey, fallbackIndex) ||
                 findTaskForImportedTranslationEntry(entry, tasks);
-            if (!task || usedTaskKeys.has(task.taskKey)) {
+            const outputKey = matchedTask ? getStableReportOutputTaskKey(entry, matchedTask) : '';
+            if (!matchedTask || !outputKey || usedOutputKeys.has(outputKey)) {
                 unmatched++;
                 return;
             }
-            usedTaskKeys.add(task.taskKey);
+            usedOutputKeys.add(outputKey);
+            const task = {
+                ...matchedTask,
+                outputSlotId: 'primary',
+                executorProfile: null,
+                reportProfile: createTranslateResultProfileFromReportEntry(entry, matchedTask.profile),
+                outputTaskKey: getStableReportOutputTaskKey(entry, matchedTask),
+                retryOfTaskKey: getStableReportOutputTaskKey(entry, matchedTask),
+                taskKey: getStableReportOutputTaskKey(entry, matchedTask)
+            };
             const qaStatus = summarizeTranslationQa(task.text, entry.translatedText, task.glossaryTerms || [], targetLang, task);
             const restoredReportEntry = upsertTranslationRunReportEntry(task, entry.translatedText, qaStatus);
             const decisionPolicy = globalThis.NexusTranslationDeliveryPolicy;
@@ -12798,7 +12789,9 @@ function initTranslateTool() {
                 ? decisionPolicy.normalizeDecision(entry.userDecision)
                 : (entry.userDecision || '');
             const currentKind = classifyTranslationReportEntry(restoredReportEntry);
-            const manualResolutionValid = decisionPolicy?.isManualResolutionValid
+            const manualResolutionValid = userDecision === 'accept_current'
+                ? canAcceptCurrentTranslationEntry(restoredReportEntry)
+                : decisionPolicy?.isManualResolutionValid
                 ? decisionPolicy.isManualResolutionValid(
                     userDecision,
                     currentKind,
@@ -12812,6 +12805,7 @@ function initTranslateTool() {
                 userDecision,
                 revisedText: entry.revisedText || '',
                 decisionNote: entry.decisionNote || '',
+                legacyVariants: Array.isArray(entry.legacyVariants) ? entry.legacyVariants : [],
                 manualResolutionValid,
                 revisionApplied: userDecision === 'use_revision' && Boolean(entry.revisionApplied)
             });
@@ -12835,310 +12829,14 @@ function initTranslateTool() {
         return { matched, unmatched };
     }
 
-    function buildLongTranslationCompactJobs(entries = [], tasks = [], activeProfiles = [], targetLang = '') {
-        const lengthEntries = getTranslationReportIssueGroups(entries).length;
-        const jobs = [];
-        const usedIdentity = new Set();
-        lengthEntries.forEach(entry => {
-            const matchedTask = findTaskForImportedTranslationEntry(entry, tasks);
-            if (!matchedTask || !entry.translatedText || isTranslateFailureText(entry.translatedText)) return;
-            const identity = [
-                matchedTask.source?.id || matchedTask.source?.fileName || '',
-                matchedTask.source?.sheetName || '',
-                matchedTask.originalRowNumber || matchedTask.rowIndex + 1,
-                matchedTask.colIndex + 1,
-                matchedTask.text || ''
-            ].join('\u001f');
-            if (usedIdentity.has(identity)) return;
-            usedIdentity.add(identity);
-            const profile = activeProfiles[jobs.length % activeProfiles.length] || matchedTask.profile;
-            const task = {
-                ...matchedTask,
-                profile,
-                taskKey: buildTranslationTaskKey(
-                    matchedTask.source,
-                    matchedTask.rowIndex,
-                    matchedTask.colIndex,
-                    profile,
-                    matchedTask.referenceColIndex,
-                    targetLang
-                ),
-                glossaryTerms: getRelevantTranslateGlossaryTerms(
-                    [matchedTask.text, matchedTask.referenceText],
-                    getSelectedTranslateGlossaryTerms(),
-                    targetLang,
-                    24
-                )
-            };
-            jobs.push({
-                entry,
-                task,
-                currentTranslation: entry.translatedText
-            });
-        });
-        return jobs;
-    }
-
-    async function compactLongImportedTranslations() {
-        if (activeTranslateRunId) {
-            setStatus('warning', '当前已有翻译任务运行中', '请等待当前任务结束后再精简超长译文。');
-            return;
-        }
-        const entries = importedTranslateProgressState?.entries?.length
-            ? importedTranslateProgressState.entries
-            : (translationRunReport?.entries || []);
-        if (!entries.length) {
-            alert('请先导入 translation_report.xlsx，或在当前页面生成翻译报告后再精简超长译文。');
-            return;
-        }
-        if (!sheetData || !translateSources.length) {
-            alert('请先上传与报告对应的原文件，工具需要用原文件定位并输出新版译文。');
-            return;
-        }
-        if (selectedColumns.length === 0) {
-            columnSelectSection.style.display = 'block';
-            renderColumnList();
-            columnSelectSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            alert('请先选择要翻译的原文列，工具需要用它定位超长行。');
-            return;
-        }
-        if (!currentProject) {
-            alert('请先选择游戏项目，工具需要项目规则来判断精简边界。');
-            return;
-        }
-
-        const stateTargetLang = importedTranslateProgressState?.targetLang || translationRunReport?.targetLang || '';
-        const currentTargetLang = targetLangSelect?.value || '';
-        const targetLang = stateTargetLang || currentTargetLang;
-        if (!targetLang) {
-            alert('请先选择目标语言，工具需要知道按哪种语言规则精简。');
-            return;
-        }
-        if (targetLang === 'zh-TW') {
-            setStatus('warning', '繁中不做超长精简', '繁中只做完整繁简转换和漏译检查，不会为了长度删除语义。');
-            return;
-        }
-        if (stateTargetLang && currentTargetLang && stateTargetLang !== currentTargetLang) {
-            const confirmed = confirm(`导入报告是 ${getTranslateLanguageName(stateTargetLang)}，当前页面选择的是 ${getTranslateLanguageName(currentTargetLang)}。\n\n将切换到 ${getTranslateLanguageName(stateTargetLang)} 后精简超长译文，是否继续？`);
-            if (!confirmed) return;
-            if (targetLangSelect) targetLangSelect.value = stateTargetLang;
-            selectedTranslateTargetLangs = new Set([stateTargetLang]);
-            renderTranslateTargetLanguageList();
-        }
-
-        const activeProfiles = getSelectedTranslateProfiles();
-        if (!activeProfiles.length) {
-            setStatus('error', '未选择可用精简通道', '请先勾选至少一个翻译模型通道。', revealApiConfigPanel, '去配置');
-            return;
-        }
-        const allTasks = collectTranslationTasks(activeProfiles);
-        const compactJobs = buildLongTranslationCompactJobs(entries, allTasks, activeProfiles, targetLang);
-        if (!compactJobs.length) {
-            setStatus('success', '没有可精简的超长行', '当前报告没有可定位的“译文长度超出建议”行。旧报告可先点“复查已完成译文”按新版规则重新检测。');
-            return;
-        }
-
-        const confirmed = confirm(`将只对 ${compactJobs.length} 条超长译文做二次精简。\n\n成功译文会先恢复到输出文件；精简失败、疑似漏译或变短后丢意思时，会保留原译文并在报告标记“需确认：长度超出”。\n\n确定开始吗？`);
-        if (!confirmed) return;
-
-        const runId = `compact_${Date.now().toString(36)}`;
-        const runController = new AbortController();
-        currentTranslateAbortController = runController;
-        activeTranslateRunId = runId;
-        isTranslationCancelled = false;
-        isPaused = false;
-
-        initializeTranslateOutputFromImportedReport(allTasks, targetLang);
-        setExpectedTranslationTasks(allTasks);
-        const restored = restoreImportedReportEntriesToOutput(allTasks, entries, targetLang);
-        if (translationRunReport) {
-            translationRunReport.targetLang = targetLang;
-            translationRunReport.totalTasks = allTasks.length;
-        }
-
-        progressSection.style.display = 'block';
-        downloadSection.style.display = 'none';
-        pauseBtn.style.display = 'inline-flex';
-        resumeBtn.style.display = 'none';
-        downloadProgressBtn.style.display = 'none';
-        initTranslateChannelProgress(compactJobs.map(job => job.task));
-        startTranslateElapsedTimer();
-        translateRunSummaryState = {
-            completed: 0,
-            total: compactJobs.length,
-            phase: `${getTranslateLanguageName(targetLang)}超长精简中`
-        };
-        updateTranslateRunSummary(0, compactJobs.length, translateRunSummaryState.phase);
-        setStatus(
-            'processing',
-            '正在精简超长译文',
-            `已恢复 ${restored.matched} 条报告译文，只处理 ${compactJobs.length} 条超长行；其余成功项不会重跑。`
-        );
-
-        let completed = 0;
-        let accepted = 0;
-        let keptOriginal = 0;
-        let nextIndex = 0;
-        const sourceLang = sourceLangSelect?.value || 'zh';
-        const rules = currentProject?.rules || '';
-        const compactProfileCapacity = activeProfiles.reduce((sum, profile) => {
-            const profileLimit = getProfileConcurrency(profile);
-            return sum + (Number.isFinite(profileLimit) ? profileLimit : 1);
-        }, 0);
-        const pageConcurrencyLimit = getTranslatePageConcurrencyLimit();
-        const compactConcurrencyLimit = pageConcurrencyLimit || compactProfileCapacity || 1;
-        const workerCount = Math.max(1, Math.min(
-            compactJobs.length,
-            compactProfileCapacity || 1,
-            compactConcurrencyLimit,
-            3
-        ));
-
-        async function runCompactWorker() {
-            while (nextIndex < compactJobs.length) {
-                const job = compactJobs[nextIndex++];
-                throwIfTranslationCancelled(runId);
-                while (isPaused && !isTranslationCancelled) {
-                    await waitForResume();
-                    throwIfTranslationCancelled(runId);
-                }
-
-                const { task, entry, currentTranslation } = job;
-                updateTranslateChannelProgress(task.profile, {
-                    status: 'running',
-                    message: `超长精简中，并发 ${workerCount}`
-                });
-                const lengthQa = entry.qaStatus || getTranslationLengthIssue(task.text, currentTranslation, targetLang, task);
-                let repaired = currentTranslation;
-                let finalText = currentTranslation;
-                let finalQa = appendTranslationQaIssue(lengthQa, '长度超出，二次精简未采纳，保留原译文');
-                let status = 'qa_failed';
-
-                try {
-                    repaired = await repairTranslationWithRetry(
-                        task,
-                        currentTranslation,
-                        lengthQa,
-                        sourceLang,
-                        targetLang,
-                        rules,
-                        task.profile,
-                        runController.signal,
-                        2
-                    );
-                    repaired = applyLocalTranslationFixes(task.text, repaired, targetLang);
-                    const currentLength = getVisibleTextForLength(currentTranslation).length;
-                    const repairedLength = getVisibleTextForLength(repaired).length;
-                    const repairedQa = translatePostCheckInput?.checked
-                        ? summarizeTranslationQa(task.text, repaired, task.glossaryTerms || [], targetLang, task)
-                        : getTranslationLengthIssue(task.text, repaired, targetLang, task) || '通过';
-
-                    if (
-                        repaired &&
-                        !isTranslateFailureText(repaired) &&
-                        repairedLength > 0 &&
-                        repairedLength < currentLength &&
-                        !hasBlockingCompactQa(repairedQa)
-                    ) {
-                        finalText = repaired;
-                        finalQa = repairedQa;
-                        status = getTranslationReportStatus(finalText, finalQa);
-                        accepted++;
-                    } else {
-                        keptOriginal++;
-                    }
-                } catch (error) {
-                    if (error.name === 'AbortError' || error.message === 'TRANSLATION_CANCELLED') throw error;
-                    keptOriginal++;
-                    finalQa = appendTranslationQaIssue(finalQa, `精简失败：${summarizeTranslateError(error)}`);
-                }
-
-                writeTranslationResult(task, finalText, finalQa);
-                upsertTranslationRunReportEntry(task, finalText, finalQa);
-                recordTranslateChannelResult(task, status);
-                completed++;
-                const percent = Math.round((completed / compactJobs.length) * 100);
-                updateTranslateProgress(completed, compactJobs.length, percent);
-                updateTranslateRunSummary(completed, compactJobs.length, `${getTranslateLanguageName(targetLang)}超长精简中`);
-                if (completed % TRANSLATION_PROGRESS_SAVE_INTERVAL === 0) {
-                    await saveCurrentTranslationProgress(task?.rowIndex || 1);
-                }
-                if (shouldRenderTranslationPreview(status, completed)) {
-                    const translationList = document.getElementById('translationList');
-                    addTranslationItem(translationList, task.text, finalText, task.rowIndex, task.colIndex, task.profile, targetLang);
-                }
-            }
-        }
-
-        try {
-            await Promise.all(Array.from({ length: workerCount }, () => runCompactWorker()));
-            refreshTranslationRunCountsFromReport();
-            ensureTranslationReportCoversExpectedTasks();
-            await flushTranslationTaskProgress();
-            await saveCurrentTranslationProgress(1);
-            translatedWorkbook = buildTranslationWorkbook();
-            translatedData = translatedDataLocal;
-            progressSection.style.display = 'none';
-            downloadSection.style.display = 'block';
-            updateTranslationRunActions();
-
-            const deliveryGate = getTranslationDeliveryGate();
-            let autoSaveMessage = '';
-            try {
-                const savedPaths = await autoSaveTranslationOutputs();
-                autoSaveMessage = deliveryGate.ready
-                    ? (savedPaths.length ? `；已自动保存：${savedPaths.join('；')}` : '')
-                    : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版${savedPaths.length ? `；问题报告已保存：${savedPaths.join('；')}` : ''}`;
-            } catch (saveError) {
-                console.warn('超长精简结果自动保存失败:', saveError);
-                autoSaveMessage = deliveryGate.ready
-                    ? '；自动保存失败，请点击下载按钮手动保存'
-                    : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版；问题报告自动保存失败`;
-            }
-            setTranslateDownloadLanguageSummary(
-                deliveryGate.ready
-                    ? `${getTranslateLanguageName(targetLang)}超长精简完成：采纳 ${accepted} 条，保留原译文 ${keptOriginal} 条；交付版可用。`
-                    : `${getTranslateLanguageName(targetLang)}超长精简完成，但仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版。`
-            );
-            setStatus(
-                keptOriginal > 0 || !deliveryGate.ready ? 'warning' : 'success',
-                deliveryGate.ready ? '超长译文精简完成' : '精简完成，仍有阻断问题',
-                `已处理 ${completed}/${compactJobs.length} 条；采纳 ${accepted} 条，保留原译文 ${keptOriginal} 条。${autoSaveMessage}`
-            );
-            if (keptOriginal > 0 || !deliveryGate.ready) {
-                finishInspectorTaskTimer('warning', deliveryGate.ready ? '超长译文精简完成，有内容待确认' : '精简完成，仍有阻断问题');
-            }
-        } catch (error) {
-            if (error.name === 'AbortError' || error.message === 'TRANSLATION_CANCELLED') {
-                setStatus('warning', '超长精简已取消', '已保留当前已处理的译文，可下载当前进度或重新导入报告继续。');
-                finishInspectorTaskTimer('warning', '超长精简已取消');
-            } else {
-                recordClientError('compact-long-translation', error);
-                setStatus('error', '超长精简失败', error?.message || '未知错误');
-            }
-        } finally {
-            if (currentTranslateAbortController === runController) currentTranslateAbortController = null;
-            if (activeTranslateRunId === runId) activeTranslateRunId = null;
-            stopTranslateElapsedTimer();
-            isPaused = false;
-            pauseBtn.style.display = 'inline-flex';
-            resumeBtn.style.display = 'none';
-            downloadProgressBtn.style.display = 'none';
-            updateTranslationRunActions();
-            updateTranslateInspectorRuntime();
-        }
-    }
-
-    function buildTranslationTaskKey(source, rowIndex, colIndex, profile, referenceColIndex = null, targetLangOverride = null) {
+    function buildTranslationTaskKey(source, rowIndex, colIndex, targetLangOverride = null) {
         const keyTargetLang = targetLangOverride || document.getElementById('targetLang')?.value || '';
         return [
             source?.fileName || '',
             source?.sheetName || '',
             keyTargetLang,
             rowIndex,
-            colIndex,
-            referenceColIndex ?? '',
-            getTranslateChannelKey(profile)
+            colIndex
         ].join('|');
     }
 
@@ -13149,6 +12847,7 @@ function initTranslateTool() {
         const deferGlossary = Boolean(options.deferGlossary);
         const glossaryTerms = deferGlossary ? [] : getSelectedTranslateGlossaryTerms();
         const targetLang = document.getElementById('targetLang').value;
+        let executorCursor = 0;
 
         for (let i = 1; i < (sheetData?.length || 0); i++) {
             const row = sheetData[i];
@@ -13168,30 +12867,33 @@ function initTranslateTool() {
                     continue;
                 }
 
-                activeProfiles.forEach(profile => {
-                    const referenceText = getTranslateReferenceText(row, originalColIndex);
-                    const glossary = deferGlossary
-                        ? []
-                        : getRelevantTranslateGlossaryTerms([cellText, referenceText], glossaryTerms, targetLang, 24);
-                    const referenceColIndex = referenceText ? referenceColumn : null;
-                    const passthrough = isSpecialCode(cellText, targetLang);
-                    if (passthrough) filteredSpecial++;
-                    tasks.push({
-                        rowIndex: i,
-                        originalRowIndex: source.rowMap?.get(i) ?? i,
-                        originalRowNumber: getTranslateOriginalRowNumber(i),
-                        colIndex: originalColIndex,
-                        sourceColumnName: getTranslateColumnName(originalColIndex),
-                        text: cellText,
-                        referenceText,
-                        referenceColIndex,
-                        referenceColumnName: Number.isInteger(referenceColIndex) ? getTranslateColumnName(referenceColIndex) : '',
-                        source,
-                        profile,
-                        passthrough,
-                        glossaryTerms: glossary,
-                        taskKey: buildTranslationTaskKey(source, i, originalColIndex, profile, referenceColIndex, targetLang)
-                    });
+                const profile = activeProfiles[executorCursor % Math.max(1, activeProfiles.length)];
+                if (!profile) continue;
+                executorCursor++;
+                const referenceText = getTranslateReferenceText(row, originalColIndex);
+                const glossary = deferGlossary
+                    ? []
+                    : getRelevantTranslateGlossaryTerms([cellText, referenceText], glossaryTerms, targetLang, 24);
+                const referenceColIndex = referenceText ? referenceColumn : null;
+                const passthrough = isSpecialCode(cellText, targetLang);
+                if (passthrough) filteredSpecial++;
+                tasks.push({
+                    rowIndex: i,
+                    originalRowIndex: source.rowMap?.get(i) ?? i,
+                    originalRowNumber: getTranslateOriginalRowNumber(i),
+                    colIndex: originalColIndex,
+                    sourceColumnName: getTranslateColumnName(originalColIndex),
+                    text: cellText,
+                    referenceText,
+                    referenceColIndex,
+                    referenceColumnName: Number.isInteger(referenceColIndex) ? getTranslateColumnName(referenceColIndex) : '',
+                    source,
+                    profile,
+                    executorProfile: profile,
+                    outputSlotId: 'primary',
+                    passthrough,
+                    glossaryTerms: glossary,
+                    taskKey: buildTranslationTaskKey(source, i, originalColIndex, targetLang)
                 });
             }
         }
@@ -13218,7 +12920,24 @@ function initTranslateTool() {
         translatedWorkbook = null;
     }
 
-    function buildTranslationWorkbook() {
+    function getUniqueTranslationWorksheetName(workbook, preferredName, fallbackName = 'Sheet') {
+        const normalizedBase = String(preferredName || fallbackName)
+            .replace(/[\\/?*[\]:]/g, '_')
+            .slice(0, 31) || fallbackName;
+        const existingNames = new Set(
+            (workbook?.SheetNames || []).map(name => String(name).toLocaleLowerCase())
+        );
+        if (!existingNames.has(normalizedBase.toLocaleLowerCase())) return normalizedBase;
+
+        for (let index = 2; index <= 10000; index++) {
+            const suffix = `_${index}`;
+            const candidate = `${normalizedBase.slice(0, Math.max(1, 31 - suffix.length))}${suffix}`;
+            if (!existingNames.has(candidate.toLocaleLowerCase())) return candidate;
+        }
+        throw new Error('工作表名称冲突过多，无法生成译文文件');
+    }
+
+    function buildTranslationWorkbook(options = {}) {
         const selectedSources = getSelectedTranslateSources();
         if (!selectedSources.length) return null;
 
@@ -13228,12 +12947,13 @@ function initTranslateTool() {
             const baseName = source.sheetName && source.sheetName !== 'CSV'
                 ? source.sheetName
                 : source.fileName.replace(/\.(csv|xlsx|xls)$/i, '');
-            const safeName = String(baseName || `Sheet${index + 1}`).replace(/[\\/?*[\]:]/g, '_').slice(0, 31) || `Sheet${index + 1}`;
+            const safeName = getUniqueTranslationWorksheetName(workbook, baseName, `Sheet${index + 1}`);
             XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(rows), safeName);
         });
 
-        if (translationRunReport?.entries?.length) {
-            XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(buildTranslationReportRows()), '翻译报告');
+        if (options.includeReport && translationRunReport?.entries?.length) {
+            const reportSheetName = getUniqueTranslationWorksheetName(workbook, '翻译报告', '翻译报告');
+            XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(buildTranslationReportRows()), reportSheetName);
         }
 
         return workbook;
@@ -13247,6 +12967,19 @@ function initTranslateTool() {
             ['目标语言代码', targetLang],
             ['目标语言', getTranslateLanguageName(targetLang) || targetLang],
             ['生成时间', new Date().toISOString()],
+            ['质量配置', globalThis.NexusLanguageQualityProfiles?.getProfileAuditKey?.(targetLang) || ''],
+            ['质量规则版本', JSON.stringify({
+                carryover: globalThis.NexusLanguageCarryoverGuard?.POLICY_VERSION || '',
+                issue: globalThis.NexusTranslationIssuePolicy?.POLICY_VERSION || '',
+                format: globalThis.NexusTranslationFormatTokenPolicy?.POLICY_VERSION || '',
+                number: globalThis.NexusTranslationNumberPolicy?.POLICY_VERSION || '',
+                attempt: globalThis.NexusTranslationRepairAttemptPolicy?.POLICY_VERSION || '',
+                repairBatch: globalThis.NexusTranslationRepairBatchPolicy?.POLICY_VERSION || ''
+            })],
+            ['输出布局', 'canonical-primary-v1（每个逻辑单元格一个当前最佳译文）'],
+            ['本轮修复账本', translationRunReport?.repairAttemptSummary
+                ? JSON.stringify(translationRunReport.repairAttemptSummary)
+                : ''],
             [],
             [
             '任务Key',
@@ -13256,6 +12989,7 @@ function initTranslateTool() {
             '工作表',
             '原始行号',
             '列',
+            '输出槽',
             '通道',
             '模型',
             '原文',
@@ -13268,7 +13002,8 @@ function initTranslateTool() {
             '错误',
             '处理决定（可选）',
             '修订译文（可选）',
-            '处理备注（可选）'
+            '处理备注（可选）',
+            '历史候选迁移审计'
             ]
         ];
 
@@ -13281,6 +13016,7 @@ function initTranslateTool() {
                 entry.sheetName || '',
                 entry.rowNumber || '',
                 entry.column || '',
+                entry.outputSlotId || 'primary',
                 entry.profile || '',
                 entry.model || '',
                 entry.sourceText || '',
@@ -13295,7 +13031,10 @@ function initTranslateTool() {
                     ? globalThis.NexusTranslationDeliveryPolicy.getDecisionLabel(entry.userDecision)
                     : (entry.userDecision || ''),
                 entry.revisedText || '',
-                entry.decisionNote || ''
+                entry.decisionNote || '',
+                Array.isArray(entry.legacyVariants) && entry.legacyVariants.length > 1
+                    ? JSON.stringify(entry.legacyVariants)
+                    : ''
             ]);
         });
 
@@ -13414,40 +13153,102 @@ function initTranslateTool() {
         XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
             ['怎么处理', '填写方式', '重新导入后的结果'],
             ['在哪里填写', '顶部主表或下方“需重新处理任务”清单都可以', '工具会按任务合并读取，不会丢失处理决定'],
-            ['让工具自动修复', '在“处理决定（可选）”填写：必须重译', '该行进入一键修复队列'],
+            ['让工具在新任务中处理', '在“处理决定（可选）”填写：必须重译', '重新导入报告并点击主按钮后，该行进入有界必修队列'],
             ['使用人工修改', '填写“修订译文（可选）”，并在处理决定填写：使用修订译文', '先按当前规则复检；通过后直接写入结果'],
             ['确认专名可保留', '仅对软性需确认填写：接受现译', '记录确认并复用；混入中文、明确英文残留、缺失等硬错误不能这样放行'],
             ['补充上下文', '可在“处理备注（可选）”填写原因', '随报告保留，方便后续审计'],
             [],
-            ['重要', '阻断问题未清零时，工具不会自动生成正式交付版。', '如确需查看或人工修改，可在工具中主动导出 *_translated_unverified.xlsx；该文件不是交付版。']
+            ['重要', '阻断问题未清零时，工具不会生成正式交付版。', '工具会分别自动保存 *_translated_unverified.xlsx 当前最佳快照和独立问题报告；未验证译文不是交付版。']
         ]), '处理说明');
         return workbook;
     }
 
+    async function saveTranslationArtifact(kind, deliveryGate) {
+        if (kind === 'translated') {
+            const workbook = translatedWorkbook || buildTranslationWorkbook();
+            if (!workbook) throw new Error('没有可保存的正式交付译文');
+            translatedWorkbook = workbook;
+            try {
+                return await saveWorkbookFile(workbook, getTranslationOutputFileName('translated'));
+            } finally {
+                translatedWorkbook = null;
+            }
+        }
+        if (kind === 'translated_unverified') {
+            const workbook = buildUnverifiedTranslationWorkbook(deliveryGate);
+            if (!workbook) throw new Error('没有可保存的未验证译文');
+            return saveWorkbookFile(workbook, getTranslationOutputFileName('translated_unverified'));
+        }
+        if (kind === 'report') {
+            if (!translationRunReport) throw new Error('没有可保存的翻译报告');
+            return saveWorkbookFile(
+                buildTranslationReportWorkbook(),
+                getTranslationOutputFileName('translation_report')
+            );
+        }
+        throw new Error(`不支持的翻译产物类型：${kind}`);
+    }
+
     async function autoSaveTranslationOutputs() {
-        const savedPaths = [];
         ensureTranslationReportCoversExpectedTasks();
         const deliveryGate = getTranslationDeliveryGate();
         const autoSaveKinds = globalThis.NexusTranslationDeliveryPolicy?.getAutoSaveKinds
             ? globalThis.NexusTranslationDeliveryPolicy.getAutoSaveKinds(deliveryGate)
-            : (deliveryGate.ready ? ['translated', 'report'] : ['report']);
-        if (autoSaveKinds.includes('translated')) {
-            const workbook = translatedWorkbook || buildTranslationWorkbook();
-            if (workbook) {
-                translatedWorkbook = workbook;
-                savedPaths.push(await saveWorkbookFile(workbook, getTranslationOutputFileName('translated')));
-                translatedWorkbook = null;
-                await waitForBrowserFrame();
+            : (deliveryGate.ready
+                ? ['translated', 'report']
+                : ['translated_unverified', 'report']);
+        const savedPaths = [];
+        const savedArtifacts = [];
+        const failures = [];
+
+        for (const kind of autoSaveKinds) {
+            try {
+                const savedPath = await saveTranslationArtifact(kind, deliveryGate);
+                if (savedPath) {
+                    savedPaths.push(savedPath);
+                    savedArtifacts.push({ kind, path: savedPath });
+                }
+            } catch (error) {
+                failures.push({ kind, error });
+                recordClientError('translation-artifact-auto-save', error, {
+                    kind,
+                    ready: deliveryGate.ready,
+                    blockingCount: deliveryGate.blockingCount
+                });
             }
-        }
-        if (translationRunReport && autoSaveKinds.includes('report')) {
-            const reportWorkbook = buildTranslationReportWorkbook();
-            savedPaths.push(await saveWorkbookFile(reportWorkbook, getTranslationOutputFileName('translation_report')));
             await waitForBrowserFrame();
         }
-        const resultPaths = savedPaths.filter(Boolean);
-        resultPaths.deliveryGate = deliveryGate;
-        return resultPaths;
+
+        savedPaths.deliveryGate = deliveryGate;
+        savedPaths.savedArtifacts = savedArtifacts;
+        savedPaths.failures = failures;
+        savedPaths.terminalArtifactKind = deliveryGate.ready
+            ? 'translated'
+            : 'translated_unverified';
+        return savedPaths;
+    }
+
+    function formatTranslationAutoSaveResult(savedPaths, deliveryGate) {
+        const paths = Array.isArray(savedPaths) ? savedPaths.filter(Boolean) : [];
+        const failures = Array.isArray(savedPaths?.failures) ? savedPaths.failures : [];
+        const artifactKinds = new Set(
+            (savedPaths?.savedArtifacts || []).map(item => item.kind)
+        );
+        const savedText = paths.length ? `已自动保存：${paths.join('；')}` : '没有产物保存成功';
+        const failureText = failures.length
+            ? `；${failures.map(item => `${item.kind} 保存失败`).join('、')}`
+            : '';
+        if (deliveryGate.ready) {
+            return `；${savedText}${failureText}`;
+        }
+        const unverifiedSaved = artifactKinds.has('translated_unverified');
+        const reportSaved = artifactKinds.has('report');
+        const artifactText = unverifiedSaved && reportSaved
+            ? '当前最佳未验证版和问题报告已保存'
+            : (unverifiedSaved
+                ? '当前最佳未验证版已保存，问题报告保存失败'
+                : (reportSaved ? '问题报告已保存，未验证版保存失败' : '未验证版和问题报告均未保存成功'));
+        return `；仍有 ${deliveryGate.blockingCount} 条阻断问题；${artifactText}${paths.length ? `：${paths.join('；')}` : ''}${failureText}`;
     }
 
     function buildFailedTranslationRetryPlan(activeProfiles, sourceTasks = failedTranslationTasks) {
@@ -13458,6 +13259,7 @@ function initTranslateTool() {
                 task,
                 originalProfile,
                 profile,
+                executorProfile: profile,
                 remapped: Boolean(originalProfile && profile && getTranslateChannelKey(originalProfile) !== getTranslateChannelKey(profile))
             };
         });
@@ -13495,11 +13297,10 @@ function initTranslateTool() {
     }
 
     function rebuildFailedTranslationTasksFromReport(activeProfiles) {
-        if (failedTranslationTasks.length > 0) return [...failedTranslationTasks];
-
+        const existingTasks = [...failedTranslationTasks];
         const failedEntries = getDefaultRetryableTranslationReportEntries();
         const issueSummary = getTranslationReportIssueSummary();
-        if (failedEntries.length === 0) return [];
+        if (failedEntries.length === 0) return existingTasks;
 
         if (!sheetData || !translateSources.length || selectedColumns.length === 0) {
             setStatus(
@@ -13507,21 +13308,27 @@ function initTranslateTool() {
                 '无法恢复待处理任务',
                 '当前报告里有可自动处理项，但页面缺少原文件或原文列选择。请重新上传同一份原文件并选择原文列，再开始重译。'
             );
-            return [];
+            return existingTasks;
         }
 
         const allTasks = collectTranslationTasks(activeProfiles, { deferGlossary: true });
+        const taskLookup = buildTranslateImportTaskLookup(allTasks);
         const restoredTasks = [];
-        const usedTaskKeys = new Set();
+        const usedOutputKeys = new Set();
 
         failedEntries.forEach(entry => {
-            const task = findTaskForImportedTranslationEntry(entry, allTasks);
-            if (!task || usedTaskKeys.has(task.taskKey)) return;
+            const task = findImportedTranslationTaskMatch(entry, taskLookup.taskByKey, taskLookup.fallbackIndex);
+            const outputKey = task ? getStableReportOutputTaskKey(entry, task) : '';
+            if (!task || !outputKey || usedOutputKeys.has(outputKey)) return;
             restoredTasks.push({
                 ...task,
-                retryOfTaskKey: entry.taskKey || task.taskKey
+                retryOfTaskKey: getStableReportOutputTaskKey(entry, task),
+                outputTaskKey: getStableReportOutputTaskKey(entry, task),
+                outputSlotId: 'primary',
+                reportProfile: createTranslateResultProfileFromReportEntry(entry, task.profile),
+                sourceReportEntry: entry
             });
-            usedTaskKeys.add(task.taskKey);
+            usedOutputKeys.add(outputKey);
         });
 
         if (restoredTasks.length > 0) {
@@ -13538,7 +13345,7 @@ function initTranslateTool() {
             updateTranslationRunActions();
         }
 
-        return restoredTasks;
+        return restoredTasks.length ? restoredTasks : existingTasks;
     }
 
     async function retryFailedTranslations(options = {}) {
@@ -13554,7 +13361,17 @@ function initTranslateTool() {
             return;
         }
 
-        const retryTasks = rebuildFailedTranslationTasksFromReport(activeProfiles);
+        const reportTargetLang = translationRunReport?.targetLang || importedTranslateProgressState?.targetLang || '';
+        if (reportTargetLang && targetLangSelect?.value !== reportTargetLang) {
+            targetLangSelect.value = reportTargetLang;
+            selectedTranslateTargetLangs = new Set([reportTargetLang]);
+            renderTranslateTargetLanguageList();
+        }
+
+        const hasScopedTasks = Array.isArray(options.scopedTasks);
+        const retryTasks = hasScopedTasks
+            ? [...options.scopedTasks]
+            : rebuildFailedTranslationTasksFromReport(activeProfiles);
         if (!retryTasks.length) {
             const reportFailureCount = getTranslationReportFailureEntries().length;
             const issueSummary = getTranslationReportIssueSummary();
@@ -13563,7 +13380,7 @@ function initTranslateTool() {
                 reportFailureCount > 0 && reportRepairableCount === 0 ? 'success' : 'warning',
                 reportFailureCount > 0 && reportRepairableCount === 0 ? '没有需要自动重译的硬问题' : '没有可重新处理的硬问题',
                 reportFailureCount > 0 && reportRepairableCount === 0
-                    ? `报告里还有 ${formatTranslationReportIssueSummary(issueSummary)}，但没有可自动处理项。超长行可点“精简超长译文”，其他软性问题建议下载报告人工确认。`
+                    ? `报告里还有 ${formatTranslationReportIssueSummary(issueSummary)}，但没有高置信必须处理项；软性建议不会调用 AI，请下载报告人工复核。`
                     : (translationRunReport
                         ? '当前翻译报告里没有可定位的硬问题。可以先下载报告查看问题行，或重新上传同一份原文件后再试。'
                         : '当前没有翻译报告或待处理任务记录。')
@@ -13572,19 +13389,44 @@ function initTranslateTool() {
         }
 
         const retryPlan = buildFailedTranslationRetryPlan(activeProfiles, retryTasks);
-        if (!options.skipConfirm) {
-            const confirmed = confirm(`将重新翻译 ${retryPlan.length} 个硬问题，包括翻译失败、结果缺失和硬质检未通过。\n\n处理规则：第一阶段统一批量重译并做本地 QA，不会边翻译边逐条调用 AI 修复；批量后最多选取 ${TRANSLATION_RETRY_DEEP_REPAIR_LIMIT} 个残余阻断项进入有界深度修复，超出的条目会保留并在下一轮轮转处理。已有译文的硬问题最多定向修复一次；缺失项最多补译一次，必要时再定向修复一次。\n\n使用文本翻译里当前勾选的模型通道；勾选多个通道时会轮询分配，不再强制沿用原通道。软性需确认和超长行不会在这里自动重译；超长行请使用“精简超长译文”。\n\n${summarizeRetryPlan(retryPlan)}\n\n确定开始重译吗？`);
-            if (!confirmed) return;
-        }
 
-        const retryTargetLang = document.getElementById('targetLang').value;
+        const retryTargetLang = reportTargetLang || document.getElementById('targetLang').value;
+        if (
+            translationRunReport?.targetLang &&
+            retryTargetLang !== translationRunReport.targetLang
+        ) {
+            setStatus('error', '报告语言与重译语言不一致', '为避免覆盖错误语言，本次重译已停止。请重新选择报告对应的目标语言。');
+            return { status: 'blocked', reason: 'retry-target-language-mismatch' };
+        }
         const retryGlossaryTerms = getSelectedTranslateGlossaryTerms();
-        pendingRetryTranslationTasks = retryPlan.map(({ task, profile }) => {
+        pendingRetryTranslationTasks = retryPlan.map(({ task, profile, executorProfile = profile }) => {
+            const outputSlotId = getTranslateOutputSlotId(task);
+            const outputTaskKey = task.outputTaskKey || task.retryOfTaskKey || task.taskKey;
+            const sourceEntry = task.sourceReportEntry || (translationRunReport?.entries || []).find(entry =>
+                entry.taskKey === outputTaskKey || importedEntryMatchesTask(entry, task)
+            );
+            const currentTranslation = sourceEntry?.translatedText || '';
+            const canRepairFromCurrent = Boolean(
+                options.preferTargetedRepair !== false &&
+                currentTranslation &&
+                !isTranslateFailureText(currentTranslation) &&
+                !isMissingTranslationResult(currentTranslation) &&
+                !isMissingTranslationReportEntry(sourceEntry) &&
+                !isActualTranslationFailureReportEntry(sourceEntry)
+            );
             return {
                 ...task,
-                profile,
-                retryOfTaskKey: task.retryOfTaskKey || task.taskKey,
-                taskKey: buildTranslationTaskKey(task.source, task.rowIndex, task.colIndex, profile, task.referenceColIndex, retryTargetLang),
+                profile: executorProfile,
+                executorProfile,
+                reportProfile: executorProfile,
+                outputSlotId,
+                outputTaskKey,
+                retryOfTaskKey: outputTaskKey,
+                taskKey: outputTaskKey,
+                repairFromCurrent: canRepairFromCurrent,
+                currentTranslation: canRepairFromCurrent ? currentTranslation : '',
+                repairQaStatus: canRepairFromCurrent ? (sourceEntry?.qaStatus || '') : '',
+                repairTargetIssueIds: Array.isArray(options.selectedIssueIds) ? [...options.selectedIssueIds] : [],
                 glossaryTerms: getRelevantTranslateGlossaryTerms(
                     [task.text, task.referenceText],
                     retryGlossaryTerms,
@@ -13601,7 +13443,12 @@ function initTranslateTool() {
                 deferAutoQaRepair: shouldDeferRetryQaRepair(options),
                 twoStageRetry: options.twoStageRetry !== false,
                 glossaryTermsSnapshot: retryGlossaryTerms,
-                suppressAutoSave: Boolean(options.suppressAutoSave)
+                suppressAutoSave: Boolean(options.suppressAutoSave),
+                continuousRepairTarget: options.continuousRepairTarget || '',
+                continuousRepairLabel: options.continuousRepairLabel || '',
+                continuousRepairUnmappedCount: Number(options.continuousRepairUnmappedCount) || 0,
+                scopedRepair: hasScopedTasks,
+                selectedIssueIds: Array.isArray(options.selectedIssueIds) ? [...options.selectedIssueIds] : []
             });
             return result;
         } finally {
@@ -13629,12 +13476,6 @@ function initTranslateTool() {
             alert('请至少选择一种目标语言');
             return { status: 'empty' };
         }
-
-        const autoRetryText = isTranslateAutoRetryMultiTargetEnabled()
-            ? '\n\n已开启“多语言自动重译硬问题”：每种语言完成后若有翻译失败、结果缺失或硬质检问题，会额外重译一次再进入下一语言。'
-            : '';
-        const confirmed = confirm(`将按顺序翻译 ${targetLangs.length} 种目标语言：${targetLangs.map(getTranslateLanguageName).join('、')}。\n\n每种语言都会保存独立报告；只有硬错误清零时才保存交付版译文，避免把有问题的文件误用于交付。${autoRetryText}\n\n是否开始？`);
-        if (!confirmed) return { status: 'cancelled' };
 
         const multiTargetStartedAt = Date.now();
         const originalTargetLang = targetLangSelect?.value || targetLangs[0];
@@ -13676,7 +13517,7 @@ function initTranslateTool() {
                 setStatus(
                     'processing',
                     `多语言翻译 ${index + 1}/${targetLangs.length}`,
-                    `正在处理 ${getTranslateLanguageName(targetLang)}。硬错误清零后保存交付版；否则只保存问题报告，再继续下一种语言。`
+                    `正在处理 ${getTranslateLanguageName(targetLang)}。完成后会按质检状态尝试保存交付版，或未验证版和问题报告，再继续下一种语言。`
                 );
                 const result = await startTranslate({
                     skipMultiTarget: true,
@@ -13695,32 +13536,13 @@ function initTranslateTool() {
                 completedTargets++;
                 let repairableCount = Number(result.repairableCount || 0);
                 let failureCount = Number(result.failCount || result.failureCount || 0);
-                if (repairableCount > 0 && isTranslateAutoRetryMultiTargetEnabled()) {
-                    setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}首次完成，有 ${repairableCount} 个可自动处理的硬问题，正在重译一次。`);
-                    setStatus(
-                        'processing',
-                        `自动重译 ${getTranslateLanguageName(targetLang)} 的硬问题`,
-                        `将只重新处理 ${repairableCount} 个翻译失败、结果缺失或硬质检问题，通过译文继续复用。`
-                    );
-                    const retryResult = await retryFailedTranslations({
-                        skipConfirm: true,
-                        deferAutoQaRepair: true,
-                        twoStageRetry: true
-                    });
-                    if (['success', 'needs_action'].includes(retryResult?.status)) {
-                        repairableCount = Number(retryResult.repairableCount || 0);
-                        failureCount = Number(retryResult.failCount || retryResult.failureCount || failureCount);
-                    } else {
-                        repairableCount = Math.max(repairableCount, failedTranslationTasks.length || 0);
-                    }
-                }
                 if (repairableCount > 0) {
                     retryTargets.push({ targetLang, repairableCount, failureCount });
                     markTranslateLanguageFailed(targetLang);
-                    setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}仍有 ${repairableCount} 个阻断问题，未生成交付版；问题报告已保存。多语言队列进度：${completedTargets}/${targetLangs.length}`);
+                    setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}仍有 ${repairableCount} 个阻断问题，单语言处理已完成；实际保存结果请查看该语言完成状态或“最近任务/文件”。多语言队列进度：${completedTargets}/${targetLangs.length}`);
                 } else {
                     markTranslateLanguageCompleted(targetLang);
-                    setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}硬错误已清零，交付版和报告已保存。多语言队列进度：${completedTargets}/${targetLangs.length}`);
+                    setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}硬错误已清零，单语言处理已完成；实际保存结果请查看该语言完成状态或“最近任务/文件”。多语言队列进度：${completedTargets}/${targetLangs.length}`);
                 }
             }
         } finally {
@@ -13738,19 +13560,19 @@ function initTranslateTool() {
                 status: retryTargets.length ? 'needs_action' : 'success'
             });
             const retryText = retryTargets.length
-                ? ` 其中 ${retryTargets.map(item => `${getTranslateLanguageName(item.targetLang)} ${item.repairableCount} 项`).join('、')} 仍阻断交付，只保存了问题报告。点击“导入报告继续处理”，逐个导入对应语言的 *_translation_report.xlsx 即可。`
+                ? ` 其中 ${retryTargets.map(item => `${getTranslateLanguageName(item.targetLang)} ${item.repairableCount} 项`).join('、')} 仍阻断交付；可重新导入报告开始新的有界处理任务。`
                 : '';
             setTranslateDownloadLanguageSummary(
                 retryTargets.length
                     ? `多语言队列已处理完成：${targetLangs.map(getTranslateLanguageName).join('、')}。仅硬错误清零的语言生成了交付版。${retryText}`
-                    : `多语言翻译已完成：${targetLangs.map(getTranslateLanguageName).join('、')}。每种语言已分别保存交付版和报告。`
+                    : `多语言翻译已完成：${targetLangs.map(getTranslateLanguageName).join('、')}。各语言实际保存结果请查看单语言完成状态或“最近任务/文件”。`
             );
             setStatus(
                 retryTargets.length ? 'warning' : 'success',
-                retryTargets.length ? '多语言队列完成，有语言未生成交付版' : '多语言翻译完成',
+                retryTargets.length ? '多语言队列完成，部分语言仍有阻断项' : '多语言翻译完成',
                 retryTargets.length
-                    ? `已处理 ${completedTargets}/${targetLangs.length} 种目标语言；有阻断问题的语言只保存报告。${retryText}`
-                    : `已处理 ${completedTargets}/${targetLangs.length} 种目标语言，每种语言已分别保存交付版和报告。`
+                    ? `已处理 ${completedTargets}/${targetLangs.length} 种目标语言。${retryText}实际保存结果请查看单语言完成状态或“最近任务/文件”。`
+                    : `已处理 ${completedTargets}/${targetLangs.length} 种目标语言；实际保存结果请查看单语言完成状态或“最近任务/文件”。`
             );
             if (retryTargets.length) {
                 finishInspectorTaskTimer('warning', '多语言队列完成，仍有阻断问题');
@@ -13806,10 +13628,20 @@ function initTranslateTool() {
         let activeProfiles = getSelectedTranslateProfiles();
         const retryTasks = pendingRetryTranslationTasks ? [...pendingRetryTranslationTasks] : null;
         const twoStageRetryRun = shouldUseTwoStageTranslationRetry(retryTasks, options);
+        const continuousRepairTarget = String(options.continuousRepairTarget || '');
+        const continuousRepairLabel = String(options.continuousRepairLabel || continuousRepairTarget || '选中必修项');
+        const continuousRepairPolicy = getTranslationStrictRepairPolicy();
+        const continuousRepairRequested = Boolean(twoStageRetryRun && continuousRepairTarget);
+        if (continuousRepairRequested && !continuousRepairPolicy) {
+            setStatus('error', '严格修复策略未加载', '为避免无限请求，本次自动清零没有启动。请重启工具后重试。');
+            if (options.outputSuffix !== undefined) activeTranslationOutputSuffix = previousOutputSuffix;
+            return { status: 'blocked', reason: 'strict-repair-policy-unavailable' };
+        }
+        const continuousRepairEnabled = Boolean(continuousRepairRequested && continuousRepairPolicy);
+        const continuousRepairUnmappedCount = Math.max(0, Number(options.continuousRepairUnmappedCount) || 0);
         const deferAutoQaRepairForRun = Boolean(
             twoStageRetryRun ||
-            options.deferAutoQaRepair ||
-            (!retryTasks && isTranslateFastBatchModeEnabled())
+            options.deferAutoQaRepair
         );
         const glossaryTermsForRun = Array.isArray(options.glossaryTermsSnapshot)
             ? options.glossaryTermsSnapshot
@@ -13818,6 +13650,7 @@ function initTranslateTool() {
         let runReportFailureCount = 0;
         let runRepairableCount = 0;
         let deferredRetryRepairSummary = null;
+        let repairAttemptLedger = null;
 
         console.log('🚀 开始翻译', { targetLang, currentProject: currentProject?.name, selectedColumns, sheetDataLength: sheetData?.length });
 
@@ -13859,39 +13692,82 @@ function initTranslateTool() {
             clearTranslationProgress();
         } else if (!retryTasks) {
             const savedProgress = await loadTranslationProgress();
+            const currentSourceSignature = getTranslateSourceSignature();
             const progressMatchesFile = savedProgress &&
                 savedProgress.fileName === originalFileName &&
-                (!savedProgress.sourceSignature || savedProgress.sourceSignature === getTranslateSourceSignature());
+                Boolean(savedProgress.sourceSignature) &&
+                savedProgress.sourceSignature === currentSourceSignature;
             if (progressMatchesFile) {
                 const savedTargetLang = savedProgress.targetLang || '';
                 const currentTargetLang = targetLang;
-                const progressMatchesTargetLang = !savedTargetLang || savedTargetLang === currentTargetLang;
+                const targetLangConflicts = Boolean(savedTargetLang && savedTargetLang !== currentTargetLang);
 
-                if (!progressMatchesTargetLang) {
+                if (targetLangConflicts) {
                     const savedLangName = getTranslateLanguageName(savedTargetLang);
                     const currentLangName = getTranslateLanguageName(currentTargetLang);
-                    const startCurrentLanguage = confirm(`检测到同文件存在 ${savedLangName} 的未完成翻译进度，但当前选择的是 ${currentLangName}。\n\n点击“确定”将忽略旧进度并开始 ${currentLangName} 新翻译；点击“取消”则不开始任务。`);
-                    if (startCurrentLanguage) {
-                        clearTranslationProgress();
-                    } else {
-                        if (options.outputSuffix !== undefined) activeTranslationOutputSuffix = previousOutputSuffix;
-                        return { status: 'cancelled', reason: 'resume-target-mismatch' };
-                    }
+                    clearTranslationProgress();
+                    setStatus(
+                        'warning',
+                        `已忽略 ${savedLangName} 的旧进度`,
+                        `当前任务目标是 ${currentLangName}，工具已直接按当前选择开始，不会套用其他语言的结果。`
+                    );
                 } else {
-                    const savedEntries = normalizeTranslationProgressEntries(savedProgress);
-                    const counts = countTranslationProgressEntries(savedEntries);
-                    const shouldResume = confirm(`检测到未完成的 ${getTranslateLanguageName(currentTargetLang)} 翻译任务，已完成 ${counts.successCount + counts.failCount} 个（成功 ${counts.successCount}，失败 ${counts.failCount}）。是否继续？`);
-                    if (shouldResume) {
+                    const currentContextSignature = getTranslateProgressContextSignature({
+                        targetLang: currentTargetLang,
+                        profiles: activeProfiles,
+                        glossaryTerms: getSelectedTranslateGlossaryTerms(),
+                        project: currentProject
+                    });
+                    const legacyContextSignature = getTranslateProgressContextSignature({
+                        targetLang: currentTargetLang,
+                        profiles: activeProfiles,
+                        glossaryTerms: getSelectedTranslateGlossaryTerms(),
+                        project: currentProject,
+                        includeExecutorProfiles: true
+                    });
+                    const savedProgressVersion = Number(savedProgress.version || 0);
+                    const contextMatches = Boolean(
+                        savedTargetLang &&
+                        savedTargetLang === currentTargetLang &&
+                        savedProgress.contextSignature &&
+                        savedProgress.contextSignature === (
+                            savedProgressVersion >= 5
+                                ? currentContextSignature
+                                : legacyContextSignature
+                        )
+                    );
+                    if (contextMatches) {
+                        const savedEntries = normalizeTranslationProgressEntries(savedProgress);
+                        const counts = countTranslationProgressEntries(savedEntries);
                         restoreTranslationProgressSettings(savedProgress);
                         resumeProgress = savedProgress;
                         targetLang = document.getElementById('targetLang').value;
                         activeProfiles = getSelectedTranslateProfiles();
+                        setStatus(
+                            'processing',
+                            `正在续接 ${getTranslateLanguageName(currentTargetLang)} 未完成任务`,
+                            `已恢复 ${counts.successCount + counts.failCount} 个结果（通过 ${counts.successCount}，问题 ${counts.failCount}），不会重复翻译。`
+                        );
                     } else {
                         clearTranslationProgress();
+                        setStatus(
+                            'warning',
+                            '旧进度未自动套用',
+                            savedProgress.contextSignature
+                                ? '项目、术语、列或翻译策略已变化，已按新任务开始。'
+                                : '旧版本进度缺少完整翻译上下文签名，无法安全验证，已按新任务开始。'
+                        );
                     }
                 }
-            } else if (savedProgress?.fileName === originalFileName && savedProgress.sourceSignature) {
+            } else if (savedProgress?.fileName === originalFileName) {
                 clearTranslationProgress();
+                setStatus(
+                    'warning',
+                    '旧进度未自动套用',
+                    savedProgress.sourceSignature
+                        ? '同名文件的内容签名与当前文件不同，已按新任务开始，避免复用错误译文。'
+                        : '旧版本进度缺少文件签名，无法安全验证，已按新任务开始。'
+                );
             }
         }
 
@@ -13912,6 +13788,25 @@ function initTranslateTool() {
         }
 
         activeProfiles = getSelectedTranslateProfiles();
+        const repairAttemptPolicy = globalThis.NexusTranslationRepairAttemptPolicy;
+        const translationIssuePolicy = globalThis.NexusTranslationIssuePolicy;
+        const translationDeliveryPolicy = globalThis.NexusTranslationDeliveryPolicy;
+        const translationSafetyPoliciesReady = Boolean(
+            repairAttemptPolicy?.createLedger &&
+            translationIssuePolicy?.classifyEntry &&
+            translationIssuePolicy?.decideCandidate &&
+            translationIssuePolicy?.buildPlan &&
+            translationDeliveryPolicy?.buildDeliveryGate
+        );
+        if (!translationSafetyPoliciesReady) {
+            setStatus(
+                'error',
+                '翻译安全策略未加载',
+                '为避免硬问题被误判为通过或候选译文被不安全采用，本次任务没有启动。请重启桌面端后重试。'
+            );
+            if (options.outputSuffix !== undefined) activeTranslationOutputSuffix = previousOutputSuffix;
+            return { status: 'blocked', reason: 'translation-safety-policy-unavailable' };
+        }
         isTranslationCancelled = false;
         isPaused = false;
         const runId = `translate_${Date.now().toString(36)}`;
@@ -13939,7 +13834,7 @@ function initTranslateTool() {
                 failed: [],
                 status: 'running'
             });
-            setTranslateDownloadLanguageSummary(`正在翻译 ${getTranslateLanguageName(targetLang)}；硬错误清零后生成交付版，否则只生成问题报告。`);
+            setTranslateDownloadLanguageSummary(`正在翻译 ${getTranslateLanguageName(targetLang)}；硬错误清零后保存交付版，否则保存当前最佳未验证版和问题报告。`);
         }
         hideStatus();
 
@@ -13947,7 +13842,7 @@ function initTranslateTool() {
         if (!retryTasks) translationList.innerHTML = '';
 
         const totalRows = sheetData.length;
-        const totalCells = (totalRows - 1) * selectedColumns.length * activeProfiles.length;
+        const totalCells = (totalRows - 1) * selectedColumns.length;
 
         console.log(`📈 预计翻译 ${totalCells} 个单元格 (共 ${totalRows} 行, ${selectedColumns.length} 列)`);
 
@@ -14016,6 +13911,35 @@ function initTranslateTool() {
             let translationTasks = allTranslationTasks;
             const translationMemory = new Map();
             const translationMemoryPromises = new Map();
+            const repairMemory = new Map();
+            const repairMemoryPromises = new Map();
+            const targetedRepairBatchStates = new Map();
+            repairAttemptLedger = repairAttemptPolicy.createLedger({
+                maxContentCandidates: 1,
+                maxNoContentSubstitutes: 1
+            });
+
+            function decideTranslateCandidateSafely(input) {
+                try {
+                    const decision = translationIssuePolicy.decideCandidate(input);
+                    if (!decision || typeof decision.accept !== 'boolean') {
+                        throw new Error('候选质量门禁未返回有效决策');
+                    }
+                    return decision;
+                } catch (error) {
+                    console.error('Translation candidate gate failed; preserving the current best translation:', error);
+                    recordClientError('translation-candidate-gate', error, { targetLang });
+                    return {
+                        accept: false,
+                        reason: 'candidate_gate_error',
+                        reasonLabel: '候选质量门禁异常，已保留当前最佳译文'
+                    };
+                }
+            }
+
+            function getRepairAttemptCellId(task) {
+                return getTranslationIssueIdentity(task);
+            }
 
             function buildTranslationMemoryKey(task) {
                 const glossaryKey = (task.glossaryTerms || [])
@@ -14086,7 +14010,7 @@ function initTranslateTool() {
                 total: totalTasks,
                 phase: retryTasks
                     ? `${runLanguageLabel}硬问题重译准备中`
-                    : (deferAutoQaRepairForRun ? `${runLanguageLabel}快速翻译准备中` : `${runLanguageLabel}翻译准备中`)
+                    : (deferAutoQaRepairForRun ? `${runLanguageLabel}集中首译准备中` : `${runLanguageLabel}翻译准备中`)
             };
             updateTranslateRunSummary(0, totalTasks, translateRunSummaryState.phase);
 
@@ -14122,18 +14046,16 @@ function initTranslateTool() {
                 if (options.suppressAutoSave) {
                     autoSaveMessage = deliveryGate.ready
                         ? '；交付版已生成，请点击下载按钮保存'
-                        : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版`;
+                        : `；仍有 ${deliveryGate.blockingCount} 条阻断问题；当前最佳结果已保留，但本流程未自动保存`;
                 } else {
                     try {
                         const savedPaths = await autoSaveTranslationOutputs();
-                        autoSaveMessage = deliveryGate.ready
-                            ? (savedPaths.length ? `；已自动保存：${savedPaths.join('；')}` : '')
-                            : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版${savedPaths.length ? `；问题报告已保存：${savedPaths.join('；')}` : ''}`;
+                        autoSaveMessage = formatTranslationAutoSaveResult(savedPaths, deliveryGate);
                     } catch (saveError) {
                         console.warn('自动保存翻译结果失败:', saveError);
                         autoSaveMessage = deliveryGate.ready
                             ? '；自动保存失败，请点击下载按钮手动保存'
-                            : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版；问题报告自动保存失败`;
+                            : `；仍有 ${deliveryGate.blockingCount} 条阻断问题；未验证版和问题报告自动保存失败`;
                     }
                 }
                 const issueSummary = getTranslationReportIssueSummary();
@@ -14166,7 +14088,7 @@ function initTranslateTool() {
                 );
                 setStatus(
                     hasRepairableFailures ? 'warning' : 'success',
-                    hasRepairableFailures ? `${runLanguageLabel}仍有阻断问题，未生成交付版` : `${runLanguageLabel}翻译完成`,
+                    hasRepairableFailures ? `${runLanguageLabel}已恢复，仍有阻断问题` : `${runLanguageLabel}翻译完成`,
                     `${restoredCompleteText}${repairableText}${autoSaveMessage}`
                 );
                 if (hasRepairableFailures) {
@@ -14203,7 +14125,7 @@ function initTranslateTool() {
                 totalTasks,
                 retryTasks
                     ? `${runLanguageLabel}硬问题重译中`
-                    : (deferAutoQaRepairForRun ? `${runLanguageLabel}快速翻译运行中` : `${runLanguageLabel}翻译运行中`)
+                    : (deferAutoQaRepairForRun ? `${runLanguageLabel}集中首译运行中` : `${runLanguageLabel}翻译运行中`)
             );
             const importReuseStatus = importedRestoreSummary.matched > 0
                 ? `；已复用导入报告 ${importedRestoreSummary.matched} 条`
@@ -14212,27 +14134,111 @@ function initTranslateTool() {
                 ? `；${importedRestoreSummary.skippedTargetMismatch} 条导入记录因目标语言不一致未复用`
                 : '';
             const translateRunModeStatus = deferAutoQaRepairForRun
-                ? '；快速模式已开启：第一轮只记录 QA，不逐条 AI 修复'
+                ? '；一键流程：先集中完成首译，再仅处理确定性阻断问题'
                 : '';
             setStatus(
                 'processing',
-                retryTasks ? `正在重译 ${runLanguageLabel} 硬问题...` : (deferAutoQaRepairForRun ? `${runLanguageLabel}快速翻译中` : `${runLanguageLabel}翻译中`),
+                retryTasks ? `正在重译 ${runLanguageLabel} 硬问题...` : (deferAutoQaRepairForRun ? `${runLanguageLabel}集中首译中` : `${runLanguageLabel}翻译中`),
                 `本轮 ${totalTasks} 个任务，已启用 ${translateChannelProgressState.size} 个通道${consistencyMemoryStatus}${translateRunModeStatus}${importReuseStatus}${importMismatchStatus}。通道状态会在进度面板实时更新。`
             );
 
-            function commitTranslateResult(task, translated, qaStatusOverride = null) {
+            function evaluateTranslateResultCandidate(task, translated, qaStatusOverride = null) {
                 throwIfTranslationCancelled(runId);
-                const normalizedTranslated = normalizeTranslateResultText(translated, task.text);
+                const candidateTranslated = normalizeTranslateResultText(translated, task.text);
                 const qaTerms = task.glossaryTerms || [];
-                const qaStatus = qaStatusOverride ?? (translatePostCheckInput?.checked
-                    ? summarizeTranslationQa(task.text, normalizedTranslated, qaTerms, targetLang, task)
-                    : '');
+                const candidateQaStatus = qaStatusOverride ?? summarizeTranslationQa(
+                    task.text,
+                    candidateTranslated,
+                    qaTerms,
+                    targetLang,
+                    task
+                );
+                const previousTaskKeys = new Set([task.taskKey, task.retryOfTaskKey, task.outputTaskKey].filter(Boolean));
+                translationRunReport = translationRunReport || { entries: [] };
+                const reportEntries = translationRunReport.entries || [];
+                const existingReportIndex = reportEntries.findIndex(entry => previousTaskKeys.has(entry.taskKey));
+                const previousEntry = translationProgressTasks.get(task.taskKey) ||
+                    translationProgressTasks.get(task.retryOfTaskKey) ||
+                    (existingReportIndex >= 0 ? reportEntries[existingReportIndex] : null);
+                const candidateEntry = buildTranslationReportEntry(task, candidateTranslated, candidateQaStatus);
+                const shouldGateRepairCandidate = Boolean(
+                    retryTasks &&
+                    previousEntry
+                );
+                const candidateDecision = shouldGateRepairCandidate
+                    ? decideTranslateCandidateSafely({
+                        previous: { ...previousEntry, text: previousEntry.translatedText },
+                        candidate: { ...candidateEntry, text: candidateEntry.translatedText },
+                        selectedIssueIds: task.repairTargetIssueIds || options.selectedIssueIds || [],
+                        mode: (task.repairTargetIssueIds?.length || options.selectedIssueIds?.length) ? 'targeted' : 'ordinary'
+                    })
+                    : null;
+                if (Array.isArray(previousEntry?.legacyVariants) && previousEntry.legacyVariants.length) {
+                    candidateEntry.legacyVariants = previousEntry.legacyVariants;
+                    candidateEntry.legacyVariantCount = previousEntry.legacyVariants.length;
+                }
+                const preservePreviousRepairEntry = Boolean(
+                    shouldGateRepairCandidate &&
+                    (
+                        candidateDecision
+                            ? !candidateDecision.accept
+                            : (
+                                isTranslateFailureText(candidateTranslated) ||
+                                (
+                                    continuousRepairEnabled &&
+                                    classifyTranslationReportEntry(candidateEntry) === 'hard' &&
+                                    !continuousRepairPolicy.shouldAcceptMixedChineseCandidate(
+                                        previousEntry.qaStatus || '',
+                                        candidateEntry.qaStatus || ''
+                                    )
+                                )
+                            )
+                    )
+                );
+                const reportEntry = preservePreviousRepairEntry
+                    ? {
+                        ...previousEntry,
+                        taskKey: getTranslateOutputTaskKey(task),
+                        sourceFile: task.source?.fileName || previousEntry.sourceFile || '',
+                        sheetName: task.source?.sheetName || previousEntry.sheetName || '',
+                        rowNumber: task.originalRowNumber || task.rowIndex + 1,
+                        column: task.colIndex + 1,
+                        outputSlotId: getTranslateOutputSlotId(task),
+                        sourceText: task.text,
+                        referenceText: task.referenceText || '',
+                        repairDecision: candidateDecision?.reason || 'candidate_rejected'
+                    }
+                    : candidateEntry;
+                return {
+                    candidateTranslated,
+                    candidateQaStatus,
+                    candidateEntry,
+                    candidateDecision,
+                    previousTaskKeys,
+                    previousEntry,
+                    existingReportIndex,
+                    reportEntries,
+                    reportEntry,
+                    accepted: !preservePreviousRepairEntry
+                };
+            }
+
+            function commitTranslateResult(task, translated, qaStatusOverride = null, evaluatedCandidate = null) {
+                throwIfTranslationCancelled(runId);
+                const evaluation = evaluatedCandidate || evaluateTranslateResultCandidate(task, translated, qaStatusOverride);
+                const {
+                    previousTaskKeys,
+                    existingReportIndex,
+                    reportEntries,
+                    reportEntry
+                } = evaluation;
+                const normalizedTranslated = reportEntry.translatedText;
+                const qaStatus = reportEntry.qaStatus || '';
                 const status = getTranslationReportStatus(normalizedTranslated, qaStatus);
-                const previousTaskKeys = new Set([task.taskKey, task.retryOfTaskKey].filter(Boolean));
                 previousTaskKeys.forEach(previousTaskKey => {
-                    const previousEntry = translationProgressTasks.get(previousTaskKey);
-                    if (!previousEntry) return;
-                    const previousCounts = countTranslationProgressEntries([previousEntry]);
+                    const previousProgressEntry = translationProgressTasks.get(previousTaskKey);
+                    if (!previousProgressEntry) return;
+                    const previousCounts = countTranslationProgressEntries([previousProgressEntry]);
                     successCount = Math.max(0, successCount - previousCounts.successCount);
                     failCount = Math.max(0, failCount - previousCounts.failCount);
                     translationProgressTasks.delete(previousTaskKey);
@@ -14250,19 +14256,19 @@ function initTranslateTool() {
                 writeTranslationResult(task, normalizedTranslated, qaStatus);
                 translateCount++;
                 completedCount++;
+                recordTranslateTaskCompletion(1);
 
-                translationRunReport = translationRunReport || { entries: [] };
-                const reportEntry = buildTranslationReportEntry(task, normalizedTranslated, qaStatus);
                 const compactEntry = compactTranslationProgressEntry(reportEntry);
                 translationProgressTasks.set(task.taskKey, compactEntry || reportEntry);
                 queueTranslationTaskProgress(reportEntry);
-                const reportEntries = translationRunReport.entries || [];
-                const replaceableTaskKeys = new Set([task.taskKey, task.retryOfTaskKey].filter(Boolean));
-                const existingReportIndex = reportEntries.findIndex(entry => replaceableTaskKeys.has(entry.taskKey));
                 if (existingReportIndex >= 0) reportEntries[existingReportIndex] = reportEntry;
                 else reportEntries.push(reportEntry);
                 translationRunReport.entries = reportEntries;
                 if (status === 'success') rememberSuccessfulTranslation(task, normalizedTranslated);
+                const repairCellId = getRepairAttemptCellId(task);
+                if (repairAttemptLedger.peek(repairCellId)?.primaryClaims > 0) {
+                    repairAttemptLedger.markCommitted(repairCellId);
+                }
 
                 if (shouldRenderTranslationPreview(status, completedCount)) {
                     addTranslationItem(translationList, task.text, normalizedTranslated, task.rowIndex, task.colIndex, task.profile, targetLang);
@@ -14276,7 +14282,7 @@ function initTranslateTool() {
                     totalTasks,
                     retryTasks
                         ? `${runLanguageLabel}硬问题重译中`
-                        : (deferAutoQaRepairForRun ? `${runLanguageLabel}快速翻译运行中` : `${runLanguageLabel}翻译运行中`)
+                        : (deferAutoQaRepairForRun ? `${runLanguageLabel}集中首译运行中` : `${runLanguageLabel}翻译运行中`)
                 );
 
                 if (completedCount % TRANSLATION_PROGRESS_SAVE_INTERVAL === 0) {
@@ -14371,12 +14377,12 @@ function initTranslateTool() {
                         const state = translateChannelProgressState.get(key);
                         const adaptive = Number(translationRequestAdaptiveCaps.get(key));
                         const adaptiveLimit = Number.isFinite(adaptive) && adaptive > 0 ? adaptive : configured;
-                        const lastIncidentAt = Number(state?.lastIncidentAt || 0);
-                        const hasRecentIncident = lastIncidentAt > 0 &&
-                            Date.now() - lastIncidentAt < TRANSLATION_ADAPTIVE_COOLDOWN_MS;
-                        return hasRecentIncident
-                            ? 1
-                            : Math.max(1, Math.min(configured, adaptiveLimit));
+                        const throttleLevel = getTranslationChannelThrottleLevel(profile);
+                        if (throttleLevel >= 2) return 1;
+                        if (throttleLevel === 1) {
+                            return Math.max(1, Math.min(2, configured, adaptiveLimit));
+                        }
+                        return Math.max(1, Math.min(configured, adaptiveLimit));
                     };
 
                     const onCancel = () => throwIfTranslationCancelled(runId);
@@ -14394,7 +14400,7 @@ function initTranslateTool() {
                                 () => {
                                     const configuredRpm = Number(profile?.translationRpm || profile?.requestsPerMinute || 0);
                                     if (Number.isFinite(configuredRpm) && configuredRpm > 0) {
-                                        return getTranslationTargetRpm(profile);
+                                        return getAdaptiveTranslationTargetRpm(profile);
                                     }
                                     const hasAgnesCongestion = [...translateChannelProgressState.values()].some(state =>
                                         state?.profile?.provider === 'agnes' &&
@@ -14403,7 +14409,7 @@ function initTranslateTool() {
                                     const shouldPaceAgnes = Boolean(
                                         retryTasks || hasAgnesCongestion
                                     );
-                                    return shouldPaceAgnes ? getTranslationTargetRpm(profile) : 0;
+                                    return shouldPaceAgnes ? getAdaptiveTranslationTargetRpm(profile) : 0;
                                 },
                                 onCancel
                             )
@@ -14454,27 +14460,6 @@ function initTranslateTool() {
 
             async function prepareTranslationForCommit(task, translated, prepareOptions = {}) {
                 let nextTranslated = applyLocalTranslationFixes(task.text, translated, targetLang);
-                if (!translatePostCheckInput?.checked) {
-                    /*
-                     * Monetary semantics and cross-language carryover remain
-                     * protected even when the broader post-check switch is
-                     * off. These guards are local and deterministic; they
-                     * never make an API request.
-                     */
-                    const baselineIssues = [
-                        ...getNexusDiscountQaIssues(task.text, nextTranslated, targetLang),
-                        ...getTargetLanguageLeakageIssues(task.text, nextTranslated, targetLang, {
-                            ...task,
-                            glossaryTerms: task.glossaryTerms || []
-                        })
-                    ];
-                    const uniqueBaselineIssues = [...new Set(baselineIssues)].filter(Boolean);
-                    return {
-                        translated: nextTranslated,
-                        qaStatus: uniqueBaselineIssues.length ? `需确认：${uniqueBaselineIssues.join('；')}` : ''
-                    };
-                }
-
                 let qaStatus = summarizeTranslationQa(task.text, nextTranslated, task.glossaryTerms || [], targetLang, task);
                 if (isTranslateFailureText(nextTranslated) || isTranslationQaPassed(qaStatus)) {
                     return { translated: nextTranslated, qaStatus };
@@ -14494,32 +14479,65 @@ function initTranslateTool() {
                     TRANSLATION_QA_REPAIR_MAX_ATTEMPTS,
                     Number(prepareOptions.maxRepairAttempts ?? TRANSLATION_QA_REPAIR_MAX_ATTEMPTS) || 0
                 ));
+                const repairCellId = getRepairAttemptCellId(task);
+                if (
+                    maxRepairAttempts > 0 &&
+                    !repairAttemptLedger.claimPrimarySingle(repairCellId, 'inline_qa_repair')
+                ) {
+                    return {
+                        translated: nextTranslated,
+                        qaStatus,
+                        repairSkipped: 'attempt_budget_exhausted'
+                    };
+                }
+                let lastRepairError = null;
                 for (let repairAttempt = 0;
                     repairAttempt < maxRepairAttempts && !isTranslationQaPassed(qaStatus);
                     repairAttempt++) {
+                    const attemptRecord = repairAttemptLedger.get(repairCellId);
+                    if (attemptRecord.terminal || attemptRecord.contentCandidates > 0) break;
                     recordTranslateQaRepairAttempt(task.profile, repairAttempt);
                     updateTranslateChannelProgress(task.profile, {
                         status: 'retrying',
                         message: `QA 未通过，自动修复第 ${repairAttempt + 1} 次`
                     });
                     let repairRequestFailed = false;
-                    const repaired = await repairTranslationWithRetry(
-                        task,
-                        nextTranslated,
-                        qaStatus,
-                        sourceLang,
-                        targetLang,
-                        currentProject.rules,
-                        task.profile,
-                        runSignal,
-                        1,
-                        {
-                            requestLimiter,
-                            onFailure: () => {
-                                repairRequestFailed = true;
+                    let repairRequestError = null;
+                    const selectedIssueIds = task.repairTargetIssueIds || options.selectedIssueIds || [];
+                    const normalizedSelectedIssueIds = translationIssuePolicy.normalizeSelectedIssueIds
+                        ? translationIssuePolicy.normalizeSelectedIssueIds(selectedIssueIds)
+                        : new Set(selectedIssueIds);
+                    const focusedQaStatus = translationIssuePolicy.buildTargetedQaStatus && selectedIssueIds.length
+                        ? translationIssuePolicy.buildTargetedQaStatus(qaStatus, selectedIssueIds)
+                        : qaStatus;
+                    let repaired = nextTranslated;
+                    try {
+                        repaired = await repairTranslationWithRetry(
+                            task,
+                            nextTranslated,
+                            focusedQaStatus,
+                            sourceLang,
+                            targetLang,
+                            currentProject.rules,
+                            task.profile,
+                            runSignal,
+                            1,
+                            {
+                                requestLimiter,
+                                onRequestStart: () => repairAttemptLedger.recordPhysicalRequest(
+                                    repairCellId,
+                                    'inline_primary_single'
+                                ),
+                                onFailure: error => {
+                                    repairRequestFailed = true;
+                                    repairRequestError = error;
+                                }
                             }
-                        }
-                    );
+                        );
+                    } catch (error) {
+                        repairAttemptLedger.settle(repairCellId, 'transport_failed', summarizeTranslateError(error));
+                        throw error;
+                    }
                     const repairedTranslated = applyLocalTranslationFixes(task.text, repaired, targetLang);
                     const repairedQaStatus = summarizeTranslationQa(
                         task.text,
@@ -14539,9 +14557,49 @@ function initTranslateTool() {
                         maxRepairAttempts,
                         repairRequestFailed
                     );
-                    nextTranslated = repairedTranslated;
-                    qaStatus = repairedQaStatus;
+                    const candidateDecision = decideTranslateCandidateSafely({
+                            previous: {
+                                text: nextTranslated,
+                                status: getTranslationReportStatus(nextTranslated, qaStatus),
+                                qaStatus
+                            },
+                            candidate: {
+                                text: repairedTranslated,
+                                status: getTranslationReportStatus(repairedTranslated, repairedQaStatus),
+                                qaStatus: repairedQaStatus
+                            },
+                            selectedIssueIds,
+                            mode: selectedIssueIds.length
+                                ? (normalizedSelectedIssueIds.size === 1 && normalizedSelectedIssueIds.has('length_review') ? 'compact' : 'targeted')
+                                : (/译文长度超出建议/.test(qaStatus) ? 'compact' : 'ordinary')
+                        });
+                    const acceptedRepair = candidateDecision.accept;
+                    const candidateReturned = !repairRequestFailed &&
+                        !isTranslateFailureText(repairedTranslated) &&
+                        Boolean(String(repairedTranslated || '').trim());
+                    if (candidateReturned) {
+                        repairAttemptLedger.recordCandidate(repairCellId, 'inline_primary_single');
+                    }
+                    if (acceptedRepair) {
+                        nextTranslated = repairedTranslated;
+                        qaStatus = repairedQaStatus;
+                    }
+                    repairAttemptLedger.settle(
+                        repairCellId,
+                        candidateReturned
+                            ? (acceptedRepair ? 'accepted' : 'rejected')
+                            : (repairRequestFailed ? 'transport_failed' : 'no_content'),
+                        acceptedRepair ? 'accepted' : 'preserved'
+                    );
+                    lastRepairError = repairRequestFailed ? repairRequestError : null;
                     if (isTranslateFailureText(nextTranslated)) break;
+                    if (candidateDecision && !candidateDecision.accept && !repairRequestFailed) {
+                        updateTranslateChannelProgress(task.profile, {
+                            status: 'retrying',
+                            message: `候选未改善（${candidateDecision.reasonLabel || candidateDecision.reason}），已保留当前最佳译文`
+                        });
+                        break;
+                    }
                     if (!repairChangedTranslation && !repairRequestFailed && !isTranslationQaPassed(qaStatus)) {
                         updateTranslateChannelProgress(task.profile, {
                             status: 'retrying',
@@ -14557,35 +14615,832 @@ function initTranslateTool() {
                     message: repairRequestsStillActive ? 'QA 修复进行中' : 'QA 修复结束，写入结果'
                 });
 
-                if (targetLang === 'zh-TW' && /疑似内容流失|疑似译文过短/.test(qaStatus)) {
-                    return {
-                        translated: makeTranslateFailureText(task.text, '疑似内容流失，已拒绝写入半句译文'),
-                        qaStatus
-                    };
-                }
-                if (
-                    targetLang !== 'zh-TW' &&
-                    isTranslateAutoCompactLongEnabled() &&
-                    /译文长度超出建议/.test(beforeRepairQaStatus) &&
-                    !/疑似内容流失|疑似译文过短/.test(beforeRepairQaStatus) &&
-                    /疑似内容流失|疑似译文过短/.test(qaStatus)
-                ) {
-                    return { translated: beforeRepairTranslated, qaStatus: beforeRepairQaStatus };
-                }
-                return { translated: nextTranslated, qaStatus };
+                return { translated: nextTranslated, qaStatus, repairError: lastRepairError };
             }
 
-            function getDeferredRetryRepairJobs() {
+            function entryMatchesContinuousRepairTarget(entry) {
+                const selectedIssueIds = options.selectedIssueIds || [];
+                if (selectedIssueIds.length && globalThis.NexusTranslationIssuePolicy?.classifyEntry) {
+                    const selected = globalThis.NexusTranslationIssuePolicy.normalizeSelectedIssueIds
+                        ? globalThis.NexusTranslationIssuePolicy.normalizeSelectedIssueIds(selectedIssueIds)
+                        : new Set(selectedIssueIds);
+                    return globalThis.NexusTranslationIssuePolicy
+                        .classifyEntry(entry)
+                        .some(finding => selected.has(finding.id));
+                }
+                if (!continuousRepairEnabled) return true;
+                if (continuousRepairTarget === 'mixedChinese') {
+                    return isStrictMixedChineseTranslationReportEntry(entry);
+                }
+                return false;
+            }
+
+            function getContinuousRepairTaskIdentity(task) {
+                return getTranslationIssueIdentity(task);
+            }
+
+            function getContinuousRepairEntryFingerprint(entry) {
+                return makeStableId([
+                    normalizeTranslationRepairFingerprint(entry?.translatedText || ''),
+                    String(entry?.qaStatus || '').trim()
+                ].join('\u001f'));
+            }
+
+            function buildTranslationRepairMemoryKey(task, currentTranslation, focusedQaStatus) {
+                const glossaryKey = (task.glossaryTerms || [])
+                    .map(term => `${term.source}|${term.constraint || 'hard'}|${term.target || term.referenceTarget || ''}`)
+                    .join('|');
+                const consistencyKey = [
+                    ...(task.consistencyTerms || []),
+                    ...(task.consistencyExamples || []).map(item => `${item.sourceText || ''}=>${item.translatedText || ''}`)
+                ].join('|');
+                return makeStableId([
+                    getTranslateChannelKey(task.profile),
+                    sourceLang,
+                    targetLang,
+                    currentProject?.id || makeStableId(currentProject?.rules || ''),
+                    currentProject?.rules || '',
+                    task.text,
+                    task.referenceText || '',
+                    currentTranslation || '',
+                    focusedQaStatus || '',
+                    glossaryKey,
+                    consistencyKey
+                ].join('\u001f'));
+            }
+
+            function getFocusedTranslationRepairQaStatus(task) {
+                const issuePolicy = globalThis.NexusTranslationIssuePolicy;
+                return issuePolicy?.buildTargetedQaStatus
+                    ? issuePolicy.buildTargetedQaStatus(
+                        task.repairQaStatus || '',
+                        task.repairTargetIssueIds || []
+                    )
+                    : (task.repairQaStatus || '译后检测未通过');
+            }
+
+            function getTargetedRepairActualIssueIds(focusedQaStatus) {
+                const issuePolicy = globalThis.NexusTranslationIssuePolicy;
+                if (!issuePolicy?.classifyEntry) return [];
+                return issuePolicy.classifyEntry({
+                    status: 'qa_failed',
+                    qaStatus: focusedQaStatus
+                }).map(finding => finding.id);
+            }
+
+            function getTargetedRepairBatchState(profile, compatibilityKey = 'default') {
+                const channelKey = `${getTranslateChannelKey(profile)}\u001f${compatibilityKey || 'default'}`;
+                if (targetedRepairBatchStates.has(channelKey)) {
+                    return targetedRepairBatchStates.get(channelKey);
+                }
+                const batchPolicy = globalThis.NexusTranslationRepairBatchPolicy;
+                const state = batchPolicy?.createTargetedRepairBatchState
+                    ? batchPolicy.createTargetedRepairBatchState({
+                        batchSize: TRANSLATION_TARGETED_REPAIR_INITIAL_BATCH_SIZE
+                    })
+                    : { batchSize: TRANSLATION_TARGETED_REPAIR_INITIAL_BATCH_SIZE };
+                targetedRepairBatchStates.set(channelKey, state);
+                return state;
+            }
+
+            function advanceTargetedRepairBatchState(profile, compatibilityKey, outcome) {
+                const batchPolicy = globalThis.NexusTranslationRepairBatchPolicy;
+                if (!batchPolicy?.advanceTargetedRepairBatchState) {
+                    return getTargetedRepairBatchState(profile, compatibilityKey);
+                }
+                const channelKey = `${getTranslateChannelKey(profile)}\u001f${compatibilityKey || 'default'}`;
+                const next = batchPolicy.advanceTargetedRepairBatchState(
+                    getTargetedRepairBatchState(profile, compatibilityKey),
+                    outcome
+                );
+                targetedRepairBatchStates.set(channelKey, next);
+                return next;
+            }
+
+            function createTargetedRepairDeferredClaim(memoryKey) {
+                let resolveClaim;
+                let rejectClaim;
+                let settled = false;
+                const rawPromise = new Promise((resolve, reject) => {
+                    resolveClaim = resolve;
+                    rejectClaim = reject;
+                });
+                let trackedPromise;
+                trackedPromise = rawPromise.finally(() => {
+                    if (repairMemoryPromises.get(memoryKey) === trackedPromise) {
+                        repairMemoryPromises.delete(memoryKey);
+                    }
+                });
+                void trackedPromise.catch(() => {});
+                repairMemoryPromises.set(memoryKey, trackedPromise);
+                return {
+                    promise: trackedPromise,
+                    get settled() {
+                        return settled;
+                    },
+                    resolve(value) {
+                        if (settled) return;
+                        settled = true;
+                        resolveClaim(value);
+                    },
+                    reject(error) {
+                        if (settled) return;
+                        settled = true;
+                        rejectClaim(error);
+                    }
+                };
+            }
+
+            function buildTargetedRepairJob(task, memoryKey, focusedQaStatus, id, claim = null) {
+                const requestModel = buildTranslationRepairRequestModel(
+                    task,
+                    task.currentTranslation,
+                    focusedQaStatus,
+                    targetLang,
+                    currentProject.rules,
+                    id
+                );
+                return {
+                    id,
+                    task,
+                    memoryKey,
+                    focusedQaStatus,
+                    actualIssueIds: getTargetedRepairActualIssueIds(focusedQaStatus),
+                    payload: requestModel.payload,
+                    requestModel,
+                    claim
+                };
+            }
+
+            async function requestTargetedRepairBatchCandidates(jobs, profile, requestLimiter, depth = 0) {
+                if (jobs.length === 1) {
+                    const job = jobs[0];
+                    return {
+                        outcomes: new Map([[
+                            job.memoryKey,
+                            {
+                                value: '',
+                                failed: false,
+                                error: null,
+                                allowSingleFallback: true
+                            }
+                        ]]),
+                        structuralError: depth > 0 ? '批量结构异常已拆分到单条' : '',
+                        unknownIds: [],
+                        requestError: null,
+                        transportErrors: []
+                    };
+                }
+                let lastBatchError = null;
+                let lastBatchSummary = '';
+                try {
+                    const result = await repairTranslationsBatchWithRetry(
+                        jobs.map(job => job.requestModel),
+                        sourceLang,
+                        targetLang,
+                        currentProject.rules,
+                        profile,
+                        runSignal,
+                        2,
+                        {
+                            requestLimiter,
+                            onRequestStart: () => {
+                                const firstCellId = jobs[0]?.cellIds?.[0];
+                                if (firstCellId) {
+                                    repairAttemptLedger.recordPhysicalRequest(firstCellId, 'repair_primary_batch');
+                                }
+                            },
+                            onBatchStatus: ({ error, summary, willRetry }) => {
+                                lastBatchError = error || lastBatchError;
+                                lastBatchSummary = summary || lastBatchSummary;
+                                recordTranslateChannelIncident(profile, error, { retry: willRetry });
+                                updateTranslateChannelProgress(profile, {
+                                    status: 'retrying',
+                                    message: `定向微批失败：${summary}${willRetry ? '，正在重试' : '，正在安全降级'}`
+                                });
+                            }
+                        }
+                    );
+                    const outcomes = new Map();
+                    jobs.forEach(job => {
+                        const value = result.valuesById.get(job.id) || '';
+                        outcomes.set(job.memoryKey, value
+                            ? { value, failed: false, error: null, allowSingleFallback: false }
+                            : {
+                                value: '',
+                                failed: false,
+                                error: new Error(`定向微批缺少有效结果：${job.id}`),
+                                allowSingleFallback: true
+                            });
+                    });
+                    return {
+                        outcomes,
+                        structuralError: result.parsed?.structuralError || '',
+                        unknownIds: [...(result.unknownIds || [])],
+                        requestError: null,
+                        transportErrors: []
+                    };
+                } catch (error) {
+                    if (
+                        runSignal?.aborted ||
+                        error?.name === 'AbortError' ||
+                        error?.message === 'TRANSLATION_CANCELLED' ||
+                        isApiQuotaDepletedError(error)
+                    ) {
+                        throw error;
+                    }
+                    const splitBatches = getTranslationBatchSplitPlan(jobs, error, depth);
+                    if (splitBatches.length > 1) {
+                        recordTranslateChannelBatchSplit(
+                            profile,
+                            jobs.length,
+                            splitBatches.map(batch => batch.length),
+                            lastBatchSummary || summarizeTranslateError(error)
+                        );
+                        const combined = new Map();
+                        const transportErrors = [];
+                        for (const splitBatch of splitBatches) {
+                            const splitResult = await requestTargetedRepairBatchCandidates(
+                                splitBatch,
+                                profile,
+                                requestLimiter,
+                                depth + 1
+                            );
+                            splitResult.outcomes.forEach((value, key) => combined.set(key, value));
+                            transportErrors.push(...(splitResult.transportErrors || []));
+                        }
+                        return {
+                            outcomes: combined,
+                            structuralError: lastBatchSummary || summarizeTranslateError(error),
+                            unknownIds: [],
+                            requestError: error,
+                            transportErrors
+                        };
+                    }
+                    const structural = isSplittableTranslationBatchError(error);
+                    const outcomes = new Map(jobs.map(job => [
+                        job.memoryKey,
+                        {
+                            value: '',
+                            failed: true,
+                            error: lastBatchError || error,
+                            allowSingleFallback: structural
+                        }
+                    ]));
+                    return {
+                        outcomes,
+                        structuralError: structural ? (lastBatchSummary || summarizeTranslateError(error)) : '',
+                        unknownIds: [],
+                        requestError: lastBatchError || error,
+                        transportErrors: structural ? [] : [lastBatchError || error]
+                    };
+                }
+            }
+
+            async function finalizeTargetedRepairJob(job, batchOutcome, profile, requestLimiter) {
+                let candidate = batchOutcome?.value || '';
+                let requestFailed = Boolean(batchOutcome?.failed);
+                let requestError = batchOutcome?.error || null;
+                let usedSingleFallback = false;
+                const shouldSingleFallback = Boolean(batchOutcome?.allowSingleFallback);
+
+                if (candidate) {
+                    const prepared = await prepareTranslationForCommit(job.task, candidate, {
+                        deferAutoQaRepair: true,
+                        maxRepairAttempts: 0
+                    });
+                    const evaluation = evaluateTranslateResultCandidate(
+                        job.task,
+                        prepared.translated,
+                        prepared.qaStatus
+                    );
+                    if (evaluation.accepted) {
+                        repairMemory.set(job.memoryKey, prepared.translated);
+                        return {
+                            value: prepared.translated,
+                            qaStatus: prepared.qaStatus,
+                            failed: false,
+                            error: null,
+                            accepted: true,
+                            usedSingleFallback,
+                            candidateReturned: true,
+                            terminal: 'accepted'
+                        };
+                    }
+                    return {
+                        value: prepared.translated,
+                        qaStatus: prepared.qaStatus,
+                        failed: false,
+                        error: null,
+                        accepted: false,
+                        usedSingleFallback: false,
+                        candidateReturned: true,
+                        terminal: 'rejected'
+                    };
+                }
+
+                if (shouldSingleFallback) {
+                    const cellIds = job.cellIds || [job.task.repairAttemptCellId || getRepairAttemptCellId(job.task)];
+                    const canSubstitute = !repairAttemptLedger || cellIds.every(cellId =>
+                        repairAttemptLedger.canClaimNoContentSubstitute(cellId)
+                    );
+                    if (!canSubstitute) {
+                        return {
+                            value: job.task.currentTranslation,
+                            qaStatus: job.task.repairQaStatus || job.focusedQaStatus,
+                            failed: requestFailed,
+                            error: requestError,
+                            accepted: false,
+                            usedSingleFallback: false,
+                            candidateReturned: false,
+                            terminal: requestFailed ? 'transport_failed' : 'no_content'
+                        };
+                    }
+                    cellIds.forEach(cellId => repairAttemptLedger?.claimNoContentSubstitute(cellId));
+                    usedSingleFallback = true;
+                    let singleFailed = false;
+                    let singleError = null;
+                    updateTranslateChannelProgress(profile, {
+                        status: 'retrying',
+                        message: `微批中 ${job.id} 未返回内容，单条替代请求`
+                    });
+                    const repaired = await repairTranslationWithRetry(
+                        job.task,
+                        job.task.currentTranslation,
+                        job.focusedQaStatus,
+                        sourceLang,
+                        targetLang,
+                        currentProject.rules,
+                        profile,
+                        runSignal,
+                        1,
+                        {
+                            requestLimiter,
+                            onRequestStart: () => repairAttemptLedger?.recordPhysicalRequest(
+                                cellIds[0],
+                                'no_content_substitute'
+                            ),
+                            onFailure: error => {
+                                singleFailed = true;
+                                singleError = error || null;
+                            }
+                        }
+                    );
+                    if (singleFailed && isApiQuotaDepletedError(singleError)) {
+                        throw singleError;
+                    }
+                    const prepared = await prepareTranslationForCommit(job.task, repaired, {
+                        deferAutoQaRepair: true,
+                        maxRepairAttempts: 0
+                    });
+                    const evaluation = evaluateTranslateResultCandidate(
+                        job.task,
+                        prepared.translated,
+                        prepared.qaStatus
+                    );
+                    if (evaluation.accepted) {
+                        repairMemory.set(job.memoryKey, prepared.translated);
+                        return {
+                            value: prepared.translated,
+                            qaStatus: prepared.qaStatus,
+                            failed: singleFailed,
+                            error: singleError,
+                            accepted: true,
+                            usedSingleFallback,
+                            candidateReturned: true,
+                            terminal: 'accepted'
+                        };
+                    }
+                    requestFailed = requestFailed || singleFailed;
+                    requestError = singleError || requestError;
+                    const returnedCandidate = !singleFailed && repaired && !isTranslateFailureText(repaired);
+                    if (returnedCandidate) {
+                        return {
+                            value: prepared.translated,
+                            qaStatus: prepared.qaStatus,
+                            failed: false,
+                            error: null,
+                            accepted: false,
+                            usedSingleFallback,
+                            candidateReturned: true,
+                            terminal: 'rejected'
+                        };
+                    }
+                }
+
+                return {
+                    value: job.task.currentTranslation,
+                    qaStatus: job.task.repairQaStatus || job.focusedQaStatus,
+                    failed: requestFailed,
+                    error: requestError,
+                    accepted: false,
+                    usedSingleFallback,
+                    candidateReturned: false,
+                    terminal: requestFailed ? 'transport_failed' : 'no_content'
+                };
+            }
+
+            async function processTargetedRepairTasks(tasks, processOptions = {}) {
+                const statuses = new Map();
+                const aiTasks = [];
+                for (const task of tasks) {
+                    const localStatus = await processLocalDiscountTask(task);
+                    if (localStatus === null) aiTasks.push(task);
+                    else statuses.set(task, localStatus);
+                }
+                if (!aiTasks.length) return tasks.map(task => statuses.get(task) || 'success');
+
+                const schedulableTasks = [];
+                const primaryTaskByCell = new Map();
+                const aliasesByCell = new Map();
+                for (const task of aiTasks) {
+                    const cellId = getRepairAttemptCellId(task);
+                    task.repairAttemptCellId = cellId;
+                    if (primaryTaskByCell.has(cellId)) {
+                        if (!aliasesByCell.has(cellId)) aliasesByCell.set(cellId, []);
+                        aliasesByCell.get(cellId).push(task);
+                        continue;
+                    }
+                    primaryTaskByCell.set(cellId, task);
+                    if (!repairAttemptLedger.claimPrimaryBatch(cellId, 'targeted_repair')) {
+                        const existingEntry = translationProgressTasks.get(task.taskKey) || task.sourceReportEntry;
+                        statuses.set(
+                            task,
+                            existingEntry
+                                ? getTranslationReportStatus(existingEntry.translatedText, existingEntry.qaStatus)
+                                : 'qa_failed'
+                        );
+                        continue;
+                    }
+                    schedulableTasks.push(task);
+                }
+                if (!schedulableTasks.length) return tasks.map(task => statuses.get(task) || 'qa_failed');
+
+                const profile = schedulableTasks[0].profile;
+                const requestLimiter = getTranslationRequestLimiter(profile);
+                const taskGroupsByKey = new Map();
+                schedulableTasks.forEach(task => {
+                    const focusedQaStatus = getFocusedTranslationRepairQaStatus(task);
+                    const memoryKey = buildTranslationRepairMemoryKey(task, task.currentTranslation, focusedQaStatus);
+                    if (!taskGroupsByKey.has(memoryKey)) {
+                        taskGroupsByKey.set(memoryKey, { memoryKey, focusedQaStatus, tasks: [] });
+                    }
+                    taskGroupsByKey.get(memoryKey).tasks.push(task);
+                });
+
+                const owners = [];
+                const pendingOwnerGroups = [];
+                const groups = [...taskGroupsByKey.values()].map((group, index) => {
+                    if (repairMemory.has(group.memoryKey)) {
+                        recordTranslateRepairCacheHit(group.tasks[0].profile, false);
+                        return {
+                            ...group,
+                            owner: false,
+                            promise: Promise.resolve({
+                                value: repairMemory.get(group.memoryKey),
+                                failed: false,
+                                error: null,
+                                accepted: true,
+                                candidateReturned: true,
+                                terminal: 'accepted'
+                            })
+                        };
+                    }
+                    if (repairMemoryPromises.has(group.memoryKey)) {
+                        recordTranslateRepairCacheHit(group.tasks[0].profile, true);
+                        return {
+                            ...group,
+                            owner: false,
+                            promise: repairMemoryPromises.get(group.memoryKey)
+                        };
+                    }
+                    const job = buildTargetedRepairJob(
+                        group.tasks[0],
+                        group.memoryKey,
+                        group.focusedQaStatus,
+                        `r${index + 1}`,
+                        null
+                    );
+                    job.plannerIndex = index;
+                    job.cellIds = group.tasks.map(task => task.repairAttemptCellId || getRepairAttemptCellId(task));
+                    const ownerGroup = { ...group, owner: true, promise: null, job };
+                    pendingOwnerGroups.push(ownerGroup);
+                    return ownerGroup;
+                });
+
+                try {
+                    pendingOwnerGroups.forEach(group => {
+                        const claim = createTargetedRepairDeferredClaim(group.memoryKey);
+                        group.job.claim = claim;
+                        group.promise = claim.promise;
+                        owners.push(group.job);
+                    });
+                    const batchPolicy = globalThis.NexusTranslationRepairBatchPolicy;
+                    if (
+                        !batchPolicy?.createTargetedRepairMicroBatches ||
+                        !batchPolicy?.getRepairCompatibilityGroup
+                    ) {
+                        throw new Error('定向修复批策略未加载，已停止以避免不安全的混批');
+                    }
+                    const ownerBuckets = new Map();
+                    owners.forEach(job => {
+                        const compatibility = batchPolicy.getRepairCompatibilityGroup(job);
+                        const key = compatibility.key || 'unknown';
+                        if (!ownerBuckets.has(key)) ownerBuckets.set(key, []);
+                        ownerBuckets.get(key).push(job);
+                    });
+                    const plan = { batches: [], singles: [], replacements: [] };
+                    ownerBuckets.forEach((bucketJobs, compatibilityKey) => {
+                        const batchState = getTargetedRepairBatchState(profile, compatibilityKey);
+                        const partialPlan = batchPolicy.createTargetedRepairMicroBatches(bucketJobs, {
+                            batchSize: Math.min(
+                                TRANSLATION_TARGETED_REPAIR_MAX_BATCH_SIZE,
+                                Number(batchState.batchSize || TRANSLATION_TARGETED_REPAIR_INITIAL_BATCH_SIZE)
+                            ),
+                            charBudget: TRANSLATION_TARGETED_REPAIR_BATCH_CHAR_BUDGET
+                        });
+                        plan.batches.push(...partialPlan.batches);
+                        plan.singles.push(...partialPlan.singles);
+                        plan.replacements.push(...(partialPlan.replacements || []));
+                    });
+                    const operations = [
+                        ...plan.batches.map(batch => ({
+                            kind: 'batch',
+                            signature: batch.signature || 'unknown',
+                            jobs: batch.jobs
+                        })),
+                        ...plan.singles.map(item => ({
+                            kind: 'single',
+                            signature: item.signature || 'unknown',
+                            jobs: [item.job]
+                        })),
+                        ...plan.replacements.map(item => ({
+                            kind: 'replacement',
+                            signature: 'replacement',
+                            jobs: [item.job]
+                        }))
+                    ].sort((left, right) =>
+                        Math.min(...left.jobs.map(job => job.plannerIndex || 0)) -
+                        Math.min(...right.jobs.map(job => job.plannerIndex || 0))
+                    );
+                    operations.forEach(operation => {
+                        const mode = operation.kind === 'batch'
+                            ? repairAttemptPolicy.PRIMARY_BATCH
+                            : repairAttemptPolicy.PRIMARY_SINGLE;
+                        operation.jobs.forEach(job => {
+                            (job.cellIds || []).forEach(cellId => {
+                                repairAttemptLedger.setPrimaryMode(cellId, mode);
+                            });
+                        });
+                    });
+                const requestedConcurrency = Math.max(
+                    1,
+                    Number(processOptions.qaRepairConcurrency) || getTranslateEffectiveConcurrencyLimit(profile)
+                );
+                const workerCount = Math.max(1, Math.min(
+                    TRANSLATION_TARGETED_REPAIR_MAX_CONCURRENCY,
+                    requestedConcurrency,
+                    getTranslateEffectiveConcurrencyLimit(profile),
+                    operations.length || 1
+                ));
+
+                updateTranslateChannelProgress(profile, {
+                    status: 'retrying',
+                    message: `定向微批 ${plan.batches.length} 批，主单条 ${plan.singles.length}，完整重译 ${plan.replacements.length}`
+                });
+
+                const ownerRunner = runBoundedTranslationWorkers(operations, async operation => {
+                    if (operation.kind === 'single' || operation.kind === 'replacement') {
+                        const job = operation.jobs[0];
+                        try {
+                            const cellIds = job.cellIds || [getRepairAttemptCellId(job.task)];
+                            let requestFailed = false;
+                            let requestError = null;
+                            let candidate = '';
+                            if (operation.kind === 'replacement') {
+                                try {
+                                    candidate = await translateTextWithRetry(
+                                        job.task.text,
+                                        sourceLang,
+                                        targetLang,
+                                        currentProject.rules,
+                                        profile,
+                                        2,
+                                        runSignal,
+                                        job.task.glossaryTerms,
+                                        job.task,
+                                        {
+                                            requestLimiter,
+                                            onRequestStart: () => repairAttemptLedger.recordPhysicalRequest(
+                                                cellIds[0],
+                                                'replacement_primary_single'
+                                            )
+                                        }
+                                    );
+                                } catch (error) {
+                                    requestFailed = true;
+                                    requestError = error;
+                                }
+                            } else {
+                                candidate = await repairTranslationWithRetry(
+                                    job.task,
+                                    job.task.currentTranslation,
+                                    job.focusedQaStatus,
+                                    sourceLang,
+                                    targetLang,
+                                    currentProject.rules,
+                                    profile,
+                                    runSignal,
+                                    1,
+                                    {
+                                        requestLimiter,
+                                        onRequestStart: () => repairAttemptLedger.recordPhysicalRequest(
+                                            cellIds[0],
+                                            'repair_primary_single'
+                                        ),
+                                        onFailure: error => {
+                                            requestFailed = true;
+                                            requestError = error || null;
+                                        }
+                                    }
+                                );
+                            }
+                            if (isTranslateFailureText(candidate)) {
+                                requestFailed = true;
+                                requestError = requestError || new Error('模型未返回可用译文');
+                                candidate = '';
+                            }
+                            if (requestFailed && isApiQuotaDepletedError(requestError)) throw requestError;
+                            const finalOutcome = await finalizeTargetedRepairJob(
+                                job,
+                                {
+                                    value: requestFailed ? '' : candidate,
+                                    failed: requestFailed,
+                                    error: requestError,
+                                    allowSingleFallback: false
+                                },
+                                profile,
+                                requestLimiter
+                            );
+                            recordChannelOutcome(job.task, Boolean(finalOutcome.failed));
+                            recordTargetedRepairQuality(profile, {
+                                acceptedCount: finalOutcome.accepted ? 1 : 0,
+                                rejectedCount: finalOutcome.accepted ? 0 : 1,
+                                fallbackCount: finalOutcome.usedSingleFallback ? 1 : 0
+                            });
+                            job.claim.resolve(finalOutcome);
+                        } catch (error) {
+                            job.claim.reject(error);
+                            throw error;
+                        }
+                        return;
+                    }
+
+                    const requestResult = await requestTargetedRepairBatchCandidates(
+                        operation.jobs,
+                        profile,
+                        requestLimiter
+                    );
+                    const finalOutcomes = await runBoundedTranslationWorkers(
+                        operation.jobs,
+                        job => finalizeTargetedRepairJob(
+                            job,
+                            requestResult.outcomes.get(job.memoryKey),
+                            profile,
+                            requestLimiter
+                        ),
+                        Math.min(2, operation.jobs.length),
+                        { stopOnError: true }
+                    );
+                    const fallbackCount = finalOutcomes.filter(outcome => outcome.usedSingleFallback).length;
+                    const acceptedCount = finalOutcomes.filter(outcome => outcome.accepted).length;
+                    const rejectedCount = Math.max(0, finalOutcomes.length - acceptedCount);
+                    const transportErrors = requestResult.transportErrors || [];
+                    if (transportErrors.length) {
+                        transportErrors.forEach(() => recordChannelOutcome(operation.jobs[0].task, true));
+                    } else {
+                        recordChannelOutcome(operation.jobs[0].task, false);
+                    }
+                    finalOutcomes.forEach((outcome, index) => {
+                        if (outcome.usedSingleFallback) {
+                            recordChannelOutcome(operation.jobs[index].task, Boolean(outcome.failed));
+                        }
+                    });
+                    recordTargetedRepairQuality(profile, {
+                        acceptedCount,
+                        rejectedCount,
+                        fallbackCount
+                    });
+                    const nextState = advanceTargetedRepairBatchState(profile, operation.signature, {
+                        submittedCount: operation.jobs.length,
+                        fallbackCount,
+                        structuralError: requestResult.structuralError,
+                        unknownIds: requestResult.unknownIds,
+                        error: requestResult.requestError,
+                        rejectedCount,
+                        clean: !requestResult.requestError && !requestResult.structuralError && fallbackCount === 0 && rejectedCount === 0
+                    });
+                    updateTranslateChannelProgress(profile, {
+                        status: 'retrying',
+                        message: `定向微批提交 ${operation.jobs.length} 条，采用 ${acceptedCount}，保留 ${rejectedCount}${fallbackCount ? `，单条回退 ${fallbackCount}` : ''}；后续同类规划批宽 ${nextState.batchSize || 4}`
+                    });
+                    operation.jobs.forEach((job, index) => job.claim.resolve(finalOutcomes[index]));
+                }, workerCount, { stopOnError: true }).catch(error => {
+                    owners.forEach(job => job.claim.reject(error));
+                    throw error;
+                });
+
+                const commitRunner = (async () => {
+                    const settledGroups = await Promise.allSettled(groups.map(async group => {
+                        const outcome = await group.promise;
+                        for (const task of group.tasks) {
+                            const cellId = task.repairAttemptCellId || getRepairAttemptCellId(task);
+                            const prepared = await prepareTranslationForCommit(task, outcome.value, {
+                                deferAutoQaRepair: true,
+                                maxRepairAttempts: 0
+                            });
+                            const evaluation = evaluateTranslateResultCandidate(
+                                task,
+                                prepared.translated,
+                                outcome.qaStatus ?? prepared.qaStatus
+                            );
+                            if (outcome.candidateReturned) {
+                                repairAttemptLedger.recordCandidate(
+                                    cellId,
+                                    outcome.usedSingleFallback ? 'no_content_substitute' : 'primary'
+                                );
+                            }
+                            let status;
+                            try {
+                                status = commitTranslateResult(
+                                    task,
+                                    prepared.translated,
+                                    outcome.qaStatus ?? prepared.qaStatus,
+                                    evaluation
+                                );
+                            } catch (error) {
+                                repairAttemptLedger.settle(cellId, 'commit_failed', summarizeTranslateError(error));
+                                throw error;
+                            }
+                            repairAttemptLedger.markCommitted(cellId);
+                            repairAttemptLedger.settle(
+                                cellId,
+                                outcome.candidateReturned
+                                    ? (evaluation.accepted ? 'accepted' : 'rejected')
+                                    : (outcome.terminal || (outcome.failed ? 'transport_failed' : 'no_content')),
+                                evaluation.accepted ? 'accepted' : 'preserved'
+                            );
+                            statuses.set(task, status);
+                            (aliasesByCell.get(cellId) || []).forEach(alias => statuses.set(alias, status));
+                        }
+                    }));
+                    const failedGroup = settledGroups.find(result => result.status === 'rejected');
+                    if (failedGroup) throw failedGroup.reason;
+                })();
+
+                const settledRunners = await Promise.allSettled([ownerRunner, commitRunner]);
+                const failedRunner = settledRunners.find(result => result.status === 'rejected');
+                if (failedRunner) throw failedRunner.reason;
+                    return tasks.map(task => statuses.get(task) || 'qa_failed');
+                } catch (error) {
+                    owners.forEach(job => job.claim?.reject(error));
+                    await Promise.allSettled(owners.map(job => job.claim?.promise).filter(Boolean));
+                    const terminal = isTranslationCancelled || error?.name === 'AbortError'
+                        ? 'cancelled'
+                        : (isApiQuotaDepletedError(error) ? 'quota' : 'transport_failed');
+                    schedulableTasks.forEach(task => {
+                        const cellId = task.repairAttemptCellId || getRepairAttemptCellId(task);
+                        if (!repairAttemptLedger.get(cellId).terminal) {
+                            repairAttemptLedger.settle(cellId, terminal, summarizeTranslateError(error));
+                        }
+                    });
+                    throw error;
+                }
+            }
+
+            function getRemainingRetryRepairJobs(options = {}) {
                 if (!twoStageRetryRun) return [];
+                const schedulableOnly = Boolean(options.schedulableOnly);
                 const reportEntryByTaskKey = new Map();
                 (translationRunReport?.entries || []).forEach(entry => {
                     if (entry?.taskKey) reportEntryByTaskKey.set(entry.taskKey, entry);
                 });
+                const seenCellIds = new Set();
                 return allTranslationTasks.map(task => {
                     const entry = translationProgressTasks.get(task.taskKey) || reportEntryByTaskKey.get(task.taskKey);
                     const kind = classifyTranslationReportEntry(entry);
-                    return ['hard', 'missing'].includes(kind) ? { task, entry, kind } : null;
+                    if (!['hard', 'missing'].includes(kind)) return null;
+                    if (!entryMatchesContinuousRepairTarget(entry)) return null;
+                    const cellId = getRepairAttemptCellId(task);
+                    if (seenCellIds.has(cellId)) return null;
+                    seenCellIds.add(cellId);
+                    if (schedulableOnly && !repairAttemptLedger.canScheduleRepair(cellId)) return null;
+                    return { task, entry, kind };
                 }).filter(Boolean);
+            }
+
+            function getDeferredRetryRepairJobs() {
+                return getRemainingRetryRepairJobs({ schedulableOnly: true });
             }
 
             function replaceTranslateChannelResult(task, previousStatus, nextStatus) {
@@ -14617,7 +15472,7 @@ function initTranslateTool() {
                 throwIfTranslationCancelled(runId);
                 translationRunReport = translationRunReport || { entries: [] };
                 const reportEntries = translationRunReport.entries || [];
-                const replaceableTaskKeys = new Set([task.taskKey, task.retryOfTaskKey].filter(Boolean));
+                const replaceableTaskKeys = new Set([task.taskKey, task.retryOfTaskKey, task.outputTaskKey].filter(Boolean));
                 const existingReportIndex = reportEntries.findIndex(item => replaceableTaskKeys.has(item.taskKey));
                 const previousEntry = translationProgressTasks.get(task.taskKey) ||
                     (existingReportIndex >= 0 ? reportEntries[existingReportIndex] : null);
@@ -14625,23 +15480,28 @@ function initTranslateTool() {
                     ? getTranslationReportStatus(previousEntry.translatedText, previousEntry.qaStatus)
                     : 'missing';
                 const normalizedTranslated = normalizeTranslateResultText(translated, task.text);
-                const qaStatus = qaStatusOverride ?? (translatePostCheckInput?.checked
-                    ? summarizeTranslationQa(task.text, normalizedTranslated, task.glossaryTerms || [], targetLang, task)
-                    : '');
+                const qaStatus = qaStatusOverride ?? summarizeTranslationQa(
+                    task.text,
+                    normalizedTranslated,
+                    task.glossaryTerms || [],
+                    targetLang,
+                    task
+                );
                 const reportEntry = buildTranslationReportEntry(task, normalizedTranslated, qaStatus);
-                if (
-                    previousEntry?.translatedText &&
-                    !isTranslateFailureText(previousEntry.translatedText) &&
-                    isTranslateFailureText(normalizedTranslated)
-                ) {
-                    return { status: previousStatus, entry: previousEntry, changed: false };
-                }
-                if (
-                    classifyTranslationReportEntry(previousEntry) === 'hard' &&
-                    !isActualTranslationFailureReportEntry(previousEntry) &&
-                    classifyTranslationReportEntry(reportEntry) === 'hard'
-                ) {
-                    return { status: previousStatus, entry: previousEntry, changed: false };
+                if (previousEntry) {
+                    const decision = decideTranslateCandidateSafely({
+                        previous: { ...previousEntry, text: previousEntry.translatedText },
+                        candidate: { ...reportEntry, text: reportEntry.translatedText },
+                        selectedIssueIds: task.repairTargetIssueIds || options.selectedIssueIds || [],
+                        mode: (task.repairTargetIssueIds?.length || options.selectedIssueIds?.length) ? 'targeted' : 'ordinary'
+                    });
+                    if (!decision.accept) {
+                        return {
+                            status: previousStatus,
+                            entry: { ...previousEntry, repairDecision: decision.reason },
+                            changed: false
+                        };
+                    }
                 }
 
                 writeTranslationResult(task, normalizedTranslated, qaStatus);
@@ -14667,131 +15527,280 @@ function initTranslateTool() {
             }
 
             async function runDeferredRetryRepairPhase() {
-                const allJobs = getDeferredRetryRepairJobs();
+                const initialJobs = getDeferredRetryRepairJobs();
+                const initialRemainingJobs = getRemainingRetryRepairJobs();
+                const strictPolicy = continuousRepairPolicy;
                 const summary = {
-                    eligible: allJobs.length,
+                    eligible: initialJobs.length,
                     scheduled: 0,
                     deferred: 0,
                     attempted: 0,
                     changed: 0,
                     resolved: 0,
                     errors: 0,
+                    oscillations: 0,
+                    waves: 0,
+                    remainingTarget: initialRemainingJobs.length,
+                    stopReason: continuousRepairEnabled && initialJobs.length === 0
+                        ? (initialRemainingJobs.length === 0 ? 'cleared' : 'attempts_exhausted')
+                        : '',
+                    continuous: continuousRepairEnabled,
                     limitedByBudget: false
                 };
-                if (!allJobs.length) return summary;
-                let jobs = allJobs;
-                if (!shouldRunDeferredTranslationRepair(allJobs.length)) {
+                if (!initialJobs.length) return summary;
+                translateCompletionHistory = [];
+
+                const attemptsByIdentity = new Map();
+                const candidateHistoryByIdentity = new Map();
+                let continuousRepairFatalError = null;
+                let loopState = {
+                    noProgressSweeps: 0,
+                    fingerprintHistory: []
+                };
+                let continuousSweepAttempt = 0;
+                let continuousSweepBaselineCount = initialJobs.length;
+                let jobs = initialJobs;
+                if (!continuousRepairEnabled && !shouldRunDeferredTranslationRepair(initialJobs.length)) {
                     summary.limitedByBudget = true;
-                    const cursor = Math.max(0, Number(translationRunReport?.deferredRepairCursor || 0)) % allJobs.length;
-                    const rotatedJobs = [...allJobs.slice(cursor), ...allJobs.slice(0, cursor)];
+                    const cursor = Math.max(0, Number(translationRunReport?.deferredRepairCursor || 0)) % initialJobs.length;
+                    const rotatedJobs = [...initialJobs.slice(cursor), ...initialJobs.slice(0, cursor)];
                     jobs = rotatedJobs.slice(0, TRANSLATION_RETRY_DEEP_REPAIR_LIMIT);
-                    translationRunReport.deferredRepairCursor = (cursor + jobs.length) % allJobs.length;
-                    summary.deferred = Math.max(0, allJobs.length - jobs.length);
+                    translationRunReport.deferredRepairCursor = (cursor + jobs.length) % initialJobs.length;
+                    summary.deferred = Math.max(0, initialJobs.length - jobs.length);
                     updateTranslateRunSummary(
                         totalTasks,
                         totalTasks,
-                        `${runLanguageLabel}批量重译完成，本轮深修 ${jobs.length}/${allJobs.length} 个硬问题`
+                        `${runLanguageLabel}批量重译完成，本轮深修 ${jobs.length}/${initialJobs.length} 个硬问题`
                     );
                     setStatus(
                         'warning',
                         '已限制第二阶段修复规模',
-                        `批量重译后仍有 ${allJobs.length} 个阻断问题；本轮按安全预算只深度处理 ${jobs.length} 个，其余 ${summary.deferred} 个保留原结果，避免再次形成上千次逐条请求。下轮会从后续条目继续。`
+                        `批量重译后仍有 ${initialJobs.length} 个阻断问题；本轮按安全预算只深度处理 ${jobs.length} 个，其余 ${summary.deferred} 个保留原结果，避免再次形成上千次逐条请求。下轮会从后续条目继续。`
                     );
                 }
-                summary.scheduled = jobs.length;
 
-                let nextIndex = 0;
-                let phaseCompleted = 0;
-                const workerCount = Math.max(1, Math.min(
-                    TRANSLATION_QA_REPAIR_MAX_CONCURRENCY,
-                    jobs.length
-                ));
-                updateTranslateProgress(0, jobs.length, 0);
-                updateTranslateRunSummary(0, jobs.length, `${runLanguageLabel}少量残余硬问题深度修复中`);
-                setStatus(
-                    'processing',
-                    `正在深度修复 ${jobs.length} 个残余硬问题`,
-                    `第一阶段批量重译已完成；第二阶段只处理剩余阻断项，每条最多一次定向 QA 修复，并发不超过 ${workerCount}。`
-                );
+                async function processRepairWave(waveJobs) {
+                    let nextIndex = 0;
+                    let phaseCompleted = 0;
+                    const workerCount = Math.max(1, Math.min(
+                        TRANSLATION_QA_REPAIR_MAX_CONCURRENCY,
+                        waveJobs.length
+                    ));
+                    summary.waves++;
+                    summary.scheduled += waveJobs.length;
+                    updateTranslateProgress(0, waveJobs.length, 0);
+                    updateTranslateRunSummary(0, waveJobs.length, continuousRepairEnabled
+                        ? `${runLanguageLabel}${continuousRepairLabel}自动修复第 ${summary.waves} 波`
+                        : `${runLanguageLabel}少量残余硬问题深度修复中`);
+                    setStatus(
+                        'processing',
+                        continuousRepairEnabled
+                            ? `正在自动修复${continuousRepairLabel}，第 ${summary.waves} 波`
+                            : `正在深度修复 ${waveJobs.length} 个残余硬问题`,
+                        continuousRepairEnabled
+                            ? `本波 ${waveJobs.length} 条，并发不超过 ${workerCount}；完成后会自动复检并决定是否继续。`
+                            : `第一阶段批量重译已完成；第二阶段只处理剩余阻断项，每条最多一次定向 QA 修复，并发不超过 ${workerCount}。`
+                    );
 
-                async function worker() {
-                    while (true) {
-                        const jobIndex = nextIndex++;
-                        if (jobIndex >= jobs.length) return;
-                        const { task, entry, kind } = jobs[jobIndex];
-                        try {
-                            throwIfTranslationCancelled(runId);
-                            while (isPaused && !isTranslationCancelled) await waitForResume();
-                            throwIfTranslationCancelled(runId);
-                            summary.attempted++;
-                            updateTranslateChannelProgress(task.profile, {
-                                status: 'retrying',
-                                message: `第二阶段 ${jobIndex + 1}/${jobs.length}：${kind === 'missing' ? '补回缺失译文' : '定向修复硬问题'}`
-                            });
+                    async function worker() {
+                        while (true) {
+                            const jobIndex = nextIndex++;
+                            if (jobIndex >= waveJobs.length) return;
+                            const { task, entry, kind } = waveJobs[jobIndex];
+                            const identity = getContinuousRepairTaskIdentity(task);
+                            const repairCellId = getRepairAttemptCellId(task);
+                            try {
+                                throwIfTranslationCancelled(runId);
+                                while (isPaused && !isTranslationCancelled) await waitForResume();
+                                throwIfTranslationCancelled(runId);
+                                summary.attempted++;
+                                attemptsByIdentity.set(identity, (attemptsByIdentity.get(identity) || 0) + 1);
+                                const history = candidateHistoryByIdentity.get(identity) || [];
+                                if (!history.length) history.push(getContinuousRepairEntryFingerprint(entry));
+                                candidateHistoryByIdentity.set(identity, history);
+                                updateTranslateChannelProgress(task.profile, {
+                                    status: 'retrying',
+                                    message: `${continuousRepairEnabled ? `自动修复第 ${summary.waves} 波` : '第二阶段'} ${jobIndex + 1}/${waveJobs.length}：${kind === 'missing' ? '补回缺失译文' : '定向修复硬问题'}`
+                                });
 
-                            let prepared = null;
-                            if (kind === 'missing' || isTranslateFailureText(entry?.translatedText)) {
-                                await waitForTranslateChannelRecovery(task.profile);
-                                const translated = await translateTextWithRetry(
-                                    task.text,
-                                    sourceLang,
-                                    targetLang,
-                                    currentProject.rules,
-                                    task.profile,
-                                    1,
-                                    runSignal,
-                                    task.glossaryTerms,
-                                    task,
-                                    { requestLimiter: getTranslationRequestLimiter(task.profile) }
-                                );
-                                if (!isTranslateFailureText(translated)) {
-                                    prepared = await prepareTranslationForCommit(task, translated, {
-                                        deferAutoQaRepair: true,
-                                        maxRepairAttempts: 0
+                                let prepared = null;
+                                if (kind === 'missing' || isTranslateFailureText(entry?.translatedText)) {
+                                    if (!repairAttemptLedger.claimPrimarySingle(repairCellId, 'missing_replacement')) {
+                                        return;
+                                    }
+                                    await waitForTranslateChannelRecovery(task.profile);
+                                    let translated = '';
+                                    try {
+                                        translated = await translateTextWithRetry(
+                                            task.text,
+                                            sourceLang,
+                                            targetLang,
+                                            currentProject.rules,
+                                            task.profile,
+                                            1,
+                                            runSignal,
+                                            task.glossaryTerms,
+                                            task,
+                                            {
+                                                requestLimiter: getTranslationRequestLimiter(task.profile),
+                                                onRequestStart: () => repairAttemptLedger.recordPhysicalRequest(
+                                                    repairCellId,
+                                                    'missing_replacement_single'
+                                                )
+                                            }
+                                        );
+                                    } catch (error) {
+                                        repairAttemptLedger.settle(repairCellId, 'transport_failed', summarizeTranslateError(error));
+                                        throw error;
+                                    }
+                                    if (!isTranslateFailureText(translated)) {
+                                        repairAttemptLedger.recordCandidate(repairCellId, 'missing_replacement_single');
+                                        prepared = await prepareTranslationForCommit(task, translated, {
+                                            deferAutoQaRepair: true,
+                                            maxRepairAttempts: 0
+                                        });
+                                    } else {
+                                        repairAttemptLedger.settle(repairCellId, 'no_content', 'missing replacement returned no content');
+                                    }
+                                } else {
+                                    prepared = await prepareTranslationForCommit(task, entry.translatedText, {
+                                        deferAutoQaRepair: false,
+                                        maxRepairAttempts: 1
+                                    });
+                                }
+
+                                if (prepared) {
+                                    if (continuousRepairEnabled && prepared.repairError) {
+                                        summary.errors++;
+                                        continuousRepairFatalError = continuousRepairFatalError || prepared.repairError;
+                                        return;
+                                    }
+                                    const candidateFingerprint = getContinuousRepairEntryFingerprint({
+                                        translatedText: prepared.translated,
+                                        qaStatus: prepared.qaStatus
                                     });
                                     if (
-                                        !isTranslateFailureText(prepared.translated) &&
-                                        shouldAutoRepairTranslationQa(prepared.qaStatus, targetLang)
+                                        continuousRepairEnabled &&
+                                        strictPolicy?.isTwoCycle?.(history, candidateFingerprint)
                                     ) {
-                                        prepared = await prepareTranslationForCommit(task, prepared.translated, {
-                                            deferAutoQaRepair: false,
-                                            maxRepairAttempts: 1
-                                        });
+                                        summary.oscillations++;
+                                    } else {
+                                        const replacement = replaceCommittedTranslateResult(task, prepared.translated, prepared.qaStatus);
+                                        repairAttemptLedger.markCommitted(repairCellId);
+                                        if (!repairAttemptLedger.get(repairCellId).terminal) {
+                                            repairAttemptLedger.settle(
+                                                repairCellId,
+                                                replacement.changed ? 'accepted' : 'rejected',
+                                                replacement.changed ? 'accepted' : 'preserved'
+                                            );
+                                        }
+                                        history.push(candidateFingerprint);
+                                        if (history.length > 3) history.shift();
+                                        if (replacement.changed) summary.changed++;
+                                        if (!entryMatchesContinuousRepairTarget(replacement.entry)) summary.resolved++;
                                     }
                                 }
-                            } else {
-                                prepared = await prepareTranslationForCommit(task, entry.translatedText, {
-                                    deferAutoQaRepair: false,
-                                    maxRepairAttempts: 1
-                                });
+                            } catch (error) {
+                                if (error?.name === 'AbortError' || error?.message === 'TRANSLATION_CANCELLED' || isTranslationCancelled) {
+                                    throw error;
+                                }
+                                summary.errors++;
+                                console.warn('Deferred retry repair failed; preserving the first-stage result:', error);
+                            } finally {
+                                const attemptRecord = repairAttemptLedger.get(repairCellId);
+                                if (attemptRecord.primaryClaims > 0 && !attemptRecord.terminal) {
+                                    repairAttemptLedger.settle(
+                                        repairCellId,
+                                        isTranslationCancelled ? 'cancelled' : 'setup_failed',
+                                        'deferred repair ended without a terminal candidate decision'
+                                    );
+                                }
+                                phaseCompleted++;
+                                recordTranslateTaskCompletion(1);
+                                const percent = Math.round((phaseCompleted / waveJobs.length) * 100);
+                                updateTranslateProgress(phaseCompleted, waveJobs.length, percent);
+                                updateTranslateRunSummary(
+                                    phaseCompleted,
+                                    waveJobs.length,
+                                    continuousRepairEnabled
+                                        ? `${runLanguageLabel}${continuousRepairLabel}自动修复第 ${summary.waves} 波`
+                                        : `${runLanguageLabel}残余硬问题深度修复中`
+                                );
                             }
-
-                            if (prepared) {
-                                const replacement = replaceCommittedTranslateResult(task, prepared.translated, prepared.qaStatus);
-                                if (replacement.changed) summary.changed++;
-                                if (!isRepairableTranslationReportEntry(replacement.entry)) summary.resolved++;
-                            }
-                        } catch (error) {
-                            if (error?.name === 'AbortError' || error?.message === 'TRANSLATION_CANCELLED' || isTranslationCancelled) {
-                                throw error;
-                            }
-                            summary.errors++;
-                            console.warn('Deferred retry repair failed; preserving the first-stage result:', error);
-                        } finally {
-                            phaseCompleted++;
-                            const percent = Math.round((phaseCompleted / jobs.length) * 100);
-                            updateTranslateProgress(phaseCompleted, jobs.length, percent);
-                            updateTranslateRunSummary(
-                                phaseCompleted,
-                                jobs.length,
-                                `${runLanguageLabel}残余硬问题深度修复中`
-                            );
                         }
+                    }
+
+                    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+                    await flushTranslationTaskProgress();
+                    if (continuousRepairEnabled) await saveCurrentTranslationProgress(1);
+                }
+
+                if (!continuousRepairEnabled) {
+                    await processRepairWave(jobs);
+                } else {
+                    while (true) {
+                        const beforeJobs = getDeferredRetryRepairJobs();
+                        if (!beforeJobs.length) {
+                            summary.stopReason = getRemainingRetryRepairJobs().length === 0
+                                ? 'cleared'
+                                : 'attempts_exhausted';
+                            break;
+                        }
+                        const wave = strictPolicy?.selectRepairWave
+                            ? strictPolicy.selectRepairWave(beforeJobs, attemptsByIdentity, {
+                                waveSize: strictPolicy.DEFAULT_WAVE_SIZE || TRANSLATION_RETRY_DEEP_REPAIR_LIMIT,
+                                maxAttempts: strictPolicy.DEFAULT_MAX_ATTEMPTS || 2,
+                                getKey: job => getContinuousRepairTaskIdentity(job.task)
+                            })
+                            : beforeJobs
+                                .filter(job => (attemptsByIdentity.get(getContinuousRepairTaskIdentity(job.task)) || 0) < 2)
+                                .slice(0, TRANSLATION_RETRY_DEEP_REPAIR_LIMIT);
+                        if (!wave.length) {
+                            summary.stopReason = 'attempts_exhausted';
+                            break;
+                        }
+                        await processRepairWave(wave);
+                        if (continuousRepairFatalError) {
+                            summary.stopReason = 'api_error';
+                            summary.lastErrorMessage = continuousRepairFatalError?.message || String(continuousRepairFatalError);
+                            break;
+                        }
+                        const afterJobs = getDeferredRetryRepairJobs();
+                        const afterRemainingJobs = getRemainingRetryRepairJobs();
+                        const sweepStillPending = afterJobs.some(job =>
+                            (attemptsByIdentity.get(getContinuousRepairTaskIdentity(job.task)) || 0) <= continuousSweepAttempt
+                        );
+                        if (sweepStillPending) continue;
+                        const afterFingerprint = makeStableId(afterRemainingJobs
+                            .map(job => `${getContinuousRepairTaskIdentity(job.task)}:${getContinuousRepairEntryFingerprint(job.entry)}`)
+                            .sort()
+                            .join('\u001e'));
+                        const nextLoopState = strictPolicy?.advanceLoopState
+                            ? strictPolicy.advanceLoopState(
+                                loopState,
+                                continuousSweepBaselineCount,
+                                afterRemainingJobs.length,
+                                afterFingerprint
+                            )
+                            : {
+                                ...loopState,
+                                noProgressSweeps: afterRemainingJobs.length < continuousSweepBaselineCount
+                                    ? 0
+                                    : (Number(loopState.noProgressSweeps) || 0) + 1,
+                                status: afterRemainingJobs.length === 0
+                                    ? 'cleared'
+                                    : ((Number(loopState.noProgressSweeps) || 0) + 1 >= 2 ? 'stalled' : 'continue')
+                            };
+                        loopState = nextLoopState || loopState;
+                        if (loopState.status && loopState.status !== 'continue') {
+                            summary.stopReason = loopState.status;
+                            break;
+                        }
+                        continuousSweepAttempt++;
+                        continuousSweepBaselineCount = afterRemainingJobs.length;
                     }
                 }
 
-                await Promise.all(Array.from({ length: workerCount }, () => worker()));
-                await flushTranslationTaskProgress();
                 refreshTranslationRunCountsFromReport();
                 const reportEntryByTaskKey = new Map(
                     (translationRunReport?.entries || [])
@@ -14805,6 +15814,14 @@ function initTranslateTool() {
                 );
                 runSuccessCount = runCounts.successCount;
                 runFailCount = runCounts.failCount;
+                summary.remainingTarget = getRemainingRetryRepairJobs().length + continuousRepairUnmappedCount;
+                summary.deferred = summary.remainingTarget;
+                if (continuousRepairEnabled && continuousRepairUnmappedCount > 0 && summary.stopReason === 'cleared') {
+                    summary.stopReason = 'unmapped';
+                }
+                if (continuousRepairEnabled && !summary.stopReason) {
+                    summary.stopReason = summary.remainingTarget === 0 ? 'cleared' : 'stalled';
+                }
                 return summary;
             }
 
@@ -14817,6 +15834,85 @@ function initTranslateTool() {
 
                 const localDiscountStatus = await processLocalDiscountTask(task);
                 if (localDiscountStatus !== null) return localDiscountStatus;
+
+                if (task.repairFromCurrent && task.currentTranslation) {
+                    await waitForTranslateChannelRecovery(task.profile);
+                    const focusedQaStatus = getFocusedTranslationRepairQaStatus(task);
+                    updateTranslateChannelProgress(task.profile, {
+                        status: 'retrying',
+                        message: `基于当前译文定向修复${task.repairTargetIssueIds?.length ? `（${task.repairTargetIssueIds.length} 类）` : ''}`
+                    });
+                    const repairMemoryKey = buildTranslationRepairMemoryKey(
+                        task,
+                        task.currentTranslation,
+                        focusedQaStatus
+                    );
+                    let repairResult = { value: '', failed: false, error: null, requestOwner: false };
+                    if (repairMemory.has(repairMemoryKey)) {
+                        recordTranslateRepairCacheHit(task.profile, false);
+                        repairResult = { value: repairMemory.get(repairMemoryKey), failed: false, error: null, requestOwner: false };
+                    } else if (repairMemoryPromises.has(repairMemoryKey)) {
+                        recordTranslateRepairCacheHit(task.profile, true);
+                        repairResult = {
+                            ...(await repairMemoryPromises.get(repairMemoryKey)),
+                            requestOwner: false
+                        };
+                    } else {
+                        let repairRequestFailed = false;
+                        let repairRequestError = null;
+                        const repairPromise = repairTranslationWithRetry(
+                            task,
+                            task.currentTranslation,
+                            focusedQaStatus,
+                            sourceLang,
+                            targetLang,
+                            currentProject.rules,
+                            task.profile,
+                            runSignal,
+                            1,
+                            {
+                                requestLimiter: getTranslationRequestLimiter(task.profile),
+                                onFailure: error => {
+                                    repairRequestFailed = true;
+                                    repairRequestError = error || null;
+                                }
+                            }
+                        ).then(value => {
+                            return {
+                                value,
+                                failed: repairRequestFailed,
+                                error: repairRequestError
+                            };
+                        }).finally(() => repairMemoryPromises.delete(repairMemoryKey));
+                        repairMemoryPromises.set(repairMemoryKey, repairPromise);
+                        repairResult = {
+                            ...(await repairPromise),
+                            requestOwner: true
+                        };
+                    }
+                    const prepared = await prepareTranslationForCommit(task, repairResult.value, {
+                        deferAutoQaRepair: true,
+                        maxRepairAttempts: 0
+                    });
+                    const evaluation = evaluateTranslateResultCandidate(task, prepared.translated, prepared.qaStatus);
+                    const status = commitTranslateResult(task, prepared.translated, prepared.qaStatus, evaluation);
+                    if (
+                        evaluation.accepted &&
+                        !repairResult.failed &&
+                        prepared.translated &&
+                        !isTranslateFailureText(prepared.translated)
+                    ) {
+                        repairMemory.set(repairMemoryKey, prepared.translated);
+                    }
+                    recordChannelOutcome(
+                        task,
+                        (repairResult.failed && repairResult.requestOwner) || status === 'failed' || status === 'missing'
+                    );
+                    if (repairResult.failed && repairResult.requestOwner && isApiQuotaDepletedError(repairResult.error)) {
+                        throw repairResult.error;
+                    }
+                    return status;
+                }
 
                 updateTranslateChannelProgress(task.profile, {
                     status: 'running',
@@ -14926,13 +16022,20 @@ function initTranslateTool() {
                 const incidentCountBefore = getTranslateChannelIncidentCount(profile);
                 const hasNewChannelIncident = () =>
                     getTranslateChannelIncidentCount(profile) > incidentCountBefore;
+                const throttleLevelBefore = getTranslationChannelThrottleLevel(profile);
                 updateTranslateChannelProgress(profile, {
                     status: 'running',
                     message: `准备批量 ${tasks.length} 条`
                 });
                 const uncachedTasks = [];
                 let localDiscountFailureCount = 0;
-                for (const task of tasks) {
+                const directRepairTasks = tasks.filter(task => task.repairFromCurrent && task.currentTranslation);
+                const ordinaryTasks = tasks.filter(task => !task.repairFromCurrent || !task.currentTranslation);
+                if (directRepairTasks.length) {
+                    const directStatuses = await processTargetedRepairTasks(directRepairTasks, options);
+                    localDiscountFailureCount += directStatuses.filter(status => status !== 'success').length;
+                }
+                for (const task of ordinaryTasks) {
                     const localDiscountStatus = await processLocalDiscountTask(task);
                     if (localDiscountStatus !== null) {
                         if (localDiscountStatus !== 'success') localDiscountFailureCount++;
@@ -14973,7 +16076,8 @@ function initTranslateTool() {
                     return {
                         completed: tasks.length,
                         failed: localDiscountFailureCount,
-                        shouldSlowDown: hasNewChannelIncident(),
+                        shouldSlowDown: getTranslationChannelThrottleLevel(profile) > throttleLevelBefore,
+                        throttleLevel: getTranslationChannelThrottleLevel(profile),
                         reason: localDiscountFailureCount > 0 ? '本地折扣规则检测到需确认项' : '复用缓存翻译'
                     };
                 }
@@ -15004,7 +16108,8 @@ function initTranslateTool() {
                     return {
                         completed: uncachedTasks.length,
                         failed: failedInSingleMode,
-                        shouldSlowDown: hasNewChannelIncident(),
+                        shouldSlowDown: getTranslationChannelThrottleLevel(profile) > throttleLevelBefore,
+                        throttleLevel: getTranslationChannelThrottleLevel(profile),
                         reason: failedInSingleMode > 0 ? '单条翻译失败或需确认' : ''
                     };
                 }
@@ -15083,7 +16188,8 @@ function initTranslateTool() {
                     return {
                         completed: representativeTasks.length,
                         failed: failedInBatch,
-                        shouldSlowDown: hasNewChannelIncident(),
+                        shouldSlowDown: getTranslationChannelThrottleLevel(profile) > throttleLevelBefore,
+                        throttleLevel: getTranslationChannelThrottleLevel(profile),
                         reason: hasNewChannelIncident()
                             ? '批量翻译或 QA 修复发生通道异常'
                             : (failedInBatch > 0 ? '批量结果存在失败或需确认项' : '')
@@ -15114,7 +16220,8 @@ function initTranslateTool() {
                     return {
                         completed: tasks.length,
                         failed: failedInSplit,
-                        shouldSlowDown: hasNewChannelIncident(),
+                        shouldSlowDown: getTranslationChannelThrottleLevel(profile) > throttleLevelBefore,
+                        throttleLevel: getTranslationChannelThrottleLevel(profile),
                         reason: hasNewChannelIncident()
                             ? '拆分批次期间发生通道异常'
                             : '批量结构异常，已拆小批次完成'
@@ -15133,7 +16240,8 @@ function initTranslateTool() {
                 return {
                     completed: uncachedTasks.length,
                     failed: failedInFallback,
-                    shouldSlowDown: hasNewChannelIncident(),
+                    shouldSlowDown: getTranslationChannelThrottleLevel(profile) > throttleLevelBefore,
+                    throttleLevel: getTranslationChannelThrottleLevel(profile),
                     reason: batchFailureSummary || '批量返回异常，已降级单条'
                 };
             }
@@ -15213,11 +16321,43 @@ function initTranslateTool() {
                     return batches;
                 }
 
+                function createTargetedRepairEnvelopes(queue) {
+                    const maxEnvelopeSize = 48;
+                    const maxEnvelopeCost = 32000;
+                    const envelopes = [];
+                    let current = [];
+                    let currentCost = 0;
+                    queue.forEach(task => {
+                        const taskCost = Math.max(
+                            1,
+                            getTranslationTaskBatchCost(task) +
+                            String(task.currentTranslation || '').length +
+                            String(task.repairQaStatus || '').length
+                        );
+                        const wouldExceedSize = current.length >= maxEnvelopeSize;
+                        const wouldExceedCost = current.length > 0 && currentCost + taskCost > maxEnvelopeCost;
+                        if (wouldExceedSize || wouldExceedCost) {
+                            envelopes.push(current);
+                            current = [];
+                            currentCost = 0;
+                        }
+                        current.push(task);
+                        currentCost += taskCost;
+                    });
+                    if (current.length) envelopes.push(current);
+                    return envelopes;
+                }
+
                 const runners = [...tasksByProfile.values()]
                     .filter(queue => queue.length > 0)
                     .map(queue => {
                         const profile = queue[0].profile;
-                        const batches = createTranslationTaskBatches(queue, profile);
+                        const repairQueue = queue.filter(task => task.repairFromCurrent && task.currentTranslation);
+                        const ordinaryQueue = queue.filter(task => !task.repairFromCurrent || !task.currentTranslation);
+                        const batches = [
+                            ...createTranslationTaskBatches(ordinaryQueue, profile),
+                            ...createTargetedRepairEnvelopes(repairQueue)
+                        ];
                         const batchCount = batches.length;
                         let nextIndex = 0;
                         let activeCount = 0;
@@ -15228,7 +16368,7 @@ function initTranslateTool() {
                         const maxConcurrency = getMaxConcurrencyForRun(profile, batchCount);
                         const speedOptimizedRun = retryTasks || deferAutoQaRepairForRun || importedTranslateProgressState?.entries?.length;
                         const initialConcurrency = speedOptimizedRun
-                            ? Math.min(2, maxConcurrency)
+                            ? Math.min(retryTasks ? TRANSLATION_TARGETED_REPAIR_MAX_CONCURRENCY : 2, maxConcurrency)
                             : 1;
                         const adaptive = {
                             current: initialConcurrency,
@@ -15236,7 +16376,7 @@ function initTranslateTool() {
                             stableSuccesses: 0,
                             cooldownUntil: 0,
                             lastReason: maxConcurrency > initialConcurrency
-                                ? (speedOptimizedRun ? '快速/补跑任务，适度并发起步' : '低并发起步')
+                                ? (speedOptimizedRun ? '集中首译/补跑任务，适度并发起步' : '低并发起步')
                                 : ''
                         };
 
@@ -15261,14 +16401,25 @@ function initTranslateTool() {
                             });
                         }
 
-                        function reduceAdaptiveConcurrency(reason = '') {
+                        function reduceAdaptiveConcurrency(reason = '', throttleLevel = 1) {
+                            const normalizedLevel = Math.max(1, Number(throttleLevel) || 1);
                             const shouldRecordSlowdown = adaptive.current > 1 || Date.now() >= adaptive.cooldownUntil;
-                            adaptive.current = 1;
+                            adaptive.current = normalizedLevel >= 2
+                                ? 1
+                                : Math.max(1, adaptive.current - 1);
                             setTranslationRequestAdaptiveCap(profile, adaptive.current);
                             adaptive.stableSuccesses = 0;
-                            adaptive.cooldownUntil = Date.now() + TRANSLATION_ADAPTIVE_COOLDOWN_MS;
-                            adaptive.lastReason = reason ? `已降速保护：${reason}` : '已降速保护';
-                            nextBatchStartAt = Math.max(nextBatchStartAt, Date.now() + TRANSLATION_BATCH_FAILURE_SETTLE_DELAY_MS);
+                            const cooldownMs = normalizedLevel >= 2
+                                ? TRANSLATION_INTERRUPTION_HARD_COOLDOWN_MS
+                                : TRANSLATION_INTERRUPTION_SOFT_COOLDOWN_MS;
+                            adaptive.cooldownUntil = Date.now() + cooldownMs;
+                            adaptive.lastReason = reason
+                                ? `分级降速：${reason}`
+                                : '分级降速保护';
+                            const settleMs = normalizedLevel >= 2
+                                ? TRANSLATION_BATCH_FAILURE_SETTLE_DELAY_MS
+                                : TRANSLATION_BATCH_SETTLE_DELAY_MS;
+                            nextBatchStartAt = Math.max(nextBatchStartAt, Date.now() + settleMs);
                             if (shouldRecordSlowdown) {
                                 recordTranslateChannelIncident(profile, null, { slowdown: true });
                             }
@@ -15319,7 +16470,10 @@ function initTranslateTool() {
                                 throwIfTranslationCancelled(runId);
 
                                 if (batchResult?.shouldSlowDown) {
-                                    reduceAdaptiveConcurrency(batchResult.reason || '本批存在失败项');
+                                    reduceAdaptiveConcurrency(
+                                        batchResult.reason || '本批存在失败项',
+                                        batchResult.throttleLevel || 1
+                                    );
                                     updateTranslateChannelProgress(profile, {
                                         status: 'retrying',
                                         message: formatAdaptiveMessage(batchResult.reason || '本批存在失败项，已自动降速')
@@ -15340,11 +16494,22 @@ function initTranslateTool() {
                                     settled = true;
                                     rejectRunner?.(error);
                                     return;
+                                } else if (isApiQuotaDepletedError(error)) {
+                                    settled = true;
+                                    updateTranslateChannelProgress(profile, {
+                                        status: 'failed',
+                                        message: 'API 额度已用尽，已立即停止后续请求'
+                                    });
+                                    rejectRunner?.(error);
+                                    return;
                                 } else {
                                     const summary = summarizeTranslateError(error);
                                     if (isTemporaryTranslateApiError(error)) {
                                         recordTranslateChannelIncident(profile, error);
-                                        reduceAdaptiveConcurrency(summary);
+                                        reduceAdaptiveConcurrency(
+                                            summary,
+                                            Math.max(1, getTranslationChannelThrottleLevel(profile))
+                                        );
                                     }
                                     const committedFailures = commitUnfinishedTranslateTaskFailures(taskBatch, summary || '当前批次异常');
                                     if (committedFailures.committed > 0) {
@@ -15389,6 +16554,9 @@ function initTranslateTool() {
                 refreshTranslationRunCountsFromReport();
                 updateTranslateProgress(totalTasks, totalTasks, 100);
             }
+            if (translationRunReport) {
+                translationRunReport.repairAttemptSummary = repairAttemptLedger.summarize();
+            }
             translatedWorkbook = buildTranslationWorkbook();
             translatedData = translatedDataLocal;
 
@@ -15417,6 +16585,7 @@ function initTranslateTool() {
                 clearTranslationProgress();
             }
             document.getElementById('translatedCount').textContent = translateCount;
+            syncImportedTranslateProgressFromRunReport();
             updateTranslationRunActions();
             if (!deliveryGate.ready) {
                 markTranslateLanguageFailed(targetLang);
@@ -15429,49 +16598,75 @@ function initTranslateTool() {
                     status: deliveryGate.ready ? 'success' : 'needs_action'
                 });
             }
-            const finishPhase = !deliveryGate.ready
-                ? `${runLanguageLabel}仍有阻断问题，未生成交付版`
-                : (reportFailureCount > 0
-                    ? `${runLanguageLabel}完成，有软性问题待确认`
-                    : (retryTasks ? `${runLanguageLabel}修复完成` : `${runLanguageLabel}翻译完成`));
+            const continuousRepairRemaining = deferredRetryRepairSummary?.continuous
+                ? Math.max(0, Number(deferredRetryRepairSummary.remainingTarget) || 0)
+                : null;
+            const continuousRepairCleared = continuousRepairRemaining === 0;
+            const continuousRepairStopLabels = {
+                cleared: '所选问题已清零',
+                stalled: '连续两波没有减少',
+                oscillating: '检测到译文来回振荡',
+                attempts_exhausted: '剩余行已达到单行尝试上限',
+                unmapped: '存在无法映射回源文件的报告行',
+                api_error: 'API 请求异常，已保留当前结果'
+            };
+            const finishPhase = deferredRetryRepairSummary?.continuous
+                ? (continuousRepairCleared
+                    ? (deliveryGate.ready
+                        ? `${continuousRepairLabel}已清零，交付版已就绪`
+                        : `${continuousRepairLabel}已清零，仍有其他阻断问题`)
+                    : `${continuousRepairLabel}自动处理已安全停止`)
+                : (!deliveryGate.ready
+                    ? `${runLanguageLabel}已安全停止，仍有阻断问题`
+                    : (reportFailureCount > 0
+                        ? `${runLanguageLabel}完成，有软性问题待确认`
+                        : (retryTasks ? `${runLanguageLabel}修复完成` : `${runLanguageLabel}翻译完成`)));
             updateTranslateRunSummary(totalTasks, totalTasks, finishPhase);
 
-            const statusTitle = !deliveryGate.ready
-                ? `${runLanguageLabel}仍有阻断问题，未生成交付版`
-                : (retryTasks ? `${runLanguageLabel}修复完成` : `${runLanguageLabel}翻译完成`);
+            const statusTitle = deferredRetryRepairSummary?.continuous
+                ? finishPhase
+                : (!deliveryGate.ready
+                    ? `${runLanguageLabel}已安全停止，仍有阻断问题`
+                    : (retryTasks ? `${runLanguageLabel}修复完成` : `${runLanguageLabel}翻译完成`));
             let autoSaveMessage = '';
             if (options.suppressAutoSave) {
                 autoSaveMessage = deliveryGate.ready
                     ? '；交付版已生成，请点击下载按钮保存'
-                    : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版`;
+                    : `；仍有 ${deliveryGate.blockingCount} 条阻断问题；当前最佳结果已保留，但本流程未自动保存`;
             } else {
                 try {
                     const savedPaths = await autoSaveTranslationOutputs();
-                    autoSaveMessage = deliveryGate.ready
-                        ? (savedPaths.length ? `；已自动保存：${savedPaths.join('；')}` : '')
-                        : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版${savedPaths.length ? `；问题报告已保存：${savedPaths.join('；')}` : ''}`;
+                    autoSaveMessage = formatTranslationAutoSaveResult(savedPaths, deliveryGate);
                 } catch (saveError) {
                     console.warn('自动保存翻译结果失败:', saveError);
                     recordClientError('translation-auto-save', saveError, { targetLang });
                     autoSaveMessage = deliveryGate.ready
                         ? '；自动保存失败，请点击下载按钮手动保存'
-                        : `；仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版；问题报告自动保存失败`;
+                        : `；仍有 ${deliveryGate.blockingCount} 条阻断问题；未验证版和问题报告自动保存失败`;
                 }
             }
-            const followUpMessage = !deliveryGate.ready
-                ? '请点击“一键修复并生成交付版”；系统只处理阻断问题，复检清零后才会输出文件。'
-                : (reportFailureCount > 0
-                    ? '剩余为软性需确认项；可在报告中填写处理决定，重新导入后会保留该决定。'
-                    : '交付版和报告已准备好。');
+            const followUpMessage = deferredRetryRepairSummary?.continuous
+                ? (continuousRepairCleared
+                    ? (deliveryGate.ready
+                        ? '所选必修类型及全部交付阻断项已清零，交付版和报告已准备好。'
+                        : `所选必修类型已清零，但仍有 ${deliveryGate.blockingCount} 条其他阻断问题，暂未生成正式交付版。`)
+                    : `自动流程已按安全条件停止，仍有 ${continuousRepairRemaining} 条${continuousRepairLabel}；当前结果和问题报告均已保留。`)
+                : (!deliveryGate.ready
+                    ? `本轮已对每个阻断单元格生成至多一个有效修复候选，未改善的译文已停止重复改写；保存结果请以本次产物状态为准。`
+                    : (reportFailureCount > 0
+                        ? '剩余为软性需确认项；可在报告中填写处理决定，重新导入后会保留该决定。'
+                        : '交付版和报告已准备好。'));
             const deferredRepairMessage = deferredRetryRepairSummary
-                ? (deferredRetryRepairSummary.limitedByBudget
+                ? (deferredRetryRepairSummary.continuous
+                    ? `自动运行 ${deferredRetryRepairSummary.waves} 波，深度检查 ${deferredRetryRepairSummary.attempted} 次，更新 ${deferredRetryRepairSummary.changed} 条；${continuousRepairStopLabels[deferredRetryRepairSummary.stopReason] || '流程已停止'}${continuousRepairRemaining ? `，剩余 ${continuousRepairRemaining} 条` : ''}${deferredRetryRepairSummary.oscillations ? `，跳过振荡 ${deferredRetryRepairSummary.oscillations} 条` : ''}${deferredRetryRepairSummary.lastErrorMessage ? `，原因：${deferredRetryRepairSummary.lastErrorMessage}` : ''}。`
+                    : deferredRetryRepairSummary.limitedByBudget
                     ? `批量重译后有 ${deferredRetryRepairSummary.eligible} 个阻断项；本轮按预算深度检查 ${deferredRetryRepairSummary.attempted} 条，其余 ${deferredRetryRepairSummary.deferred} 条保留原结果并轮转到后续批次。`
                     : (deferredRetryRepairSummary.eligible > 0
                         ? `第二阶段深度检查 ${deferredRetryRepairSummary.attempted} 条，更新 ${deferredRetryRepairSummary.changed} 条，解除阻断 ${deferredRetryRepairSummary.resolved} 条${deferredRetryRepairSummary.errors ? `，保留异常 ${deferredRetryRepairSummary.errors} 条原结果` : ''}。`
                         : '批量重译后没有残余硬问题，无需逐条 AI 修复。'))
                 : '';
             const issueSummaryText = formatTranslationReportIssueSummary(finalIssueSummary);
-            setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}已完成：本轮通过质检 ${runSuccessCount} 个，发现问题 ${runFailCount} 个；当前报告为 ${issueSummaryText}。${deferredRepairMessage}${followUpMessage}`);
+            setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}已完成：本轮通过质检 ${runSuccessCount} 个，发现问题 ${runFailCount} 个；当前报告为 ${issueSummaryText}。${deferredRepairMessage}${followUpMessage}${autoSaveMessage}`);
             setStatus(deliveryGate.ready ? 'success' : 'warning', statusTitle, `本轮通过质检 ${runSuccessCount} 个，发现问题 ${runFailCount} 个；当前报告为 ${issueSummaryText}。${deferredRepairMessage}${autoSaveMessage}`, function() {
                 document.getElementById('translate-tool').scrollIntoView({ behavior: 'smooth' });
             });
@@ -15484,11 +16679,39 @@ function initTranslateTool() {
             if (isTranslationCancelled || error.name === 'AbortError' || error.message === 'TRANSLATION_CANCELLED') {
                 console.log('Translate cancelled');
                 runOutcome = 'cancelled';
+                let cancelledSaveMessage = '';
+                const hasProducedResult = Boolean(
+                    translationProgressTasks.size > 0 ||
+                    (translationRunReport?.entries || []).length > 0
+                );
+                if (hasProducedResult) {
+                    try {
+                        if (translationRunReport && repairAttemptLedger) {
+                            translationRunReport.repairAttemptSummary = repairAttemptLedger.summarize();
+                        }
+                        ensureTranslationReportCoversExpectedTasks('任务由用户取消，未完成项保留为缺失');
+                        translatedWorkbook = buildTranslationWorkbook();
+                        await flushTranslationTaskProgress();
+                        await saveCurrentTranslationProgress(1);
+                        const savedPaths = await autoSaveTranslationOutputs();
+                        cancelledSaveMessage = formatTranslationAutoSaveResult(
+                            savedPaths,
+                            savedPaths.deliveryGate || getTranslationDeliveryGate()
+                        );
+                    } catch (saveError) {
+                        recordClientError('translation-cancelled-auto-save', saveError, { targetLang });
+                        cancelledSaveMessage = '；当前进度自动保存失败，可在结果区手动导出';
+                    }
+                    translatedData = translatedDataLocal;
+                    downloadSection.style.display = 'block';
+                    syncImportedTranslateProgressFromRunReport();
+                    updateTranslationRunActions();
+                }
                 markUnfinishedTranslateChannels('paused', '任务已取消或暂停，未完成后续翻译');
                 updateTranslateLanguageRunState({ status: 'stopped' });
                 updateTranslateRunSummary(translateRunSummaryState.completed, translateRunSummaryState.total, `${runLanguageLabel}已取消`);
-                setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}翻译已取消，未完成的语言不会继续执行。`);
-                setStatus('warning', `${runLanguageLabel}翻译已取消`, '已停止后续请求。现在可以重新选择模型、调整配置，或上传新的文件。');
+                setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}翻译已取消，未完成的语言不会继续执行${cancelledSaveMessage}`);
+                setStatus('warning', `${runLanguageLabel}翻译已取消`, `已停止后续请求${cancelledSaveMessage}`);
                 finishInspectorTaskTimer('warning', `${runLanguageLabel}翻译已取消`);
             } else if (error.isPreflightFailure) {
                 const quotaDepleted = isApiQuotaDepletedError(error);
@@ -15517,17 +16740,34 @@ function initTranslateTool() {
                 recordClientError('startTranslate', error, { targetLang, runLanguageLabel });
                 runOutcome = 'error';
                 ensureTranslationReportCoversExpectedTasks(error.message || '任务异常停止，预期任务未写入结果');
+                if (translationRunReport && repairAttemptLedger) {
+                    translationRunReport.repairAttemptSummary = repairAttemptLedger.summarize();
+                }
                 translatedWorkbook = buildTranslationWorkbook();
                 if (translationProgressTasks.size > 0) {
                     await flushTranslationTaskProgress();
                     await saveCurrentTranslationProgress(1);
                 }
+                let interruptedSaveMessage = '';
+                try {
+                    const savedPaths = await autoSaveTranslationOutputs();
+                    interruptedSaveMessage = formatTranslationAutoSaveResult(
+                        savedPaths,
+                        savedPaths.deliveryGate || getTranslationDeliveryGate()
+                    );
+                } catch (saveError) {
+                    recordClientError('translation-error-auto-save', saveError, { targetLang });
+                    interruptedSaveMessage = '；当前最佳未验证版和问题报告自动保存失败';
+                }
+                translatedData = translatedDataLocal;
+                downloadSection.style.display = 'block';
+                syncImportedTranslateProgressFromRunReport();
                 markUnfinishedTranslateChannels('failed', error.message || '任务异常停止');
                 markTranslateLanguageFailed(targetLang);
                 updateTranslateRunSummary(translateRunSummaryState.completed, translateRunSummaryState.total, `${runLanguageLabel}异常停止`);
                 updateTranslationRunActions();
-                setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}翻译异常停止：${error.message || '未知错误'}`);
-                setStatus('error', `${runLanguageLabel}翻译失败`, error.message);
+                setTranslateDownloadLanguageSummary(`${getTranslateLanguageName(targetLang)}翻译异常停止：${error.message || '未知错误'}${interruptedSaveMessage}`);
+                setStatus('error', `${runLanguageLabel}翻译失败`, `${error.message || '未知错误'}${interruptedSaveMessage}`);
             }
             progressSection.style.display = 'none';
         } finally {
@@ -15554,7 +16794,8 @@ function initTranslateTool() {
             successCount: runSuccessCount,
             failCount: runFailCount,
             failureCount: runReportFailureCount,
-            repairableCount: runRepairableCount
+            repairableCount: runRepairableCount,
+            deferredRepairSummary: deferredRetryRepairSummary
         };
     }
 
@@ -15600,7 +16841,7 @@ function initTranslateTool() {
         const deliveryGate = getTranslationDeliveryGate();
         if (!deliveryGate.ready) {
             setTranslateDownloadLanguageSummary(
-                `仍有 ${deliveryGate.blockingCount} 条阻断问题，未生成交付版。请先点击“一键修复并生成交付版”；如需查看当前结果，可主动导出未验证版。`
+                `仍有 ${deliveryGate.blockingCount} 条阻断问题，正式交付版不可用；可重新下载当前未验证版和问题报告。`
             );
             setStatus(
                 'warning',
@@ -15667,7 +16908,7 @@ function initTranslateTool() {
         const issueSummary = getTranslationReportIssueSummary();
         const languageCode = translationRunReport?.targetLang || targetLangSelect?.value || '';
         const languageName = getTranslateLanguageName(languageCode) || languageCode || '未指定';
-        const noticeSheetName = '未验证说明';
+        const noticeSheetName = getUniqueTranslationWorksheetName(workbook, '未验证说明', '未验证说明');
         const noticeRows = [
             ['未验证译文，请勿直接交付'],
             [],
@@ -15679,8 +16920,8 @@ function initTranslateTool() {
             ['软性需确认', issueSummary.softRisk || 0],
             [],
             ['正式交付条件', '翻译失败、结果缺失和硬质检问题全部清零'],
-            ['建议操作', '返回工具点击“一键修复并生成交付版”，或在翻译报告中填写修订译文后重新导入'],
-            ['数据说明', '后续数据工作表是当前译文快照；“翻译报告”工作表列出了具体问题和位置'],
+            ['建议操作', '加载相同原文件，导入同时生成的独立 translation_report.xlsx 后点击“继续处理”；工具会开始新的有界任务，只处理仍然阻断的高置信问题'],
+            ['数据说明', '后续数据工作表是当前译文快照；具体问题和位置保存在同时生成的独立 translation_report.xlsx 中'],
             ['文件命名', '*_translated_unverified.xlsx 只用于查看、人工修改或内部确认，不等同于 *_translated.xlsx 交付版']
         ];
         const noticeSheet = XLSX.utils.aoa_to_sheet(noticeRows);
@@ -15747,6 +16988,7 @@ function initTranslateTool() {
         translateChannelProgressState = new Map();
         translateRunSummaryState = { completed: 0, total: 0, phase: '等待开始' };
         translateRunConsistencyTerms = [];
+        translateCompletionHistory = [];
         stopTranslateElapsedTimer();
         translateRunStartedAt = 0;
         translateSources = [];
@@ -15763,8 +17005,6 @@ function initTranslateTool() {
         document.getElementById('translateTotalCols').textContent = '-';
         document.getElementById('translateProgressFill').style.width = '0%';
         document.getElementById('translateProgressInfo').textContent = '';
-        resetTranslateDiscountCheck();
-
         fileInfo.style.display = 'none';
         columnSelectSection.style.display = 'none';
         if (translateSheetSelectPanel) translateSheetSelectPanel.style.display = 'none';
@@ -16412,6 +17652,7 @@ ${text}`;
                 if (apiConfig.provider === 'youdaoTranslate') {
                     const translated = await runWithTranslationRequestLimiter(options.requestLimiter, () => {
                         requestStartedAt = Date.now();
+                        options.onRequestStart?.({ attempt: attempt + 1, kind: 'translation_single' });
                         return translateWithYoudaoLlm(protectedText, sourceLang, targetLang, `${rules || ""}
 ${buildTranslateReferenceInstruction(nextContext, targetLang)}
 ${buildTranslateLengthInstruction(text, targetLang, context)}
@@ -16433,6 +17674,7 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                 const prompt = buildTranslatePrompt(protectedText, sourceLang, targetLang, rules, glossaryTerms, nextContext);
                 const content = await runWithTranslationRequestLimiter(options.requestLimiter, () => {
                     requestStartedAt = Date.now();
+                    options.onRequestStart?.({ attempt: attempt + 1, kind: 'translation_single' });
                     return requestModelContent(
                         apiConfig,
                         {
@@ -16489,11 +17731,7 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
         return makeTranslateFailureText(text, summarizeTranslateError(lastError));
     }
 
-    async function repairTranslationWithRetry(task, currentTranslation, qaStatus, sourceLang, targetLang, rules, profile, signal = null, retries = 2, options = {}) {
-        const apiConfig = profile || getApiConfig();
-        const model = apiConfig.model || getDefaultModelForProvider(apiConfig.provider);
-        if (!apiConfig.apiKey || !model) return currentTranslation;
-
+    function buildTranslationRepairRequestModel(task, currentTranslation, qaStatus, targetLang, rules, id = '') {
         const targetLanguage = getTranslatePromptLanguageName(targetLang);
         const compactRules = targetLang === 'zh-TW'
             ? buildTraditionalChineseFormatRules(rules)
@@ -16579,8 +17817,222 @@ ${discountInstruction ? `- ${discountInstruction}` : ''}
 主源文本：
 ${protectedContext.fields.sourceText}
 ${task.referenceText ? `\n参考译文：\n${protectedContext.fields.referenceText}\n` : ''}
-当前错误译文：
+        当前错误译文：
 ${protectedContext.fields.currentTranslation}`;
+
+        const guidance = [
+            protectedUiInstruction,
+            repairSourceCopyGuard,
+            chineseCarryoverRepairInstruction,
+            foreignScriptRepairInstruction,
+            englishCarryoverRepairInstruction,
+            '术语表若只有英文/旧译文参考，不能直接照抄为非英语目标译文；行内参考译文只用于理解语境和 UI 长度。',
+            repairLengthInstruction,
+            compactStyleInstruction,
+            discountInstruction
+        ].filter(Boolean).map(value => String(value).replace(/^\s*-\s*/, '').trim());
+        const payload = {
+            id,
+            sourceText: protectedContext.fields.sourceText,
+            currentTranslation: protectedContext.fields.currentTranslation,
+            issues: qaStatus || '译后检测未通过',
+            instructions: guidance
+        };
+        if (task.referenceText) payload.referenceText = protectedContext.fields.referenceText;
+        const glossary = buildPromptGlossaryPayload((task.glossaryTerms || []).slice(0, 16));
+        if (glossary.length) payload.glossary = glossary;
+        if (task.consistencyTerms?.length) payload.consistencyTerms = task.consistencyTerms.slice(0, 12);
+        if (task.consistencyExamples?.length) {
+            payload.consistencyExamples = task.consistencyExamples.slice(0, 6).map(item => ({
+                sourceText: item.sourceText || '',
+                translatedText: item.translatedText || ''
+            }));
+        }
+        if (hasLengthIssue) {
+            payload.preferredVisibleLength = preferredLengthBudget;
+            payload.hardVisibleLengthLimit = hardLengthBudget;
+        }
+
+        return {
+            id,
+            task,
+            targetLanguage,
+            compactRules,
+            protectedContext,
+            repairInstruction,
+            payload,
+            tokenTexts: [task.text, task.referenceText, currentTranslation].filter(Boolean)
+        };
+    }
+
+    function buildTargetedRepairBatchPromptParts(requestModels, targetLang, rules) {
+        const targetLanguage = getTranslatePromptLanguageName(targetLang);
+        const compactRules = targetLang === 'zh-TW'
+            ? buildTraditionalChineseFormatRules(rules)
+            : buildCompactTranslateRules(rules, targetLang);
+        const expectedIds = requestModels.map(model => model.id);
+        const systemPrompt = `你是游戏本地化译文微批修复器。每个条目必须彼此独立处理，目标语言是 ${targetLanguage}。
+只返回 JSON 对象数组，格式必须是 [{"id":"r1","translation":"最终译文"}]。ID 集合必须与输入完全一致，顺序可以不同。禁止返回纯字符串数组、解释、推理或 Markdown。
+
+逐条硬性要求：
+1. 只修复该条 issues 指出的实际问题，基于 currentTranslation 做最小必要修改；sourceText 是含义依据，referenceText 仅作语境参考。
+2. 不得在不同 ID 之间交换、拼接或复用内容。每条的占位符、UI 标记、数字、标签和字面量 \\n 只能留在该条中，数量和顺序必须保持。
+3. 输出必须完整、自然并严格使用 ${targetLanguage}；不得为了变短删除条件、对象、数量、否定、奖励、状态或功能名。
+4. 不能为了修复一种问题而新增中文/错误文字、英文硬残留、术语、数字、格式或完整性问题。
+5. glossary 中 => 为硬性译法，≈ 仅供理解；instructions 必须逐条执行。
+
+项目规则：${compactRules || '按通用游戏本地化规范执行'}`;
+        const userPrompt = `repairItems:\n${JSON.stringify(requestModels.map(model => model.payload))}`;
+        return {
+            systemPrompt,
+            userPrompt,
+            expectedIds,
+            cacheKey: makePromptCacheKey('repair_batch', `${targetLang}:${systemPrompt}`),
+            tokenTexts: requestModels.flatMap(model => model.tokenTexts)
+        };
+    }
+
+    async function repairTranslationsBatchWithRetry(requestModels, sourceLang, targetLang, rules, profile, signal = null, retries = 2, options = {}) {
+        if (!Array.isArray(requestModels) || requestModels.length <= 1) {
+            throw new Error('定向微批至少需要两个条目');
+        }
+        const apiConfig = profile || getApiConfig();
+        const model = apiConfig.model || getDefaultModelForProvider(apiConfig.provider);
+        if (!apiConfig.apiKey || !model) throw new Error('定向微批通道未配置完整');
+        const batchPolicy = globalThis.NexusTranslationRepairBatchPolicy;
+        const parseResponse = batchPolicy?.parseTargetedRepairBatchResponse || batchPolicy?.parseResponse;
+        if (typeof parseResponse !== 'function') throw new Error('定向修复批策略未加载');
+        const promptParts = buildTargetedRepairBatchPromptParts(requestModels, targetLang, rules);
+        const promptCharCount = promptParts.systemPrompt.length + promptParts.userPrompt.length;
+        if (promptCharCount > TRANSLATION_TARGETED_REPAIR_PROMPT_CHAR_LIMIT) {
+            const promptSizeError = new Error(
+                `定向修复微批提示词过长：${promptCharCount}/${TRANSLATION_TARGETED_REPAIR_PROMPT_CHAR_LIMIT}`
+            );
+            promptSizeError.isRepairBatchStructureError = true;
+            throw promptSizeError;
+        }
+
+        for (let attempt = 0; attempt < retries; attempt++) {
+            let requestStartedAt = 0;
+            try {
+                await waitForNetwork(signal);
+                if (signal?.aborted) throw new Error('TRANSLATION_CANCELLED');
+                const content = await runWithTranslationRequestLimiter(options.requestLimiter, async () => {
+                    requestStartedAt = Date.now();
+                    options.onRequestStart?.({ attempt: attempt + 1, kind: 'repair_batch' });
+                    return apiConfig.provider === 'youdaoTranslate'
+                        ? translateWithYoudaoLlm(
+                            promptParts.userPrompt,
+                            sourceLang,
+                            targetLang,
+                            rules,
+                            apiConfig,
+                            signal,
+                            promptParts.systemPrompt
+                        )
+                        : requestModelContent(
+                            apiConfig,
+                            {
+                                model,
+                                messages: [
+                                    { role: 'system', content: promptParts.systemPrompt, cacheControl: true },
+                                    { role: 'user', content: promptParts.userPrompt }
+                                ],
+                                prompt_cache_key: promptParts.cacheKey,
+                                temperature: 0,
+                                max_tokens: getTranslationMaxTokens(promptParts.tokenTexts, targetLang, {
+                                    mode: 'repair-batch',
+                                    itemCount: requestModels.length,
+                                    attempt
+                                })
+                            },
+                            signal,
+                            API_REQUEST_TIMEOUT_MS,
+                            { rejectTruncated: true }
+                        );
+                });
+                const parsed = parseResponse(content, promptParts.expectedIds);
+                const parsedValues = parsed?.valuesById || parsed?.translationsById || {};
+                const rawValues = parsedValues instanceof Map
+                    ? parsedValues
+                    : new Map(Object.entries(parsedValues));
+                const valuesById = new Map();
+                requestModels.forEach(requestModel => {
+                    const rawValue = rawValues.get(requestModel.id);
+                    if (isBlankTranslationResult(rawValue)) return;
+                    const restored = restoreProtectedPlaceholders(
+                        cleanTranslationResponse(rawValue),
+                        requestModel.protectedContext.replacements
+                    );
+                    if (!isBlankTranslationResult(restored)) valuesById.set(requestModel.id, restored);
+                });
+                const invalidIds = new Set([
+                    ...(parsed?.missingIds || []),
+                    ...(parsed?.duplicateIds || []),
+                    ...(parsed?.emptyIds || []),
+                    ...(parsed?.blankIds || []),
+                    ...promptParts.expectedIds.filter(id => !valuesById.has(id))
+                ].map(String));
+                if (!valuesById.size) {
+                    const structureError = new Error('批量修复返回无有效结果');
+                    structureError.isRepairBatchStructureError = true;
+                    structureError.rawText = String(content || '').slice(0, 1000);
+                    throw structureError;
+                }
+                recordTranslateRequestTiming(apiConfig, 'qa-repair', requestStartedAt, {
+                    itemCount: requestModels.length,
+                    attempt: attempt + 1,
+                    outcome: 'success'
+                });
+                return {
+                    valuesById,
+                    invalidIds,
+                    unknownIds: new Set([...(parsed?.unknownIds || [])].map(String)),
+                    parsed
+                };
+            } catch (error) {
+                if (signal?.aborted || error.name === 'AbortError' || error.message === 'TRANSLATION_CANCELLED') {
+                    throw error;
+                }
+                recordTranslateRequestTiming(apiConfig, 'qa-repair', requestStartedAt, {
+                    itemCount: requestModels.length,
+                    attempt: attempt + 1,
+                    outcome: 'error',
+                    error
+                });
+                const willRetry = attempt < retries - 1 &&
+                    !isSplittableTranslationBatchError(error) &&
+                    !isApiQuotaDepletedError(error);
+                options.onBatchStatus?.({
+                    attempt: attempt + 1,
+                    retries,
+                    error,
+                    summary: summarizeTranslateError(error),
+                    willRetry
+                });
+                if (!willRetry) throw error;
+                const retryAfter = Number(error.retryAfterMs || 0);
+                const waitMs = Math.max(700 * (attempt + 1), Math.min(retryAfter, 60000));
+                await delayWithSignal(waitMs, signal);
+            }
+        }
+
+        throw new Error('定向微批修复未返回结果');
+    }
+
+    async function repairTranslationWithRetry(task, currentTranslation, qaStatus, sourceLang, targetLang, rules, profile, signal = null, retries = 2, options = {}) {
+        const apiConfig = profile || getApiConfig();
+        const model = apiConfig.model || getDefaultModelForProvider(apiConfig.provider);
+        if (!apiConfig.apiKey || !model) return currentTranslation;
+        const requestModel = buildTranslationRepairRequestModel(task, currentTranslation, qaStatus, targetLang, rules);
+        const { protectedContext, repairInstruction } = requestModel;
+        if (repairInstruction.length > TRANSLATION_TARGETED_REPAIR_PROMPT_CHAR_LIMIT) {
+            const error = new Error(
+                `单条修复提示词过长：${repairInstruction.length}/${TRANSLATION_TARGETED_REPAIR_PROMPT_CHAR_LIMIT}`
+            );
+            options.onFailure?.(error);
+            return currentTranslation;
+        }
 
         for (let attempt = 0; attempt < retries; attempt++) {
             let requestStartedAt = 0;
@@ -16591,6 +18043,7 @@ ${protectedContext.fields.currentTranslation}`;
                 if (apiConfig.provider === 'youdaoTranslate') {
                     const repaired = await runWithTranslationRequestLimiter(options.requestLimiter, () => {
                         requestStartedAt = Date.now();
+                        options.onRequestStart?.({ attempt: attempt + 1, kind: 'repair_single' });
                         return translateWithYoudaoLlm(protectedContext.fields.sourceText, sourceLang, targetLang, `${repairInstruction}`, apiConfig, signal);
                     });
                     const restoredRepair = restoreProtectedPlaceholders(
@@ -16607,6 +18060,7 @@ ${protectedContext.fields.currentTranslation}`;
 
                 const content = await runWithTranslationRequestLimiter(options.requestLimiter, () => {
                     requestStartedAt = Date.now();
+                    options.onRequestStart?.({ attempt: attempt + 1, kind: 'repair_single' });
                     return requestModelContent(
                         apiConfig,
                         {
@@ -23174,6 +24628,7 @@ function initL10nCheckTool() {
 
         if (extension === 'csv') {
             const { text } = await readCSVWithEncoding(file);
+            const contentSignature = await makeFileContentSignature(text);
             const result = XLSX.read(text, { type: 'string', cellDates: true });
             const sheetName = result.SheetNames[0];
             const rows = XLSX.utils.sheet_to_json(result.Sheets[sheetName], { header: 1 });
@@ -23183,11 +24638,15 @@ function initL10nCheckTool() {
                 sheetName: 'CSV',
                 rows,
                 fileType: 'csv',
+                fileSize: file.size || 0,
+                fileLastModified: file.lastModified || 0,
+                contentSignature,
                 rowMap: new Map()
             }];
         }
 
         const arrayBuffer = await file.arrayBuffer();
+        const contentSignature = await makeFileContentSignature(arrayBuffer);
         const result = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
         return result.SheetNames.map((sheetName, index) => ({
             id: makeL10nSourceId(file.name, sheetName, startIndex + index),
@@ -23195,6 +24654,9 @@ function initL10nCheckTool() {
             sheetName,
             rows: XLSX.utils.sheet_to_json(result.Sheets[sheetName], { header: 1 }),
             fileType: extension,
+            fileSize: file.size || 0,
+            fileLastModified: file.lastModified || 0,
+            contentSignature,
             sourceArrayBuffer: arrayBuffer,
             rowMap: new Map()
         })).filter(source => source.rows.length > 0);
@@ -23244,7 +24706,6 @@ function initL10nCheckTool() {
         checkResults = [];
         realtimeCheckResults = [];
         glossaryData = [];
-        clearL10nProgress();
         renderHistoryImportSummary();
     }
 
@@ -23813,6 +25274,57 @@ function initL10nCheckTool() {
         }
     }
 
+    function getL10nSourceSignature() {
+        const parts = l10nSources.map(source => {
+            const header = Array.isArray(source.rows?.[0]) ? source.rows[0].join('\u001f') : '';
+            return [
+                source.fileName || '',
+                source.sheetName || '',
+                source.fileSize || '',
+                source.fileLastModified || '',
+                source.contentSignature || '',
+                source.rows?.length || 0,
+                source.rows?.[0]?.length || 0,
+                header
+            ].join('\u001e');
+        });
+        return parts.length ? makeStableId(parts.join('\u001d')) : '';
+    }
+
+    function getL10nProgressContextSignature(context = {}) {
+        const project = context.project || getSelectedL10nProject();
+        const profiles = context.profiles || getSelectedL10nProfiles();
+        const glossaryTerms = context.glossaryTerms || getSelectedGlossaryTerms();
+        return makeStableId(JSON.stringify({
+            sourceSignature: getL10nSourceSignature(),
+            selectedSourceIds: [...selectedSourceIds].sort(),
+            sourceColumn,
+            targetColumn,
+            checkMode: getSelectedCheckMode(),
+            qualityPolicies: {
+                languageProfiles: globalThis.NexusLanguageQualityProfiles?.PROFILE_VERSION || '',
+                carryover: globalThis.NexusLanguageCarryoverGuard?.POLICY_VERSION || '',
+                issue: globalThis.NexusTranslationIssuePolicy?.POLICY_VERSION || '',
+                format: globalThis.NexusTranslationFormatTokenPolicy?.POLICY_VERSION || '',
+                number: globalThis.NexusTranslationNumberPolicy?.POLICY_VERSION || ''
+            },
+            project: project ? { id: project.id || '', rules: project.rules || '' } : null,
+            profiles: profiles.map(profile => ({
+                id: profile.id || '',
+                provider: profile.provider || '',
+                baseUrl: profile.baseUrl || '',
+                model: profile.model || ''
+            })).sort((left, right) => `${left.id}|${left.model}`.localeCompare(`${right.id}|${right.model}`)),
+            glossary: glossaryTerms.map(term => ({
+                source: term.source || '',
+                effectiveTarget: getGlossaryEffectiveTarget(term),
+                type: term.type || '',
+                referenceRows: term.referenceRows || '',
+                referenceId: term.referenceId || ''
+            })).sort((left, right) => `${left.source}|${left.effectiveTarget}|${left.type}`.localeCompare(`${right.source}|${right.effectiveTarget}|${right.type}`))
+        }));
+    }
+
     async function startCheck(options = {}) {
         const skipSavedProgressPrompt = Boolean(options?.skipSavedProgressPrompt);
         if (activeCheckRunId && progressSection.style.display !== 'none') {
@@ -23867,27 +25379,24 @@ function initL10nCheckTool() {
         let checkedCount = 0;
 
         const savedProgress = l10nSources.length > 1 ? null : await loadL10nProgress();
-        if (!shouldAppendStrictResults && savedProgress && savedProgress.fileName === originalFileName && !skipSavedProgressPrompt) {
-            const shouldResume = confirm(`检测到未完成的任务，已检测 ${savedProgress.checkedCount} 条文本。是否继续？`);
-            if (shouldResume) {
-                checkResults = normalizeSavedCheckResults(savedProgress.checkResults || savedProgress.results);
-                realtimeCheckResults = normalizeSavedCheckResults(savedProgress.realtimeCheckResults || savedProgress.liveResults || []);
-                if (checkResults.length === 0 && realtimeCheckResults.length > 0) {
-                    checkResults = normalizeSavedCheckResults(realtimeCheckResults);
-                }
-                if (realtimeCheckResults.length === 0 && checkResults.length > 0) {
-                    realtimeCheckResults = checkResults.slice(-L10N_PROGRESS_PREVIEW_LIMIT);
-                }
-                glossaryData = savedProgress.glossaryData || [];
-                if (Array.isArray(savedProgress.selectedProfileIds)) {
-                    selectedProfileIds = new Set(savedProgress.selectedProfileIds);
-                    renderL10nProfileList();
-                }
-                checkedCount = checkResults.length || savedProgress.checkedCount;
-            } else {
-                clearL10nProgress();
-            }
-        } else if (!shouldAppendStrictResults && savedProgress && savedProgress.fileName === originalFileName && skipSavedProgressPrompt) {
+        const currentL10nSourceSignature = getL10nSourceSignature();
+        const currentL10nContextSignature = getL10nProgressContextSignature({
+            project: activeProject,
+            profiles: activeProfiles,
+            glossaryTerms: activeGlossaryTerms
+        });
+        const savedProgressMatchesContext = Boolean(
+            savedProgress?.sourceSignature &&
+            savedProgress?.contextSignature &&
+            savedProgress.sourceSignature === currentL10nSourceSignature &&
+            savedProgress.contextSignature === currentL10nContextSignature
+        );
+        if (
+            !shouldAppendStrictResults &&
+            savedProgress &&
+            savedProgress.fileName === originalFileName &&
+            savedProgressMatchesContext
+        ) {
             checkResults = normalizeSavedCheckResults(savedProgress.checkResults || savedProgress.results);
             realtimeCheckResults = normalizeSavedCheckResults(savedProgress.realtimeCheckResults || savedProgress.liveResults || []);
             if (checkResults.length === 0 && realtimeCheckResults.length > 0) {
@@ -23896,8 +25405,24 @@ function initL10nCheckTool() {
             if (realtimeCheckResults.length === 0 && checkResults.length > 0) {
                 realtimeCheckResults = checkResults.slice(-L10N_PROGRESS_PREVIEW_LIMIT);
             }
-            glossaryData = savedProgress.glossaryData || glossaryData;
+            glossaryData = savedProgress.glossaryData || [];
+            if (Array.isArray(savedProgress.selectedProfileIds)) {
+                selectedProfileIds = new Set(savedProgress.selectedProfileIds);
+                renderL10nProfileList();
+            }
             checkedCount = checkResults.length || savedProgress.checkedCount;
+            if (!skipSavedProgressPrompt) {
+                setStatus('processing', '正在续接未完成检测', `已恢复 ${checkedCount} 条检测结果，不会重复处理。`);
+            }
+        } else if (!shouldAppendStrictResults && savedProgress?.fileName === originalFileName) {
+            await clearL10nProgress();
+            setStatus(
+                'warning',
+                '旧检测进度未自动套用',
+                savedProgress.sourceSignature && savedProgress.contextSignature
+                    ? '同名文件或检测设置已变化，已按新任务开始，避免按旧行号跳过内容。'
+                    : '旧版本进度缺少文件与检测上下文签名，无法安全验证，已按新任务开始。'
+            );
         }
 
         activeProfiles = getSelectedL10nProfiles();
@@ -25078,9 +26603,6 @@ ${JSON.stringify(compactTasks)}
             displayResults(checkResults.length, getSelectedGlossaryTerms(), getSelectedL10nProfiles());
             return;
         }
-
-        const confirmed = confirm(`将为 ${tasks.length} 条异常行生成完整修正译文，会额外消耗 API 额度。已生成过的行会跳过。是否继续？`);
-        if (!confirmed) return;
 
         const activeProfiles = getSelectedL10nProfiles();
         const apiConfig = activeProfiles[0] || getApiConfig();
@@ -26549,9 +28071,14 @@ ${target}
     function buildL10nProgressMetaRecord(data, compactResults) {
         return {
             id: L10N_PROGRESS_ACTIVE_ID,
-            version: 2,
+            version: 3,
             timestamp: Date.now(),
             fileName: data.fileName || originalFileName || '',
+            sourceSignature: data.sourceSignature || getL10nSourceSignature(),
+            contextSignature: data.contextSignature || getL10nProgressContextSignature(),
+            sourceColumn: Number.isInteger(data.sourceColumn) ? data.sourceColumn : sourceColumn,
+            targetColumn: Number.isInteger(data.targetColumn) ? data.targetColumn : targetColumn,
+            checkMode: data.checkMode || getSelectedCheckMode(),
             currentRow: data.currentRow || 1,
             checkedCount: Number(data.checkedCount || compactResults.length || 0),
             selectedProfileIds: data.selectedProfileIds || [...selectedProfileIds],
@@ -26665,21 +28192,22 @@ ${target}
         }
     }
 
-    function clearL10nProgress() {
+    async function clearL10nProgress() {
         l10nProgressWriteEpoch++;
         savedL10nProgressResultKeys.clear();
         localStorage.removeItem(L10N_PROGRESS_KEY);
-        openL10nProgressDb()
-            .then(db => {
-                const transaction = db.transaction(
-                    [L10N_PROGRESS_META_STORE, L10N_PROGRESS_RESULT_STORE],
-                    'readwrite'
-                );
-                transaction.objectStore(L10N_PROGRESS_META_STORE).clear();
-                transaction.objectStore(L10N_PROGRESS_RESULT_STORE).clear();
-                return waitForIdbTransaction(transaction);
-            })
-            .catch(error => console.warn('L10n progress clear skipped:', error));
+        try {
+            const db = await openL10nProgressDb();
+            const transaction = db.transaction(
+                [L10N_PROGRESS_META_STORE, L10N_PROGRESS_RESULT_STORE],
+                'readwrite'
+            );
+            transaction.objectStore(L10N_PROGRESS_META_STORE).clear();
+            transaction.objectStore(L10N_PROGRESS_RESULT_STORE).clear();
+            await waitForIdbTransaction(transaction);
+        } catch (error) {
+            console.warn('L10n progress clear skipped:', error);
+        }
     }
 
     function resetTool() {
@@ -30436,10 +31964,8 @@ ${JSON.stringify(compactTasks)}
         const resumeText = polishedRowPatches.size > 0
             ? `已有 ${polishedRowPatches.size} 条成功结果，本次只处理剩余 ${pendingTasks.length} 条。`
             : `将对 ${pendingTasks.length} 条命中问题的译文行进行 AI 润色修正。`;
-        const confirmed = confirm(`${resumeText} 会额外消耗 API 额度。是否继续？`);
-        if (!confirmed) return;
-
         const taskState = beginGlossaryTask('polish', 'AI润色命中行');
+        setStatus('processing', '正在启动 AI 润色', `${resumeText} 已通过按钮直接启动，可随时取消任务。`);
         aiPolishMatchedRowsBtn.disabled = true;
         aiPolishMatchedRowsBtn.textContent = 'AI润色中...';
         progressSection.style.display = 'block';
@@ -31047,14 +32573,6 @@ ${chunk}
             setStatus('error', '补跑前通道预检失败', `${error.message || '接口不可用'} ${hint}`);
             finishGlossaryTask(taskState);
             updateRetryFailedGlossaryBatchesButton();
-            return;
-        }
-
-        const confirmed = confirm(`通道预检通过。将只补跑 ${failedBatches.length} 个失败批次，会额外消耗 API 额度。是否继续？`);
-        if (!confirmed) {
-            finishGlossaryTask(taskState);
-            updateRetryFailedGlossaryBatchesButton();
-            setStatus('success', '已取消补跑失败批次', '通道预检已通过，但未开始补跑');
             return;
         }
 

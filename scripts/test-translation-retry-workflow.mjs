@@ -37,7 +37,11 @@ const rebuildSource = extractFunction(source, 'function rebuildFailedTranslation
 const retrySource = extractFunction(source, 'async function retryFailedTranslations(');
 const importedRetrySource = extractFunction(source, 'async function retrySuspiciousImportedTranslations(');
 const startSource = extractFunction(source, 'async function startTranslate(');
+const safeCandidateSource = extractFunction(startSource, 'function decideTranslateCandidateSafely(');
+const commitSource = extractFunction(source, 'function commitTranslateResult(');
+const evaluateSource = extractFunction(source, 'function evaluateTranslateResultCandidate(');
 const prepareSource = extractFunction(source, 'async function prepareTranslationForCommit(');
+const collectRemainingSource = extractFunction(source, 'function getRemainingRetryRepairJobs(');
 const collectDeferredSource = extractFunction(source, 'function getDeferredRetryRepairJobs(');
 const deferredSource = extractFunction(source, 'async function runDeferredRetryRepairPhase(');
 const replaceSource = extractFunction(source, 'function replaceCommittedTranslateResult(');
@@ -60,7 +64,7 @@ assert.equal(policy.shouldDeferRetryQaRepair({ deferAutoQaRepair: true }), true)
 assert.equal(policy.shouldDeferRetryQaRepair({ deferAutoQaRepair: false }), false);
 assert.equal(policy.shouldUseTwoStageTranslationRetry([{}]), true);
 assert.equal(policy.shouldUseTwoStageTranslationRetry([{}], { twoStageRetry: false }), false);
-assert.equal(policy.shouldUseTwoStageTranslationRetry([], {}), false);
+assert.equal(policy.shouldUseTwoStageTranslationRetry([], {}), true, 'ordinary first translation must auto-run the bounded repair phase');
 assert.equal(policy.shouldRunDeferredTranslationRepair(1), true);
 assert.equal(policy.shouldRunDeferredTranslationRepair(60), true);
 assert.equal(policy.shouldRunDeferredTranslationRepair(61), false);
@@ -70,6 +74,15 @@ assert.match(
     rebuildSource,
     /collectTranslationTasks\(activeProfiles, \{ deferGlossary: true \}\)/,
     'restoring retry tasks should not compute glossary matches for the whole workbook'
+);
+assert.ok(
+    !/if \(failedTranslationTasks\.length > 0\) return/.test(rebuildSource),
+    'a previous targeted queue must not short-circuit reconstruction of all live report blockers'
+);
+assert.match(
+    rebuildSource,
+    /buildTranslateImportTaskLookup\(allTasks\)[\s\S]*findImportedTranslationTaskMatch\(/,
+    'rebuilding the all-blocker queue should merge from the indexed live report'
 );
 assert.equal(
     (retrySource.match(/getSelectedTranslateGlossaryTerms\(\)/g) || []).length,
@@ -86,10 +99,10 @@ assert.match(
     /glossaryTermsSnapshot: retryGlossaryTerms/,
     'the same retry glossary snapshot should be passed into startTranslate'
 );
-assert.match(
+assert.doesNotMatch(
     retrySource,
-    /最多选取 \$\{TRANSLATION_RETRY_DEEP_REPAIR_LIMIT\} 个残余阻断项[\s\S]*下一轮轮转处理/,
-    'the confirmation must describe the bounded rotating deep-repair budget'
+    /confirm\(|确定开始重译/,
+    'an explicit retry button click should start directly without a second confirmation'
 );
 assert.match(
     importedRetrySource,
@@ -116,6 +129,11 @@ assert.match(
     /Array\.isArray\(options\.glossaryTermsSnapshot\)[\s\S]*\? options\.glossaryTermsSnapshot[\s\S]*: getSelectedTranslateGlossaryTerms\(\)/,
     'an explicit empty glossary snapshot must not reload storage'
 );
+assert.match(
+    startSource,
+    /continuousRepairRequested && !continuousRepairPolicy[\s\S]*strict-repair-policy-unavailable/,
+    'continuous repair must fail safely when its policy module is unavailable'
+);
 {
     const queueIndex = startSource.indexOf('await runTranslateQueues()');
     const phaseIndex = startSource.indexOf('await runDeferredRetryRepairPhase()', queueIndex);
@@ -127,16 +145,70 @@ assert.match(
 }
 assert.match(prepareSource, /prepareOptions\.deferAutoQaRepair \?\? deferAutoQaRepairForRun/);
 assert.match(prepareSource, /prepareOptions\.maxRepairAttempts/);
+assert.match(
+    prepareSource,
+    /let qaStatus = summarizeTranslationQa\(task\.text, nextTranslated/,
+    'every repair path must run full local QA before it can pass the delivery gate'
+);
+assert.ok(
+    !prepareSource.includes('translatePostCheckInput?.checked'),
+    'the UI post-check preference must not bypass core repair QA'
+);
+assert.match(
+    prepareSource,
+    /normalizedSelectedIssueIds\.size === 1 && normalizedSelectedIssueIds\.has\('length_review'\)/,
+    'compact acceptance may apply only when length is the sole selected repair target'
+);
+assert.match(
+    evaluateSource,
+    /decideTranslateCandidateSafely[\s\S]*preservePreviousRepairEntry/,
+    'candidate evaluation must use the shared monotonic gate before commit replaces the current best translation'
+);
+assert.match(
+    safeCandidateSource,
+    /translationIssuePolicy\.decideCandidate[\s\S]*accept:\s*false/,
+    'candidate gate failures must fail closed and preserve the current best translation'
+);
+assert.match(
+    commitSource,
+    /evaluatedCandidate \|\| evaluateTranslateResultCandidate/,
+    'all final commits must share the same candidate evaluator used by micro-batch preflight'
+);
 
 assert.match(
-    collectDeferredSource,
+    collectRemainingSource,
     /\['hard', 'missing'\]\.includes\(kind\)/,
     'only hard and missing results may enter the deferred repair phase'
 );
 assert.match(
+    collectDeferredSource,
+    /getRemainingRetryRepairJobs\(\{ schedulableOnly: true \}\)/,
+    'the schedulable queue must be a filtered view of the real remaining blockers'
+);
+assert.match(
     deferredSource,
-    /shouldRunDeferredTranslationRepair\(allJobs\.length\)[\s\S]*rotatedJobs\.slice\(0, TRANSLATION_RETRY_DEEP_REPAIR_LIMIT\)/,
-    'large residual queues must use a rotating bounded repair budget'
+    /summary\.remainingTarget = getRemainingRetryRepairJobs\(\)\.length/,
+    'terminal reporting must count real blockers even after their per-run attempt budget is exhausted'
+);
+assert.match(
+    deferredSource,
+    /!continuousRepairEnabled && !shouldRunDeferredTranslationRepair\(initialJobs\.length\)[\s\S]*rotatedJobs\.slice\(0, TRANSLATION_RETRY_DEEP_REPAIR_LIMIT\)/,
+    'ordinary large residual queues must retain the rotating bounded repair budget'
+);
+assert.match(
+    deferredSource,
+    /strictPolicy\.selectRepairWave[\s\S]*DEFAULT_WAVE_SIZE[\s\S]*DEFAULT_MAX_ATTEMPTS/,
+    'continuous strict repair must schedule bounded fair waves with a per-item attempt ceiling'
+);
+assert.match(
+    deferredSource,
+    /sweepStillPending[\s\S]*if \(sweepStillPending\) continue/,
+    'no-progress stopping must wait until every remaining item has received the current-attempt sweep'
+);
+assert.match(
+    deferredSource,
+    /prepared\.repairError[\s\S]*stopReason = 'api_error'/,
+    'continuous repair must stop after a surfaced API repair failure instead of burning later waves'
 );
 assert.match(
     deferredSource,
@@ -154,13 +226,8 @@ assert.ok(
 );
 assert.match(
     replaceSource,
-    /previousEntry[\s\S]*!isTranslateFailureText\(previousEntry\.translatedText\)[\s\S]*isTranslateFailureText\(normalizedTranslated\)/,
-    'a failed deep repair must preserve the valid first-stage translation'
-);
-assert.match(
-    replaceSource,
-    /classifyTranslationReportEntry\(previousEntry\) === 'hard'[\s\S]*!isActualTranslationFailureReportEntry\(previousEntry\)[\s\S]*classifyTranslationReportEntry\(reportEntry\) === 'hard'[\s\S]*changed: false/,
-    'a deep repair that remains blocking must not replace the first-stage translation'
+    /if \(previousEntry\)[\s\S]*decideTranslateCandidateSafely[\s\S]*if \(!decision\.accept\)[\s\S]*changed: false/,
+    'deep repair must use the same monotonic candidate gate and preserve the previous best result on rejection'
 );
 
 console.log('translation-retry-workflow: two-stage bounds and retry glossary snapshot passed');

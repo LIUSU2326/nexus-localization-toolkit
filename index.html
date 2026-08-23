@@ -107,7 +107,7 @@
             </nav>
             
             <div class="sidebar-footer">
-                <p class="version">v1.0.0</p>
+                <p class="version">v1.5.3</p>
             </div>
         </aside>
         <div class="sidebar-resize-handle" id="sidebarResizeHandle" aria-hidden="true"></div>
@@ -158,7 +158,7 @@
                 </div>
             </div>
 
-            <div class="status-bar" id="statusBar" style="display: none;">
+            <div class="status-bar" id="statusBar" role="status" aria-live="polite" aria-atomic="true" style="display: none;">
                 <div class="status-icon" id="statusIcon"></div>
                 <div class="status-content">
                     <span class="status-text" id="statusText"></span>
@@ -699,7 +699,7 @@
                             </summary>
                             <div class="translate-collapsible-body">
                                 <div class="resource-check-list" id="translateProfileList"></div>
-                                <p class="setting-hint">多选通道会生成多组译文，便于对照。</p>
+                                <p class="setting-hint">多选通道会分担同一批任务；每条文本只保留一个当前最佳译文。</p>
                             </div>
                         </details>
                         <div class="translate-submit-plan" id="translateSubmitPlanHint"></div>
@@ -715,21 +715,9 @@
                                     导入翻译报告继续
                                 </label>
                                 <button class="action-btn secondary" id="translateReviewImportedProgressBtn" type="button" style="display: none;">按当前语言检查旧译文</button>
-                                <button class="action-btn secondary" id="translateRetrySuspiciousBtn" type="button" style="display: none;">只补译可疑行</button>
-                                <button class="action-btn secondary" id="translateCompactLongImportedBtn" type="button" style="display: none;">精简超长译文</button>
                                 <button class="action-btn secondary" id="translateClearImportedProgressBtn" type="button" style="display: none;">清除导入</button>
                             </div>
-                            <div class="translate-import-status" id="translateProgressImportStatus">导入旧报告后复用成功译文，仅处理失败、缺失和指定问题。</div>
-                            <details class="translate-collapsible-setting translate-import-filter-panel" id="translateImportIssueFilterPanel" style="display: none;">
-                                <summary class="translate-collapsible-summary">
-                                    <span>定向重译问题类型</span>
-                                    <small id="translateImportIssueFilterSummary">未选择时按可疑行处理</small>
-                                </summary>
-                                <div class="translate-collapsible-body translate-import-filter-body">
-                                    <p class="setting-hint">只勾选需要重新消耗 AI 的报告问题类型。例如只勾“混入中文”，就只重译这类行，其余译文继续复用。</p>
-                                    <div class="resource-check-list translate-issue-filter-list" id="translateImportIssueFilterList"></div>
-                                </div>
-                            </details>
+                            <div class="translate-import-status" id="translateProgressImportStatus" role="status" aria-live="polite">导入旧报告后自动复用可用译文，只处理高置信必须项；建议复核不会调用 AI。</div>
                         </div>
                         <details class="setting-row translate-collapsible-setting">
                             <summary class="translate-collapsible-summary">
@@ -755,38 +743,17 @@
                                     </span>
                                 </label>
                                 <label class="checkbox-setting" for="translatePostCheck">
-                                    <input type="checkbox" id="translatePostCheck" checked>
+                                    <input type="checkbox" id="translatePostCheck" checked disabled aria-disabled="true">
                                     <span>
-                                        <strong>翻译后自动轻量检测</strong>
-                                        <small>默认开启。检查术语、数字、占位符和标签，并写入结果表。</small>
-                                    </span>
-                                </label>
-                                <label class="checkbox-setting" for="translateFastBatchMode">
-                                    <input type="checkbox" id="translateFastBatchMode" checked>
-                                    <span>
-                                        <strong>快速批量翻译模式</strong>
-                                        <small>默认开启。第一轮不逐条 AI 修复，完成后再补跑硬问题。</small>
+                                        <strong>本地硬质检（始终开启）</strong>
+                                        <small>始终检查目标语言、术语、数字、占位符和标签，防止错误绕过交付门禁。</small>
                                     </span>
                                 </label>
                                 <label class="checkbox-setting" for="translateCompletenessCheck">
-                                    <input type="checkbox" id="translateCompletenessCheck" checked>
+                                    <input type="checkbox" id="translateCompletenessCheck" checked disabled aria-disabled="true">
                                     <span>
-                                        <strong>检查内容是否漏译</strong>
-                                        <small>默认开启。本地标记异常过短、分句缺失和繁简转换不完整。</small>
-                                    </span>
-                                </label>
-                                <label class="checkbox-setting" for="translateAutoCompactLong">
-                                    <input type="checkbox" id="translateAutoCompactLong">
-                                    <span>
-                                        <strong>超长译文二次精简</strong>
-                                        <small>默认关闭。会额外调用 AI，只对超长译文尝试压缩。</small>
-                                    </span>
-                                </label>
-                                <label class="checkbox-setting" for="translateAutoRetryMultiTarget">
-                                    <input type="checkbox" id="translateAutoRetryMultiTarget">
-                                    <span>
-                                        <strong>多语言自动重译硬问题</strong>
-                                        <small>默认关闭。每种语言完成后，只重新处理翻译失败、结果缺失和硬质检问题。</small>
+                                        <strong>内容完整性门禁（始终开启）</strong>
+                                        <small>始终检查异常过短、分句缺失和繁简转换不完整，避免补救时丢失语义。</small>
                                     </span>
                                 </label>
                             </div>
@@ -802,27 +769,6 @@
                                 <span>1 稳定</span>
                                 <span>10 高速</span>
                             </div>
-                        </div>
-                        <div class="translate-discount-guard-panel" id="translateDiscountGuardPanel">
-                            <div class="translate-discount-guard-head">
-                                <strong>折扣语义检查</strong>
-                                <button class="action-btn tiny secondary" id="translateDiscountCheckBtn" type="button">检查折扣问题</button>
-                            </div>
-                            <div class="translate-discount-guard-result" id="translateDiscountCheckStatus" aria-live="polite">
-                                <strong>尚未检查</strong>
-                            </div>
-                            <div class="translate-discount-guard-actions" id="translateDiscountCheckActions">
-                                <button class="action-btn primary" id="translateDiscountRepairBtn" type="button" style="display: none;">
-                                    一键修复并生成文件
-                                </button>
-                                <button class="action-btn secondary" id="translateDiscountDownloadBtn" type="button" style="display: none;">
-                                    下载修复后的文件
-                                </button>
-                            </div>
-                            <details class="translate-discount-guard-details" id="translateDiscountCheckDetails" style="display: none;">
-                                <summary id="translateDiscountCheckDetailsSummary">查看详情</summary>
-                                <div class="translate-discount-guard-details-body" id="translateDiscountCheckDetailsBody"></div>
-                            </details>
                         </div>
                         <button class="action-btn primary" id="translateBtn">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -912,24 +858,24 @@
                     <div class="download-panel" id="translateDownloadSection" style="display: none;">
                         <h3 id="translateDownloadTitle">处理结果</h3>
                         <div class="download-info">
-                            <span id="translatedCount">0</span> 条文本已翻译
+                            <span id="translatedCount">0</span> 条文本在本轮处理
                         </div>
                         <p class="translate-download-language-summary" id="translateDownloadLanguageSummary"></p>
                         <div class="translate-result-breakdown" id="translateResultBreakdown" style="display: none;" aria-label="翻译结果分类">
                             <div class="translate-result-metric pass">
-                                <span>质检通过</span>
+                                <span>质检通过（全文件）</span>
                                 <strong id="translateResultPassedCount">0</strong>
                             </div>
                             <div class="translate-result-metric failed">
-                                <span>翻译失败 / 未返回</span>
+                                <span>翻译失败或未返回</span>
                                 <strong id="translateResultFailedCount">0</strong>
                             </div>
                             <div class="translate-result-metric hard">
-                                <span>硬质检未通过</span>
+                                <span>必须修复（阻断交付）</span>
                                 <strong id="translateResultHardQaCount">0</strong>
                             </div>
                             <div class="translate-result-metric soft">
-                                <span>软性需确认</span>
+                                <span>建议复核（不阻断）</span>
                                 <strong id="translateResultSoftCount">0</strong>
                             </div>
                         </div>
@@ -946,14 +892,11 @@
                                 </svg>
                                 <span id="translateDownloadBtnLabel">下载交付版</span>
                             </button>
-                            <button class="action-btn secondary" id="translateRetryFailedBtn" style="display: none;">
-                                一键修复并生成交付版
-                            </button>
                             <button class="action-btn unverified" id="translateDownloadUnverifiedBtn" type="button" style="display: none;">
                                 导出当前译文（未验证）
                             </button>
                             <label class="action-btn secondary" id="translateRetryImportShortcutBtn" for="translateProgressImportInput" style="display: none;">
-                                导入报告继续处理
+                                导入报告开始新任务
                             </label>
                             <button class="action-btn secondary" id="translateDownloadFinalReportBtn" style="display: none;">
                                 下载翻译报告
@@ -2384,9 +2327,16 @@
     </div>
 
     <script src="discount-guard.js"></script>
+    <script src="language-quality-profiles.js"></script>
+    <script src="translation-format-token-policy.js"></script>
+    <script src="translation-number-policy.js"></script>
+    <script src="translation-repair-attempt-policy.js"></script>
     <script src="protected-ui-token-policy.js"></script>
     <script src="language-carryover-guard.js"></script>
     <script src="translation-delivery-policy.js"></script>
+    <script src="translation-strict-repair-policy.js"></script>
+    <script src="translation-issue-policy.js"></script>
+    <script src="translation-repair-batch-policy.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

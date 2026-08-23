@@ -1,0 +1,223 @@
+{
+  "schemaVersion": 1,
+  "fixtureVersion": "2026-08-23.3",
+  "description": "Anonymized real-world and synthetic gold cases for deterministic translation QA.",
+  "cases": [
+    {
+      "id": "ko-han-residual-hard",
+      "kind": "carryover",
+      "targetLang": "ko",
+      "source": "快去看看BOSS长什么样！",
+      "reference": "Hurry! I want to see what the Boss looks like!",
+      "target": "BOSS가什么样인지 빨리 보자!",
+      "expected": { "hard": true, "codes": ["korean_chinese_residual"] }
+    },
+    {
+      "id": "ko-short-natural-not-hard",
+      "kind": "issue",
+      "targetLang": "ko",
+      "entry": { "status": "success", "qaStatus": "需确认：疑似内容流失：译文明显短于参考译文" },
+      "expected": { "requiredIds": [], "reviewIds": ["completeness_review"] }
+    },
+    {
+      "id": "ko-single-english-ui-review",
+      "kind": "carryover",
+      "targetLang": "ko",
+      "source": "Boss",
+      "reference": "Boss",
+      "target": "Boss",
+      "expected": { "hard": false }
+    },
+    {
+      "id": "ko-full-english-copy-hard",
+      "kind": "carryover",
+      "targetLang": "ko",
+      "source": "报名规则说明",
+      "reference": "Registration guidelines for the event",
+      "target": "Registration guidelines for the event",
+      "expected": { "hard": true, "codes": ["english_reference_copy"] }
+    },
+    {
+      "id": "pl-same-script-word-review",
+      "kind": "carryover",
+      "targetLang": "pl",
+      "source": "人口暂时达到上限",
+      "reference": "Population limit reached",
+      "target": "Populacja osiągnęła limit",
+      "expected": { "hard": false }
+    },
+    {
+      "id": "pl-diacritic-token-not-english",
+      "kind": "carryover",
+      "targetLang": "pl",
+      "source": "打开地下城列表",
+      "reference": "Open the dungeon list",
+      "target": "Otwórz listę podziemi",
+      "expected": { "hard": false }
+    },
+    {
+      "id": "pl-proper-name-review",
+      "kind": "carryover",
+      "targetLang": "pl",
+      "source": "加布里尔",
+      "reference": "Gabriel",
+      "target": "Gabriel",
+      "expected": { "hard": false }
+    },
+    {
+      "id": "number-chinese-word-to-digit-review-only",
+      "kind": "number",
+      "targetLang": "ko",
+      "source": "七日签到，领节日好礼",
+      "target": "7일 연속 출석으로 축제 보상을 받으세요",
+      "expected": { "hardIssues": [], "reviewContains": ["目标新增 7"] }
+    },
+    {
+      "id": "number-korean-dotted-level-pass",
+      "kind": "number",
+      "targetLang": "ko",
+      "source": "升50级",
+      "target": "Lv.50로 업그레이드",
+      "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "number-period-adjacent-list-pass",
+      "kind": "number",
+      "targetLang": "pl",
+      "source": "步骤2",
+      "target": "Instrukcja.2",
+      "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "number-korean-dotted-level-change-hard",
+      "kind": "number",
+      "targetLang": "ko",
+      "source": "升50级",
+      "target": "Lv.40로 업그레이드",
+      "expected": { "hardContains": ["缺少 50"] }
+    },
+    {
+      "id": "number-increase-added-plus-pass",
+      "kind": "number",
+      "targetLang": "pl",
+      "source": "提升20%的伤害",
+      "target": "+20% obrażeń",
+      "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "number-time-localization-review-only",
+      "kind": "number",
+      "targetLang": "pl",
+      "source": "每天8点刷新",
+      "target": "Odświeżanie codziennie o 8:00",
+      "expected": { "hardIssues": [], "reviewContains": ["目标新增 0"] }
+    },
+    {
+      "id": "number-clock-hour-rendered-as-word-review-only",
+      "kind": "number",
+      "targetLang": "ko",
+      "source": "每日0点刷新",
+      "target": "매일 자정에 새로고침",
+      "expected": { "hardIssues": [], "reviewContains": ["时间数字 0"] }
+    },
+    {
+      "id": "number-format-attributes-owned-by-format-policy",
+      "kind": "number",
+      "targetLang": "ko",
+      "source": "<outline color=#48340a width=2>激活期间享受</outline>",
+      "target": "활성화 기간 중 혜택 적용",
+      "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "number-repeated-constraint-collapse-review",
+      "kind": "number",
+      "targetLang": "ko",
+      "source": "任意6及6以上难度怪物",
+      "target": "난이도 6 이상 몬스터",
+      "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "number-magnitude-change-hard",
+      "kind": "number",
+      "targetLang": "ko",
+      "source": "造成220%的伤害",
+      "target": "240% 피해를 줍니다",
+      "expected": { "hardContains": ["缺少 220%"] }
+    },
+    {
+      "id": "number-sign-reversal-hard",
+      "kind": "number",
+      "targetLang": "pl",
+      "source": "属性+20%",
+      "target": "Atrybut -20%",
+      "expected": { "hardContains": ["数字符号不一致"] }
+    },
+    {
+      "id": "number-range-reversal-hard",
+      "kind": "number",
+      "targetLang": "en",
+      "source": "范围1至2",
+      "target": "Range 2 to 1",
+      "expected": { "hardContains": ["数字区间方向不一致"] }
+    },
+    {
+      "id": "format-percent-polish-word-pass",
+      "kind": "format",
+      "source": "镶嵌后有10%的概率触发",
+      "target": "Po osadzeniu: 10% szans na aktywację",
+      "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "format-percent-korean-latin-word-pass",
+      "kind": "format",
+      "source": "提升11%的最终攻击",
+      "target": "최종 ATK를 11% final 증가",
+      "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "format-source-printf-missing-hard",
+      "kind": "format",
+      "source": "玩家%s已上线",
+      "target": "Gracz jest online",
+      "expected": { "hardContains": ["缺少格式/占位符：%s"] }
+    },
+    {
+      "id": "format-extra-printf-hard",
+      "kind": "format",
+      "source": "可收购数量：",
+      "target": "Liczba do zebrania: %s",
+      "expected": { "hardContains": ["多出格式/占位符：%s"] }
+    },
+    {
+      "id": "format-natural-bracket-label-review",
+      "kind": "format",
+      "source": "流血状态",
+      "target": "[Krwotok]",
+      "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "format-html-missing-hard",
+      "kind": "format",
+      "source": "第一行<br/>第二行",
+      "target": "Pierwsza linia Druga linia",
+      "expected": { "hardContains": ["缺少格式/占位符：<br/>"] }
+    },
+    {
+      "id": "format-named-placeholder-reorder-pass",
+      "kind": "format",
+      "source": "{player}获得{count}奖励",
+      "target": "Nagrody {count} otrzymuje {player}",
+      "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "attempt-reject-no-substitute",
+      "kind": "attempt",
+      "expected": { "primaryClaims": 1, "contentCandidates": 1, "substitutes": 0, "terminal": "rejected" }
+    },
+    {
+      "id": "attempt-no-content-one-substitute",
+      "kind": "attempt",
+      "expected": { "primaryClaims": 1, "contentCandidates": 0, "substitutes": 1, "terminal": "no_content" }
+    }
+  ]
+}
