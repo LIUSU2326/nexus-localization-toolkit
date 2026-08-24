@@ -108,6 +108,9 @@ const {
     'getTranslationReportIssueGroups',
     'isActualTranslationFailureReportEntry',
     'classifyTranslationReportEntry',
+    'isTranslationRepairLifecycleFrozen',
+    'translationRunReport',
+    'targetLangSelect',
     `${issueSummarySource}
     ${formatIssueSummarySource}
     return {
@@ -124,7 +127,10 @@ const {
     entry => entry.executionOutcome === 'request_failed',
     entry => ['no_content', 'not_processed', 'import_missing'].includes(entry.executionOutcome)
         ? 'missing'
-        : 'hard'
+        : 'hard',
+    () => false,
+    null,
+    { value: 'pl' }
 );
 
 const { getImportedIssueRetryPreview } = new Function(
@@ -132,6 +138,8 @@ const { getImportedIssueRetryPreview } = new Function(
     'isHardTranslationReportEntry',
     'isTranslateFailureText',
     'classifyTranslationReportEntry',
+    'isTranslationRepairLifecycleFrozen',
+    'targetLangSelect',
     `${normalizeKeySource}
     ${dedupeKeySource}
     ${candidateRankSource}
@@ -154,7 +162,9 @@ const { getImportedIssueRetryPreview } = new Function(
         if (entry?.status === 'missing' || !entry?.translatedText) return 'missing';
         return globalThis.NexusTranslationIssuePolicy.classifyEntry(entry)
             .some(finding => finding.tier === 'required') ? 'hard' : 'soft';
-    }
+    },
+    entry => entry?.repairLifecycle?.terminalDecision === 'detector_conflict',
+    { value: 'pl' }
 );
 
 function makeTask(index, overrides = {}) {
@@ -374,6 +384,35 @@ function makeReportEntry(task, overrides = {}) {
 }
 
 {
+    const frozenMissing = mergeImportedTranslationEntriesWithCurrentTasks([], [makeTask(0)])
+        .reportMissingEntries[0];
+    frozenMissing.repairLifecycle = {
+        terminalDecision: 'detector_conflict',
+        contextSignature: 'stable-context',
+        findingFingerprint: 'stable-finding'
+    };
+    const actionableMissing = mergeImportedTranslationEntriesWithCurrentTasks([], [makeTask(1)])
+        .reportMissingEntries[0];
+    const preview = getImportedIssueRetryPreview({ entries: [frozenMissing, actionableMissing] });
+    assert.equal(preview.entries.length, 1, 'an unchanged detector conflict must not be scheduled again');
+    assert.equal(preview.entries[0].taskKey, actionableMissing.taskKey);
+    assert.equal(preview.plan.terminalBlockedCount, 1);
+    assert.equal(preview.plan.blockingCount, 2, 'frozen conflicts still block verified delivery');
+    assert.equal(preview.plan.verified, false);
+    assert.equal(
+        preview.plan.reusableEntries.includes(frozenMissing),
+        false,
+        'a frozen terminal blocker must not also appear in the reusable translation set'
+    );
+    const reusableKeys = new Set(preview.plan.reusableEntries.map(entry => entry.taskKey));
+    assert.equal(
+        preview.plan.terminalBlockingEntries.some(entry => reusableKeys.has(entry.taskKey)),
+        false,
+        'terminal and reusable continuation-plan sets must be disjoint'
+    );
+}
+
+{
     const uncoveredTask = makeTask(0);
     const mixedChineseTask = makeTask(1);
     const missingEntry = mergeImportedTranslationEntriesWithCurrentTasks([], [uncoveredTask])
@@ -455,10 +494,16 @@ function makeReportEntry(task, overrides = {}) {
     const getTranslationReportDisplayStatus = new Function(
         'classifyTranslationReportEntry',
         'isActualTranslationFailureReportEntry',
+        'isTranslationRepairLifecycleFrozen',
+        'translationRunReport',
+        'targetLangSelect',
         `${reportDisplayStatusSource}; return getTranslationReportDisplayStatus;`
     )(
         () => 'missing',
-        () => false
+        () => false,
+        () => false,
+        null,
+        { value: 'pl' }
     );
     assert.equal(
         getTranslationReportDisplayStatus({ executionOutcome: 'no_content', candidateReturned: false }),

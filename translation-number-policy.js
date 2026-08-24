@@ -2,7 +2,7 @@
 (function installNexusTranslationNumberPolicy(root) {
     'use strict';
 
-    const POLICY_VERSION = '2.2.0';
+    const POLICY_VERSION = '2.3.0';
     const profiles = root.NexusLanguageQualityProfiles;
     const formatTokens = root.NexusTranslationFormatTokenPolicy;
     // Percent signs can be written before or after the magnitude depending on
@@ -86,6 +86,7 @@
             const bodies = codeLike
                 ? [unsigned.replace(/[\s\u00a0]/g, '')]
                 : getBodyCandidates(unsigned, role, targetLang);
+            const suffixText = input.slice(match.index + raw.length, match.index + raw.length + 4);
             details.push({
                 raw,
                 bodies,
@@ -93,6 +94,8 @@
                 sign,
                 comparator,
                 percent,
+                structural: codeLike,
+                semanticScale: role === 'source' && /^\s*(?:万|萬|亿|億|兆|年|月|日)/u.test(suffixText),
                 reviewOnlyWhenMissing: role === 'source' && CLOCK_HOUR_SUFFIX_PATTERN.test(input.slice(match.index + raw.length)),
                 index: match.index,
                 end: match.index + raw.length
@@ -153,8 +156,27 @@
         const semanticReviewRequirements = matching.missing.filter(token =>
             token.reviewOnlyWhenMissing && !collapsedDuplicateRequirements.includes(token)
         );
-        const hardMissing = matching.missing.filter(token =>
+        const unmatchedTargets = targetTokens.filter((_token, index) => !matching.used.has(index));
+        const unresolvedMissing = matching.missing.filter(token =>
             !collapsedDuplicateRequirements.includes(token) && !semanticReviewRequirements.includes(token)
+        );
+        const deterministicMagnitudeChanges = [];
+        if (unresolvedMissing.length === 1 && unmatchedTargets.length === 1) {
+            const source = unresolvedMissing[0];
+            const target = unmatchedTargets[0];
+            const percentRepresentationChanged = source.percent !== target.percent;
+            if (!source.semanticScale && !percentRepresentationChanged) {
+                deterministicMagnitudeChanges.push({ source, target });
+            }
+        }
+        deterministicMagnitudeChanges.forEach(({ source, target }) => {
+            hardIssues.push(`数字数值不一致：${source.raw} → ${target.raw}`);
+        });
+        const hardMissing = unresolvedMissing.filter(token =>
+            token.structural && !deterministicMagnitudeChanges.some(change => change.source === token)
+        );
+        const uncertainMissing = unresolvedMissing.filter(token =>
+            !hardMissing.includes(token) && !deterministicMagnitudeChanges.some(change => change.source === token)
         );
         if (hardMissing.length) {
             hardIssues.push(`数字不一致：缺少 ${hardMissing.map(token => token.magnitudeKeys[0]).join(', ')}`);
@@ -165,7 +187,11 @@
         if (semanticReviewRequirements.length) {
             reviewIssues.push(`数字表达需确认：时间数字 ${semanticReviewRequirements.map(token => token.magnitudeKeys[0]).join(', ')} 可能使用了文字表达`);
         }
-        const extras = targetTokens.filter((_token, index) => !matching.used.has(index));
+        if (uncertainMissing.length) {
+            reviewIssues.push(`数字表达需确认：原文数字 ${uncertainMissing.map(token => token.magnitudeKeys[0]).join(', ')} 可能使用了文字、日期或本地单位表达`);
+        }
+        const deterministicTargetIndexes = new Set(deterministicMagnitudeChanges.map(change => unmatchedTargets.indexOf(change.target)));
+        const extras = unmatchedTargets.filter((_token, index) => !deterministicTargetIndexes.has(index));
         if (extras.length) {
             reviewIssues.push(`数字表达需确认：目标新增 ${extras.map(token => token.magnitudeKeys[0]).join(', ')}`);
         }

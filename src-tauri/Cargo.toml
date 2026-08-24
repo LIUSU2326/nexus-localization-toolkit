@@ -1,6 +1,6 @@
 [package]
 name = "nexus-localization-toolkit"
-version = "1.5.6"
+version = "1.5.7"
 description = "TransMate AI desktop assistant for game localization workflows."
 authors = ["LIUSU2326"]
 edition = "2021"

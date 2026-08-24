@@ -4,10 +4,166 @@ await import('../translation-repair-attempt-policy.js');
 
 const policy = globalThis.NexusTranslationRepairAttemptPolicy;
 assert.ok(policy, 'NexusTranslationRepairAttemptPolicy should be installed');
-assert.equal(policy.POLICY_VERSION, '1.1.0');
+assert.equal(policy.POLICY_VERSION, '1.2.0');
+assert.equal(policy.PERSISTED_LIFECYCLE_VERSION, '1.0.0');
 assert.equal(policy.PRIMARY_BATCH, 'primary_batch');
 assert.equal(policy.PRIMARY_SINGLE, 'primary_single');
 assert.equal(policy.NO_CONTENT_SUBSTITUTE, 'no_content_substitute');
+
+{
+    const lifecycle = policy.createPersistedLifecycle({
+        contextSignature: 'context-v1',
+        findingFingerprint: 'format-token:missing:{player}',
+        terminalDecision: 'detector-conflict',
+        reason: 'candidate rejected without a net deterministic improvement',
+        candidateSnapshot: {
+            text: 'Bonjour {player}',
+            status: ' CANDIDATE-REJECTED ',
+            source: ' targeted repair '
+        },
+        candidateQa: {
+            candidateReturned: true,
+            candidateDecision: 'REJECTED',
+            candidateRejectReason: 'selected_issue_not_reduced',
+            qaStatus: '阻断：混入中文',
+            previousIssueIds: ['missing_translation', 'format_token', 'format_token'],
+            candidateIssueIds: ['format_token'],
+            introducedHardIssueIds: [],
+            resolvedIssueIds: ['missing_translation']
+        },
+        contentCandidates: 1,
+        noContentSubstitutes: 0
+    });
+
+    assert.deepEqual(lifecycle, {
+        version: policy.PERSISTED_LIFECYCLE_VERSION,
+        contextSignature: 'context-v1',
+        findingFingerprint: 'format-token:missing:{player}',
+        terminalDecision: policy.TERMINAL_DECISIONS.DETECTOR_CONFLICT,
+        reason: 'candidate rejected without a net deterministic improvement',
+        candidateSnapshot: {
+            text: 'Bonjour {player}',
+            status: 'candidate_rejected',
+            source: 'targeted_repair'
+        },
+        candidateQa: {
+            candidateReturned: true,
+            candidateDecision: 'rejected',
+            candidateRejectReason: 'selected_issue_not_reduced',
+            qaStatus: '阻断：混入中文',
+            previousIssueIds: ['missing_translation', 'format_token'],
+            candidateIssueIds: ['format_token'],
+            introducedHardIssueIds: [],
+            resolvedIssueIds: ['missing_translation']
+        },
+        contentCandidates: 1,
+        noContentSubstitutes: 0
+    });
+    assert.equal(Object.isFrozen(lifecycle), true);
+    assert.equal(Object.isFrozen(lifecycle.candidateSnapshot), true);
+    assert.equal(Object.isFrozen(lifecycle.candidateQa.previousIssueIds), true);
+    assert.equal(policy.isPersistedLifecycleFrozen(lifecycle, {
+        contextSignature: 'context-v1',
+        findingFingerprint: 'format-token:missing:{player}'
+    }), true, 'the same terminal context and finding set must not request another candidate');
+    assert.equal(policy.isPersistedLifecycleFrozen(lifecycle, {
+        contextSignature: 'context-v2',
+        findingFingerprint: 'format-token:missing:{player}'
+    }), false, 'a changed translation context must be eligible for validation again');
+    assert.equal(policy.isPersistedLifecycleFrozen(lifecycle, {
+        contextSignature: 'context-v1',
+        findingFingerprint: 'number:mismatch:10'
+    }), false, 'a changed finding fingerprint must be eligible for validation again when supplied');
+    assert.equal(policy.isPersistedLifecycleFrozen(lifecycle, {
+        contextSignature: 'context-v1'
+    }), true, 'callers may use the complete context signature without a separate finding fingerprint');
+}
+
+{
+    const longSignature = `  context-${'x'.repeat(2200)}  `;
+    const longReason = `reason-${'r'.repeat(700)}`;
+    const longText = `${'t'.repeat(33000)}\u0000discarded-tail`;
+    const issueIds = Array.from({ length: 80 }, (_, index) => ` issue-${index} `);
+    const sanitized = policy.sanitizePersistedLifecycle({
+        version: 'future-or-untrusted',
+        contextSignature: `${longSignature}\u0000`,
+        findingFingerprint: 42,
+        terminalDecision: 'unknown-terminal',
+        reason: `${longReason}\u0000`,
+        candidate: {
+            candidateText: longText,
+            status: ' Returned Content\u0000 ',
+            source: { untrusted: true }
+        },
+        candidateQA: {
+            candidateReturned: 'true',
+            candidateDecision: 'invented',
+            candidateRejectReason: `${longReason}\u0000`,
+            qaStatus: `${'q'.repeat(5000)}\u0000`,
+            previousIssueIds: [...issueIds, 'issue-0', null, { unsafe: true }]
+        },
+        contentCandidates: 999,
+        noContentSubstitutes: -3,
+        unexpected: 'must not persist'
+    });
+
+    assert.equal(sanitized.version, policy.PERSISTED_LIFECYCLE_VERSION);
+    assert.equal(sanitized.contextSignature.length, 2048, 'context signatures are bounded');
+    assert.equal(sanitized.contextSignature.includes('\u0000'), false);
+    assert.equal(sanitized.findingFingerprint, '42');
+    assert.equal(sanitized.terminalDecision, '', 'unknown terminal states cannot freeze a cell');
+    assert.equal(sanitized.reason.length, 512);
+    assert.ok(
+        sanitized.candidateSnapshot.text.length > 0 && sanitized.candidateSnapshot.text.length < 32767,
+        'candidate snapshots must leave room for lifecycle metadata inside one Excel cell'
+    );
+    assert.equal(sanitized.candidateSnapshot.text.includes('\u0000'), false);
+    assert.equal(sanitized.candidateSnapshot.status, 'returned_content');
+    assert.equal(sanitized.candidateSnapshot.source, '', 'objects are not stringified into persisted fields');
+    assert.equal(sanitized.candidateQa.candidateReturned, null);
+    assert.equal(sanitized.candidateQa.candidateDecision, '');
+    assert.equal(sanitized.candidateQa.candidateRejectReason.length, 512);
+    assert.equal(sanitized.candidateQa.qaStatus.length, 4096);
+    assert.equal(sanitized.candidateQa.previousIssueIds.length, 64);
+    assert.equal(sanitized.contentCandidates, 2, 'persisted content candidates respect the global ceiling');
+    assert.equal(sanitized.noContentSubstitutes, 0);
+    assert.equal(Object.hasOwn(sanitized, 'unexpected'), false);
+    assert.equal(policy.isPersistedLifecycleFrozen(sanitized, {
+        contextSignature: sanitized.contextSignature
+    }), false);
+    assert.deepEqual(policy.sanitizePersistedLifecycle(null), policy.createPersistedLifecycle());
+
+    const excelCellJson = JSON.stringify(sanitized);
+    assert.ok(
+        excelCellJson.length <= 32767,
+        `serialized repair lifecycle must fit one Excel cell, got ${excelCellJson.length} characters`
+    );
+    const roundTripped = policy.sanitizePersistedLifecycle(JSON.parse(excelCellJson));
+    assert.equal(roundTripped.candidateSnapshot.text, sanitized.candidateSnapshot.text);
+    assert.equal(roundTripped.contextSignature, sanitized.contextSignature);
+    assert.equal(roundTripped.findingFingerprint, sanitized.findingFingerprint);
+}
+
+{
+    for (const terminalDecision of Object.values(policy.TERMINAL_DECISIONS)) {
+        const lifecycle = policy.createPersistedLifecycle({
+            contextSignature: 'stable-context',
+            findingFingerprint: '',
+            terminalDecision
+        });
+        assert.equal(policy.isPersistedLifecycleFrozen(lifecycle, {
+            contextSignature: 'stable-context',
+            findingFingerprint: ''
+        }), true, `${terminalDecision} is terminal in an unchanged context`);
+    }
+    assert.equal(policy.isPersistedLifecycleFrozen({
+        contextSignature: 'stable-context',
+        terminalDecision: 'accepted'
+    }, { contextSignature: '' }), false, 'an empty current context cannot freeze persisted work');
+    assert.equal(policy.isPersistedLifecycleFrozen(null, {
+        contextSignature: 'stable-context'
+    }), false);
+}
 
 {
     const ledger = policy.createLedger();
@@ -124,4 +280,4 @@ assert.equal(policy.NO_CONTENT_SUBSTITUTE, 'no_content_substitute');
     assert.equal(Object.isFrozen(summary.terminals), true);
 }
 
-console.log('translation-repair-attempt-policy: single candidate, no-content substitute, terminal lock, commit, and summaries passed');
+console.log('translation-repair-attempt-policy: persistent lifecycle freeze, sanitization, single candidate, no-content substitute, terminal lock, commit, and summaries passed');

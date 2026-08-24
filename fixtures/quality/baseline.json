@@ -1,8 +1,9 @@
 {
-  "fixtureVersion": "2026-08-23.3",
+  "fixtureVersion": "2026-08-24.2",
   "maxFailures": 0,
   "maxHardFalsePositives": 0,
   "maxAcceptedCandidateNewHardIssues": 0,
   "maxContentCandidatesPerCell": 1,
-  "maxPerformanceRegressionPercent": 10
+  "maxPerformanceRegressionPercent": 10,
+  "replayDurationMs": 5000
 }

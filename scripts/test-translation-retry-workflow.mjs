@@ -222,4 +222,234 @@ assert.match(
     'deep repair must use the same monotonic candidate gate and preserve the previous best result on rejection'
 );
 
+function evaluateRejectedCandidateWithProviderOutcome(providerOutcome) {
+    return new Function('providerOutcome', `
+        const runId = 'regression-run';
+        const targetLang = 'tr';
+        const retryTasks = [{}];
+        const options = { selectedIssueIds: ['mixed_chinese'] };
+        const continuousRepairEnabled = false;
+        const continuousRepairPolicy = { shouldAcceptMixedChineseCandidate: () => false };
+        const previousEntry = {
+            taskKey: 'cell-1',
+            status: 'qa_failed',
+            sourceText: '原文',
+            translatedText: '保留旧译文',
+            qaStatus: '需确认：混入中文',
+            profile: 'Previous',
+            model: 'previous-model'
+        };
+        const task = {
+            taskKey: 'cell-1',
+            text: '原文',
+            referenceText: 'Reference',
+            rowIndex: 1,
+            colIndex: 2,
+            profile: { name: 'Repair', model: 'repair-model' },
+            repairTargetIssueIds: ['mixed_chinese']
+        };
+        let translationRunReport = { entries: [previousEntry] };
+        const translationProgressTasks = new Map([['cell-1', previousEntry]]);
+        const throwIfTranslationCancelled = () => {};
+        const getCompactModelLabel = profile => profile?.name || profile?.model || '';
+        const makeTranslateFailureText = (text, reason) => '[翻译失败：' + reason + '] ' + text;
+        const normalizeTranslateResultText = value => String(value || '');
+        const summarizeTranslationQa = () => '需确认：混入中文';
+        const buildTranslationReportEntry = (_task, translated, qaStatus) => ({
+            taskKey: _task.taskKey,
+            status: 'qa_failed',
+            sourceText: _task.text,
+            referenceText: _task.referenceText,
+            translatedText: translated,
+            qaStatus,
+            profile: 'Repair',
+            model: 'repair-model'
+        });
+        const decideTranslateCandidateSafely = () => ({
+            accept: false,
+            candidateReturned: true,
+            candidateDecision: 'rejected',
+            candidateRejectReason: 'selected_issue_not_reduced',
+            reason: 'selected_issue_not_reduced',
+            previousIssueIds: ['mixed_chinese'],
+            candidateIssueIds: ['mixed_chinese'],
+            introducedHardIssueIds: [],
+            resolvedIssueIds: []
+        });
+        const classifyTranslationReportEntry = () => 'hard';
+        const createTranslationRepairLifecycle = (_previous, candidate, audit, lifecycleOptions) => ({
+            terminalDecision: lifecycleOptions.terminalDecision,
+            candidateSnapshot: { text: candidate.translatedText },
+            candidateQa: audit
+        });
+        const getTranslateOutputTaskKey = value => value.taskKey;
+        const getTranslateOutputSlotId = () => 'primary';
+        ${evaluateSource}
+        return evaluateTranslateResultCandidate(
+            task,
+            'Aday metni',
+            '需确认：混入中文',
+            { candidateReturned: true, executionOutcome: providerOutcome }
+        );
+    `)(providerOutcome);
+}
+
+for (const providerOutcome of ['accepted', 'reused']) {
+    const evaluation = evaluateRejectedCandidateWithProviderOutcome(providerOutcome);
+    assert.equal(evaluation.accepted, false);
+    assert.equal(evaluation.reportEntry.candidateReturned, true);
+    assert.equal(
+        evaluation.reportEntry.executionOutcome,
+        'candidate_rejected',
+        `a ${providerOutcome} provider outcome must not override the final candidate-gate rejection`
+    );
+    assert.equal(evaluation.reportEntry.resultOrigin, 'previous');
+}
+
+async function runInlineTransportFailureRegression() {
+    return new Function('prepareSource', 'commitSource', `
+        return (async () => {
+            const task = {
+                taskKey: 'timeout-cell',
+                text: '原文',
+                rowIndex: 1,
+                colIndex: 2,
+                glossaryTerms: [],
+                profile: { name: 'Repair', model: 'repair-model' }
+            };
+            const targetLang = 'tr';
+            const sourceLang = 'zh-CN';
+            const runId = 'transport-regression';
+            const runSignal = null;
+            const currentProject = { rules: '' };
+            const options = { selectedIssueIds: [] };
+            const deferAutoQaRepairForRun = false;
+            const TRANSLATION_QA_REPAIR_MAX_ATTEMPTS = 1;
+            const TRANSLATION_PROGRESS_SAVE_INTERVAL = 999;
+            const retryTasks = null;
+            const totalTasks = 1;
+            const runLanguageLabel = '土耳其语';
+            const applyLocalTranslationFixes = (_source, value) => value;
+            const summarizeTranslationQa = () => '需确认：混入中文';
+            const isTranslateFailureText = () => false;
+            const isTranslationQaPassed = () => false;
+            const shouldAutoRepairTranslationQa = () => true;
+            const getTranslationRequestLimiter = () => ({ getActiveCount: () => 0 });
+            const getRepairAttemptCellId = value => value.taskKey;
+            const repairAttemptLedger = {
+                claimPrimarySingle: () => true,
+                get: () => ({ terminal: '', contentCandidates: 0 }),
+                recordPhysicalRequest: () => true,
+                recordCandidate: () => true,
+                settle: () => true,
+                peek: () => null,
+                markCommitted: () => true
+            };
+            const recordTranslateQaRepairAttempt = () => {};
+            const updateTranslateChannelProgress = () => {};
+            const timeoutError = Object.assign(new Error('request timeout'), { isTimeout: true });
+            const repairTranslationWithRetry = async (...args) => {
+                const callbacks = args.at(-1);
+                callbacks.onFailure(timeoutError);
+                return args[1];
+            };
+            const hasTranslationQaRepairChanged = () => false;
+            const shouldAttemptNextTranslationQaRepair = () => false;
+            const translationIssuePolicy = {
+                normalizeSelectedIssueIds: values => new Set(values),
+                buildTargetedQaStatus: value => value
+            };
+            const getTranslationReportStatus = () => 'qa_failed';
+            const decideTranslateCandidateSafely = () => ({
+                accept: false,
+                candidateReturned: true,
+                candidateDecision: 'rejected',
+                candidateRejectReason: 'hard_findings_not_reduced',
+                reason: 'hard_findings_not_reduced',
+                previousIssueIds: ['mixed_chinese'],
+                candidateIssueIds: ['mixed_chinese'],
+                introducedHardIssueIds: [],
+                resolvedIssueIds: []
+            });
+            const sanitizeTranslationCandidateAudit = value => ({
+                candidateReturned: value.candidateReturned,
+                candidateDecision: value.candidateDecision,
+                candidateRejectReason: value.candidateRejectReason,
+                previousIssueIds: value.previousIssueIds || [],
+                candidateIssueIds: value.candidateIssueIds || [],
+                introducedHardIssueIds: value.introducedHardIssueIds || [],
+                resolvedIssueIds: value.resolvedIssueIds || []
+            });
+            const createTranslationRepairLifecycle = (_previous, candidate, audit, lifecycleOptions) => ({
+                terminalDecision: lifecycleOptions.terminalDecision,
+                reason: lifecycleOptions.reason,
+                candidateSnapshot: { text: candidate.translatedText || '' },
+                candidateQa: audit
+            });
+            const classifyTranslateExecutionError = error => error?.isTimeout ? 'timeout' : 'request_failed';
+            const summarizeTranslateError = error => error?.message || 'request failed';
+            const getCompactModelLabel = profile => profile?.name || '';
+
+            let translationRunReport = { entries: [] };
+            const translationProgressTasks = new Map();
+            let successCount = 0;
+            let failCount = 0;
+            let runFailCount = 0;
+            let runSuccessCount = 0;
+            let translateCount = 0;
+            let completedCount = 0;
+            const throwIfTranslationCancelled = () => {};
+            const countTranslationProgressEntries = () => ({ successCount: 0, failCount: 0 });
+            const deleteTranslationTaskProgress = () => {};
+            const writeTranslationResult = () => {};
+            const recordTranslateTaskCompletion = () => {};
+            const compactTranslationProgressEntry = entry => entry;
+            const queueTranslationTaskProgress = () => {};
+            const rememberSuccessfulTranslation = () => {};
+            const shouldRenderTranslationPreview = () => false;
+            const updateTranslateProgress = () => {};
+            const recordTranslateChannelResult = () => {};
+            const updateTranslateRunSummary = () => {};
+            const saveCurrentTranslationProgress = () => {};
+            const updateTranslationRunActions = () => {};
+
+            eval(prepareSource);
+            eval(commitSource);
+            const prepared = await prepareTranslationForCommit(task, 'Eski ceviri', {
+                deferAutoQaRepair: false,
+                maxRepairAttempts: 1
+            });
+            const reportEntries = translationRunReport.entries;
+            const baseReportEntry = {
+                taskKey: task.taskKey,
+                status: 'qa_failed',
+                translatedText: prepared.translated,
+                qaStatus: prepared.qaStatus,
+                executionOutcome: 'accepted',
+                resultOrigin: 'candidate',
+                candidateReturned: true,
+                candidateDecision: 'accepted'
+            };
+            commitTranslateResult(task, prepared.translated, prepared.qaStatus, {
+                previousTaskKeys: new Set(),
+                existingReportIndex: -1,
+                reportEntries,
+                reportEntry: baseReportEntry
+            });
+            return translationRunReport.entries[0];
+        })();
+    `)(prepareSource, commitSource);
+}
+
+{
+    const entry = await runInlineTransportFailureRegression();
+    assert.equal(entry.candidateReturned, false, 'a timed-out repair cannot be recorded as a returned candidate');
+    assert.equal(entry.candidateDecision, 'not_returned');
+    assert.ok(
+        ['timeout', 'request_failed'].includes(entry.executionOutcome),
+        `a timed-out repair must remain a transport failure, got ${entry.executionOutcome}`
+    );
+    assert.notEqual(entry.executionOutcome, 'candidate_rejected');
+}
+
 console.log('translation-retry-workflow: two-stage bounds and retry glossary snapshot passed');

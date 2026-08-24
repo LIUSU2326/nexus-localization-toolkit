@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "fixtureVersion": "2026-08-24.1",
+  "fixtureVersion": "2026-08-24.2",
   "description": "Anonymized real-world and synthetic gold cases for deterministic translation QA.",
   "cases": [
     {
@@ -94,7 +94,7 @@
       "targetLang": "ko",
       "source": "升50级",
       "target": "Lv.40로 업그레이드",
-      "expected": { "hardContains": ["缺少 50"] }
+      "expected": { "hardContains": ["数字数值不一致"] }
     },
     {
       "id": "number-increase-added-plus-pass",
@@ -118,7 +118,7 @@
       "targetLang": "tr",
       "source": "学习后，守护兽提供的属性增加5%",
       "target": "Öğrenildiğinde özellikler %6 artar",
-      "expected": { "hardContains": ["缺少 5%"] }
+      "expected": { "hardContains": ["数字数值不一致"] }
     },
     {
       "id": "number-time-localization-review-only",
@@ -158,7 +158,7 @@
       "targetLang": "ko",
       "source": "造成220%的伤害",
       "target": "240% 피해를 줍니다",
-      "expected": { "hardContains": ["缺少 220%"] }
+      "expected": { "hardContains": ["数字数值不一致"] }
     },
     {
       "id": "number-sign-reversal-hard",
@@ -167,6 +167,30 @@
       "source": "属性+20%",
       "target": "Atrybut -20%",
       "expected": { "hardContains": ["数字符号不一致"] }
+    },
+    {
+      "id": "number-digit-to-word-review-only",
+      "kind": "number",
+      "targetLang": "pl",
+      "source": "仅限1次",
+      "target": "Tylko raz",
+      "expected": { "hardIssues": [], "reviewContains": ["可能使用了文字"] }
+    },
+    {
+      "id": "number-month-name-review-only",
+      "kind": "number",
+      "targetLang": "pl",
+      "source": "1月22日开启",
+      "target": "Otwarcie 22 stycznia",
+      "expected": { "hardIssues": [], "reviewContains": ["可能使用了文字、日期或本地单位表达"] }
+    },
+    {
+      "id": "number-large-scale-localization-review-only",
+      "kind": "number",
+      "targetLang": "pl",
+      "source": "价值25亿金币",
+      "target": "Wartość 2,5 miliarda złota",
+      "expected": { "hardIssues": [], "reviewContains": ["可能使用了文字、日期或本地单位表达"] }
     },
     {
       "id": "number-range-reversal-hard",
@@ -224,6 +248,42 @@
       "source": "{player}获得{count}奖励",
       "target": "Nagrody {count} otrzymuje {player}",
       "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "format-source-reference-conflict-review-only",
+      "kind": "format_reference",
+      "source": "%级",
+      "reference": "Lv.%s",
+      "target": "Lv.%s",
+      "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "candidate-missing-to-project-warning-accept",
+      "kind": "candidate",
+      "previous": { "text": "", "status": "missing", "qaStatus": "未返回结果" },
+      "candidate": { "text": "Pokonaj bossa", "status": "success", "qaStatus": "需确认：受保护UI标记缺失或被翻译：BOSS" },
+      "expected": { "accept": true, "reason": "accepted_missing_replacement" }
+    },
+    {
+      "id": "candidate-missing-to-real-chinese-residue-reject",
+      "kind": "candidate",
+      "previous": { "text": "", "status": "missing", "qaStatus": "未返回结果" },
+      "candidate": { "text": "Polskie tłumaczenie 残留", "status": "qa_failed", "qaStatus": "需确认：目标波兰文中混入中文" },
+      "expected": { "accept": false, "reason": "missing_replacement_not_improved" }
+    },
+    {
+      "id": "lifecycle-same-context-freezes-changed-context-reopens",
+      "kind": "lifecycle",
+      "lifecycle": {
+        "contextSignature": "context-v1",
+        "findingFingerprint": "finding-v1",
+        "terminalDecision": "detector_conflict",
+        "contentCandidates": 1,
+        "candidateSnapshot": { "text": "candidate", "status": "qa_failed", "source": "fixture" }
+      },
+      "sameContext": { "contextSignature": "context-v1", "findingFingerprint": "finding-v1" },
+      "changedContext": { "contextSignature": "context-v2", "findingFingerprint": "finding-v1" },
+      "expected": { "frozenSameContext": true, "frozenChangedContext": false }
     },
     {
       "id": "attempt-reject-no-substitute",

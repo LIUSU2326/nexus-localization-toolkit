@@ -52,24 +52,24 @@ for (const [source, target, targetLang] of [
 }
 
 assert.ok(
-    evaluate('升50级', 'Lv.40로 업그레이드', 'ko').hardIssues.some(issue => issue.includes('缺少 50')),
+    evaluate('升50级', 'Lv.40로 업그레이드', 'ko').hardIssues.some(issue => issue.includes('数字数值不一致')),
     'recognizing a dotted UI-level number must still detect a real magnitude mismatch'
 );
 assert.ok(
-    evaluate('步骤2', 'Instrukcja.3', 'pl').hardIssues.some(issue => issue.includes('缺少 2')),
+    evaluate('步骤2', 'Instrukcja.3', 'pl').hardIssues.some(issue => issue.includes('数字数值不一致')),
     'recognizing punctuation-adjacent list numbers must still detect a real mismatch'
 );
 assert.deepEqual(evaluate('范围 1...2', 'Range 1...2', 'en').hardIssues, []);
 assert.ok(
-    evaluate('范围 1...2', 'Range 1...3', 'en').hardIssues.some(issue => issue.includes('缺少 2')),
+    evaluate('范围 1...2', 'Range 1...3', 'en').hardIssues.some(issue => issue.includes('数字数值不一致')),
     'ellipsis-adjacent range endpoints must remain enforceable'
 );
 
-assert.ok(evaluate('版本 v1.5', 'Wersja v1,5', 'pl').hardIssues.some(issue => issue.includes('缺少 1.5')));
+assert.ok(evaluate('版本 v1.5', 'Wersja v1,6', 'pl').hardIssues.some(issue => issue.includes('数字数值不一致')));
 assert.deepEqual(evaluate('版本 v1.2.3', 'Version v1.2.3', 'en').hardIssues, []);
-assert.ok(evaluate('版本 v1.2.3', 'Version v1.2.4', 'en').hardIssues.some(issue => issue.includes('缺少 1.2.3')));
-assert.ok(evaluate('系数 0.125', 'Coefficient 125', 'en').hardIssues.some(issue => issue.includes('缺少 0.125')));
-assert.ok(evaluate('概率 0.001%', 'Chance 1%', 'en').hardIssues.some(issue => issue.includes('缺少 0.001%')));
+assert.ok(evaluate('版本 v1.2.3', 'Version v1.2.4', 'en').hardIssues.some(issue => issue.includes('数字数值不一致')));
+assert.ok(evaluate('系数 0.125', 'Coefficient 125', 'en').hardIssues.some(issue => issue.includes('数字数值不一致')));
+assert.ok(evaluate('概率 0.001%', 'Chance 1%', 'en').hardIssues.some(issue => issue.includes('数字数值不一致')));
 assert.ok(evaluate('要求 >10', 'Requires <10', 'en').hardIssues.some(issue => issue.includes('数字比较方向不一致')));
 
 {
@@ -127,7 +127,7 @@ assert.deepEqual(
 }
 assert.ok(
     evaluate('学习后，守护兽提供的属性增加5%', 'Öğrenildiğinde özellikler %6 artar', 'tr')
-        .hardIssues.some(issue => issue.includes('缺少 5%')),
+        .hardIssues.some(issue => issue.includes('数字数值不一致')),
     'prefix-percent support must still detect a real magnitude change'
 );
 assert.deepEqual(evaluate('每天8点刷新', 'Odświeżanie codziennie o 8:00', 'pl').hardIssues, []);
@@ -146,6 +146,16 @@ assert.deepEqual(
     'numeric attributes inside a missing format token must not create duplicate numeric blockers'
 );
 assert.deepEqual(evaluate('任意6及6以上难度怪物', '난이도 6 이상 몬스터', 'ko').hardIssues, []);
-assert.ok(evaluate('造成220%的伤害', '240% 피해를 줍니다', 'ko').hardIssues.some(issue => issue.includes('缺少 220%')));
+assert.ok(evaluate('造成220%的伤害', '240% 피해를 줍니다', 'ko').hardIssues.some(issue => issue.includes('数字数值不一致')));
+
+for (const [source, target, lang] of [
+    ['仅限1次', 'Tylko raz', 'pl'],
+    ['1月22日开启', 'Otwarcie 22 stycznia', 'pl'],
+    ['价值25亿金币', 'Wartość 2,5 miliarda złota', 'pl']
+]) {
+    const result = evaluate(source, target, lang);
+    assert.deepEqual(result.hardIssues, [], `${source} may use a localized semantic number expression`);
+    assert.ok(result.reviewIssues.length > 0, 'uncertain localized number equivalence should remain visible for review');
+}
 
 console.log('translation-number-qa: semantic hard checks and review-only ambiguity cases passed');

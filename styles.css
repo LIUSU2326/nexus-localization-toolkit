@@ -3133,6 +3133,10 @@ body.file-drag-active .file-input-overlay {
     color: var(--error-color);
 }
 
+.translation-result.quality-blocked {
+    color: var(--warning-color, #b45309);
+}
+
 .download-actions {
     display: flex;
     gap: 12px;

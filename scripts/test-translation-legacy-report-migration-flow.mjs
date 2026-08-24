@@ -47,6 +47,7 @@ function createXlsxStub() {
 
 const signatures = [
     'function sanitizeTranslationCandidateAudit(',
+    'function sanitizeTranslationRepairLifecycle(',
     'function compactTranslationProgressEntry(',
     'function getTranslateSourceOutput(',
     'function getTranslateResultProfile(',
@@ -83,6 +84,7 @@ const signatures = [
     'function writeTranslationResult(',
     'function getUniqueTranslationWorksheetName(',
     'function buildTranslationWorkbook(',
+    'function isTranslationRepairLifecycleFrozen(',
     'function buildTranslationReportRows('
 ];
 const productionFunctions = signatures.map(signature => extractFunction(signature)).join('\n');

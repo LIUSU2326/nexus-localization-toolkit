@@ -8,7 +8,7 @@
 (function installNexusTranslationIssuePolicy(root) {
     'use strict';
 
-    const POLICY_VERSION = '1.2.0';
+    const POLICY_VERSION = '1.3.0';
 
     const TIER_ORDER = Object.freeze(['required', 'project', 'review']);
 
@@ -52,7 +52,7 @@
     const FORMAT_PATTERN = /格式\s*\/\s*占位符|缺少格式|多出格式|占位符(?:顺序)?(?:缺失|多出|不一致|错误|被翻译)|(?:html|富文本|颜色|outline)?标签(?:缺失|多出|不一致|错误|被翻译)|格式标记/i;
     const FORMAT_REVIEW_PATTERN = /格式符号需确认|格式表达需确认/i;
     const PROTECTED_UI_PATTERN = /受保护\s*ui\s*标记|ui\s*标记(?:缺失|多出|不一致|被翻译)|等级\s*\/\s*ui\s*标记不一致/i;
-    const NUMBER_PATTERN = /数字不一致|数字区间方向不一致|数字(?:缺失|多出|错误|被改动)|倍率不一致|百分比不一致/i;
+    const NUMBER_PATTERN = /数字(?:数值)?不一致|数字区间方向不一致|数字(?:缺失|多出|错误|被改动)|倍率不一致|百分比不一致/i;
     const NUMBER_REVIEW_PATTERN = /数字表达需确认|数字符号需确认|数字比较表达需确认|数字重复约束需确认/i;
     const DISCOUNT_BLOCK_PATTERN = /折扣语义不一致|折扣翻译缺失|折扣方向错误|支付比例错误/i;
     const DISCOUNT_REVIEW_PATTERN = /折扣表达需确认|折扣.*(?:无法自动判断|占位符|范围)|裸百分比/i;
@@ -70,10 +70,8 @@
         'mixed_chinese',
         'wrong_script',
         'format_placeholder',
-        'protected_ui_token',
         'number',
         'discount_block',
-        'term_hard',
         'english_block',
         'zh_conversion'
     ]);
@@ -273,6 +271,9 @@
                 } else {
                     id = matchCanonicalIssue(segment);
                 }
+                if (id === 'transport_or_missing' && sourceField !== 'status') {
+                    id = '';
+                }
                 if (!id) {
                     unclassified.push({ sourceField, segment });
                     return;
@@ -470,8 +471,12 @@
         return new Set((findings || []).filter(predicate).map(finding => finding.key));
     }
 
+    function isBlockingFinding(finding) {
+        return finding?.blocking === true || finding?.tier === 'required';
+    }
+
     function isHardFinding(finding) {
-        return finding?.tier === 'required' || finding?.tier === 'project';
+        return isBlockingFinding(finding);
     }
 
     function difference(left, right) {
@@ -481,19 +486,19 @@
     function countSelectedFindings(findings, selectedIds) {
         const selected = selectedIds instanceof Set ? selectedIds : new Set(selectedIds || []);
         if (!selected.size) return 0;
-        return findingKeySet(findings, finding => selected.has(finding.id)).size;
+        return findingKeySet(findings, finding => selected.has(finding.id) && isBlockingFinding(finding)).size;
     }
 
     function getCriticalEvidenceRegressions(previousFindings, candidateFindings) {
         const previousById = new Map();
         const candidateById = new Map();
         previousFindings.forEach(finding => {
-            if (!CRITICAL_EVIDENCE_IDS.has(finding.id)) return;
+            if (!CRITICAL_EVIDENCE_IDS.has(finding.id) || !isBlockingFinding(finding)) return;
             if (!previousById.has(finding.id)) previousById.set(finding.id, new Set());
             previousById.get(finding.id).add(finding.key);
         });
         candidateFindings.forEach(finding => {
-            if (!CRITICAL_EVIDENCE_IDS.has(finding.id)) return;
+            if (!CRITICAL_EVIDENCE_IDS.has(finding.id) || !isBlockingFinding(finding)) return;
             if (!candidateById.has(finding.id)) candidateById.set(finding.id, new Set());
             candidateById.get(finding.id).add(finding.key);
         });
@@ -511,7 +516,7 @@
         missing_replacement_not_improved: '缺失译文的候选仍含新的硬问题，保留缺失状态',
         selected_issue_not_reduced: '选中的问题没有严格减少，保留旧译文',
         new_required_finding: '候选新增了必须修复的问题，保留旧译文',
-        new_hard_finding: '候选新增了项目级或阻断问题，保留旧译文',
+        new_hard_finding: '候选新增了阻断问题，保留旧译文',
         critical_evidence_regression: '候选加重或替换了同类关键错误，保留旧译文',
         hard_findings_not_reduced: '普通修复没有让硬问题集合严格收缩，保留旧译文',
         compact_not_shorter: '精简候选没有实际缩短，保留旧译文',
@@ -615,8 +620,8 @@
         const previousFailed = isFailureSnapshot(previous, previousText, previousFindings);
         const candidateFailed = isFailureSnapshot(candidate, candidateText, candidateFindings);
         const selectedIds = normalizeSelectedIssueIds(selectedIssueIds);
-        const previousRequired = findingKeySet(previousFindings, finding => finding.tier === 'required');
-        const candidateRequired = findingKeySet(candidateFindings, finding => finding.tier === 'required');
+        const previousRequired = findingKeySet(previousFindings, isBlockingFinding);
+        const candidateRequired = findingKeySet(candidateFindings, isBlockingFinding);
         const previousHard = findingKeySet(previousFindings, isHardFinding);
         const candidateHard = findingKeySet(candidateFindings, isHardFinding);
         const introducedRequired = difference(candidateRequired, previousRequired);
@@ -652,7 +657,7 @@
             return buildDecision(false, 'missing_replacement_not_improved', previousText, 'previous', previous, candidate, previousFindings, candidateFindings, diff);
         }
 
-        if (selectedIds.size > 0 && !(selectedAfter < selectedBefore)) {
+        if (selectedBefore > 0 && !(selectedAfter < selectedBefore)) {
             return buildDecision(false, 'selected_issue_not_reduced', previousText, 'previous', previous, candidate, previousFindings, candidateFindings, diff);
         }
 
@@ -699,6 +704,7 @@
         buildTargetedQaStatus,
         decideCandidate,
         sanitizePersistableCandidateAudit,
+        isBlockingFinding,
         isStrictMixedChineseIssueText
     });
 })(typeof globalThis !== 'undefined' ? globalThis : window);

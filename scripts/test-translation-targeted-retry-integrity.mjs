@@ -67,6 +67,7 @@ function createRestoreEntries(state) {
         'isTranslateFailureText',
         'buildTranslateImportTaskLookup',
         'classifyTranslationReportEntry',
+        'isTranslationRepairLifecycleFrozen',
         'findImportedTranslationTaskMatch',
         'copyPersistableTranslationAudit',
         `${restoreEntriesSource}; return buildImportedTranslationRestoreEntries;`
@@ -82,6 +83,7 @@ function createRestoreEntries(state) {
             throw new Error('the explicit task lookup should be reused');
         },
         entry => entry.kind,
+        () => false,
         (entry, taskByKey) => taskByKey.get(entry.taskKey) || null,
         () => ({})
     );

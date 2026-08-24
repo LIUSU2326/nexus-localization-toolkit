@@ -8,7 +8,7 @@ await import('../translation-issue-policy.js');
 
 const policy = globalThis.NexusTranslationIssuePolicy;
 assert.ok(policy, 'NexusTranslationIssuePolicy should be installed');
-assert.equal(policy.POLICY_VERSION, '1.2.0');
+assert.equal(policy.POLICY_VERSION, '1.3.0');
 assert.deepEqual(policy.sanitizePersistableCandidateAudit({
     candidateReturned: true,
     candidateDecision: 'rejected',
@@ -68,7 +68,7 @@ function ids(entry) {
 }
 
 assert.deepEqual(ids({ status: 'missing' }), ['transport_or_missing']);
-assert.deepEqual(ids({ status: 'failed', error: '请求超时' }), ['transport_or_missing', 'transport_or_missing']);
+assert.deepEqual(ids({ status: 'failed', error: '请求超时' }), ['transport_or_missing']);
 assert.ok(ids({ status: 'qa_failed', qaStatus: '需确认：目标阿拉伯文中混入中文' }).includes('mixed_chinese'));
 assert.ok(ids({ status: 'qa_failed', qaStatus: '需确认：目标韩文中混入日文假名' }).includes('wrong_script'));
 assert.ok(ids({ status: 'qa_failed', qaStatus: '需确认：目标阿拉伯文疑似未翻译成阿拉伯文' }).includes('completeness_review'));
@@ -384,6 +384,17 @@ function decide(previous, candidate, options = {}) {
     );
     assert.equal(fillMissing.accept, true, 'a clean candidate may replace a missing translation');
     assert.equal(fillMissing.reason, 'accepted_missing_replacement');
+
+    const fillMissingWithProjectReview = decide(
+        { text: '', status: 'missing', qaStatus: '未返回结果' },
+        { text: 'Pokonaj bossa', status: 'success', qaStatus: '需确认：受保护UI标记缺失或被翻译：BOSS' },
+        { mode: 'ordinary' }
+    );
+    assert.equal(
+        fillMissingWithProjectReview.accept,
+        true,
+        'a project-level UI warning must not preserve an old missing/failure placeholder'
+    );
 }
 
 {
@@ -472,8 +483,7 @@ function decide(previous, candidate, options = {}) {
         },
         { selectedIssueIds: ['mixed_chinese'], mode: 'targeted' }
     );
-    assert.equal(projectEvidenceRegression.accept, false, 'same-category project evidence may not become worse');
-    assert.equal(projectEvidenceRegression.reason, 'critical_evidence_regression');
+    assert.equal(projectEvidenceRegression.accept, true, 'project-level UI evidence is review-only unless explicitly enforced');
 }
 
 console.log('translation-issue-policy: classification, deduplicated plans, and monotonic candidate decisions passed');
