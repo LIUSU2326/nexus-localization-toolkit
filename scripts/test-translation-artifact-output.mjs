@@ -54,6 +54,7 @@ const buildTranslationWorkbook = new Function(
     'translationRunReport',
     'buildTranslationReportRows',
     'getUniqueTranslationWorksheetName',
+    'assertTranslationOutputConsistency',
     `'use strict'; ${buildTranslationWorkbookSource}; return buildTranslationWorkbook;`
 )(
     createXlsxStub(),
@@ -65,7 +66,8 @@ const buildTranslationWorkbook = new Function(
     sourceItem => [[sourceItem.fileName, '译文']],
     { entries: [{ taskKey: 'task-1' }] },
     () => [['翻译报告元数据']],
-    getUniqueTranslationWorksheetName
+    getUniqueTranslationWorksheetName,
+    () => {}
 );
 
 const translatedWorkbook = buildTranslationWorkbook();
@@ -74,6 +76,45 @@ assert.equal(translatedWorkbook.SheetNames.includes('翻译报告'), false);
 const progressWorkbook = buildTranslationWorkbook({ includeReport: true });
 assert.deepEqual(progressWorkbook.SheetNames, ['Management', 'management_2', 'dialogue', '翻译报告']);
 assert.match(buildTranslationWorkbookSource, /options\.includeReport/);
+assert.match(
+    buildTranslationWorkbookSource,
+    /assertTranslationOutputConsistency\(\)/,
+    'every exported workbook must verify that usable report rows were written to their selected output cells'
+);
+
+const assertOutputConsistencySource = extractFunction('function assertTranslationOutputConsistency(');
+function createOutputConsistencyHarness(outputRows) {
+    const sourceItem = { id: 'source-1', outputRows };
+    const task = { taskKey: 'task-1', source: sourceItem, originalRowIndex: 1, rowIndex: 1 };
+    const check = new Function(
+        'translationRunReport',
+        'getSelectedTranslateSources',
+        'translationExpectedTaskMap',
+        'isTranslateFailureText',
+        'getTranslateSourceOutput',
+        'ensureTranslateOutputColumn',
+        'getTranslationQaDisplayText',
+        `'use strict'; ${assertOutputConsistencySource}; return assertTranslationOutputConsistency;`
+    )(
+        { entries: [{ taskKey: 'task-1', translatedText: 'Çeviri', qaStatus: '通过' }] },
+        () => [sourceItem],
+        new Map([['task-1', { task }]]),
+        value => String(value || '').startsWith('[翻译失败'),
+        sourceValue => sourceValue.outputRows,
+        () => ({ translationCol: 1, qaCol: 2 }),
+        entry => entry.qaStatus || ''
+    );
+    return check;
+}
+assert.doesNotThrow(
+    () => createOutputConsistencyHarness([['原文', '译文', '检测'], ['文本', 'Çeviri', '通过']])(),
+    'a complete-report zero-AI reuse path should export when report and selected output cells agree'
+);
+assert.throws(
+    () => createOutputConsistencyHarness([['原文', '译文', '检测'], ['文本', '', '']])(),
+    /译文输出一致性检查失败/,
+    'a report/output mismatch must stop silent export'
+);
 
 const downloadCurrentProgressSource = extractFunction('async function downloadCurrentProgress(');
 assert.match(downloadCurrentProgressSource, /buildTranslationWorkbook\(\{ includeReport: true \}\)/);
@@ -107,7 +148,15 @@ const buildUnverifiedTranslationWorkbook = new Function(
         return workbook;
     },
     () => ({ ready: false, blockingCount: 2 }),
-    () => ({ failedOrMissing: 1, hardQa: 1, softRisk: 3 }),
+    () => ({
+        noContent: 1,
+        requestFailed: 2,
+        candidateRejected: 3,
+        notProcessed: 4,
+        importMissing: 5,
+        hardQa: 1,
+        softRisk: 3
+    }),
     { targetLang: 'ko' },
     { value: 'ko' },
     () => '韩语',
@@ -117,7 +166,14 @@ const buildUnverifiedTranslationWorkbook = new Function(
 const unverifiedWorkbook = buildUnverifiedTranslationWorkbook({ ready: false, blockingCount: 2 });
 assert.deepEqual(unverifiedWorkbook.SheetNames, ['未验证说明', 'Management']);
 assert.equal(unverifiedWorkbook.SheetNames.includes('翻译报告'), false);
-assert.match(unverifiedWorkbook.Sheets['未验证说明'].rows.flat().join(' '), /独立 translation_report\.xlsx/);
+const unverifiedNoticeText = unverifiedWorkbook.Sheets['未验证说明'].rows.flat().join(' ');
+assert.match(unverifiedNoticeText, /独立 translation_report\.xlsx/);
+assert.doesNotMatch(unverifiedNoticeText, /翻译失败\s*\/\s*未返回/);
+assert.match(unverifiedNoticeText, /模型未返回(?:内容)?\s*1/);
+assert.match(unverifiedNoticeText, /请求失败\s*2/);
+assert.match(unverifiedNoticeText, /候选未采用\s*3/);
+assert.match(unverifiedNoticeText, /尚未处理\s*4/);
+assert.match(unverifiedNoticeText, /导入(?:报告)?缺(?:少|项)\s*5/);
 
 const saveTranslationArtifactSource = extractFunction('async function saveTranslationArtifact(');
 assert.match(saveTranslationArtifactSource, /getTranslationOutputFileName\('translated'\)/);
@@ -126,7 +182,11 @@ assert.match(saveTranslationArtifactSource, /buildTranslationReportWorkbook\(\)/
 assert.match(saveTranslationArtifactSource, /getTranslationOutputFileName\('translation_report'\)/);
 
 const getTranslationOutputFileNameSource = extractFunction('function getTranslationOutputFileName(');
-function createOutputFileNameBuilder(languageSuffix) {
+const sanitizeTranslationFileStemSource = extractFunction('function sanitizeTranslationFileStem(');
+const sanitizeTranslationFileStem = new Function(
+    `'use strict'; ${sanitizeTranslationFileStemSource}; return sanitizeTranslationFileStem;`
+)();
+function createOutputFileNameBuilder(languageSuffix, originalName = '佣兵小镇-全文本.xlsx') {
     return new Function(
         'sanitizeTranslationFileStem',
         'originalFileName',
@@ -135,8 +195,8 @@ function createOutputFileNameBuilder(languageSuffix) {
         'targetLangSelect',
         `'use strict'; ${getTranslationOutputFileNameSource}; return getTranslationOutputFileName;`
     )(
-        value => String(value || '').replace(/\.(csv|xlsx|xls)$/i, '').replace(/\s+/g, '_'),
-        '佣兵小镇-全文本.xlsx',
+        sanitizeTranslationFileStem,
+        originalName,
         languageSuffix,
         null,
         { value: languageSuffix }
@@ -147,6 +207,14 @@ assert.equal(createOutputFileNameBuilder('pl')('translated'), '佣兵小镇-全�
 assert.equal(createOutputFileNameBuilder('pl')('translation_report'), '佣兵小镇-全文本_pl_translation_report.xlsx');
 assert.equal(createOutputFileNameBuilder('ko')('translated'), '佣兵小镇-全文本_ko_translated.xlsx');
 assert.equal(createOutputFileNameBuilder('ko')('translation_report'), '佣兵小镇-全文本_ko_translation_report.xlsx');
+assert.equal(
+    createOutputFileNameBuilder(
+        'tr',
+        '佣兵小镇-全文本_tr_translated_unverified-2_tr_translated_unverified-2.xlsx'
+    )('translated_unverified'),
+    '佣兵小镇-全文本_tr_translated_unverified.xlsx',
+    're-importing generated artifacts must not accumulate repeated language/output suffixes'
+);
 
 const restoredReportCompletionSource = extractFunction('async function handleTranslatePrimaryAction(');
 assert.match(restoredReportCompletionSource, /autoSaveTranslationOutputs\(\)/);

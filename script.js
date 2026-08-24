@@ -693,7 +693,7 @@ const TRANSLATION_TARGETED_REPAIR_INITIAL_BATCH_SIZE = 4;
 const TRANSLATION_TARGETED_REPAIR_MAX_BATCH_SIZE = 6;
 const TRANSLATION_TARGETED_REPAIR_BATCH_CHAR_BUDGET = 4800;
 const TRANSLATION_TARGETED_REPAIR_PROMPT_CHAR_LIMIT = 12000;
-const TRANSLATION_RETRY_DEEP_REPAIR_LIMIT = 60;
+const TRANSLATION_REPAIR_WAVE_SIZE = 60;
 const TRANSLATION_AGNES_TARGET_RPM = 17;
 const TRANSLATION_INTERRUPTION_SOFT_COOLDOWN_MS = 30000;
 const TRANSLATION_INTERRUPTION_HARD_COOLDOWN_MS = 45000;
@@ -812,12 +812,6 @@ function shouldDeferRetryQaRepair(options = {}) {
 
 function shouldUseTwoStageTranslationRetry(retryTasks, options = {}) {
     return options.twoStageRetry !== false;
-}
-
-function shouldRunDeferredTranslationRepair(taskCount, limit = TRANSLATION_RETRY_DEEP_REPAIR_LIMIT) {
-    const count = Math.max(0, Number(taskCount) || 0);
-    const boundedLimit = Math.max(0, Number(limit) || 0);
-    return count > 0 && count <= boundedLimit;
 }
 
 function createTranslationRpmPacer(getTargetRpm, onCancel = () => {}, waitMs = 100, timing = {}) {
@@ -7015,8 +7009,22 @@ function initTranslateTool() {
         return translateSources.filter(source => selectedTranslateSourceIds.has(source.id));
     }
 
+    function isGeneratedTranslationNoticeSheet(sheet = {}) {
+        const sheetName = String(sheet.sheetName || sheet.name || '').trim();
+        const rows = Array.isArray(sheet.rows) ? sheet.rows : [];
+        const marker = String(rows?.[0]?.[0] || '').trim();
+        const generatedName = /^(?:未验证说明|unverified(?:\s+translation)?\s+notice)(?:[_\s-]*[（(]?\d+[）)]?)?$/i.test(sheetName);
+        return generatedName && marker === '未验证译文，请勿直接交付';
+    }
+
     function rebuildTranslateSheetData() {
         const selectedSources = getSelectedTranslateSources();
+        // Row maps describe the current merged selection only. Clear every
+        // source first so a deselected leading sheet cannot retain stale
+        // global row indexes and steal rows from the next selected sheet.
+        translateSources.forEach(source => {
+            source.rowMap = new Map();
+        });
         if (selectedSources.length === 0) {
             sheetData = null;
             return;
@@ -7027,7 +7035,6 @@ function initTranslateTool() {
         sheetData = [header];
 
         selectedSources.forEach(source => {
-            source.rowMap = new Map();
             const rows = Array.isArray(source.rows) ? source.rows.slice(1) : [];
             rows.forEach((row, rowOffset) => {
                 sheetData.push(Array.isArray(row) ? [...row] : []);
@@ -7037,7 +7044,9 @@ function initTranslateTool() {
     }
 
     function findTranslateSourceForRow(rowIndex) {
-        return translateSources.find(source => source.rowMap?.has(rowIndex)) || null;
+        return translateSources.find(source =>
+            selectedTranslateSourceIds.has(source.id) && source.rowMap?.has(rowIndex)
+        ) || null;
     }
 
     function getTranslateOriginalRowNumber(rowIndex) {
@@ -8104,6 +8113,7 @@ function initTranslateTool() {
             reusableEntries: [],
             blockingEntries: [],
             reviewEntries: [],
+            unmatchedEntries: [],
             suspiciousEntries: [],
             reviewedAt: 0,
             reviewContextKey: '',
@@ -8382,6 +8392,7 @@ function initTranslateTool() {
             reusableEntries,
             blockingEntries,
             reviewEntries,
+            unmatchedEntries: translationRunReport.unmatchedImportedEntries || importedTranslateProgressState.unmatchedEntries || [],
             suspiciousEntries: blockingEntries,
             reviewedAt: Date.now(),
             issueSummary,
@@ -8722,7 +8733,7 @@ function initTranslateTool() {
 
     function isTranslationReportTailBoundary(row = []) {
         const firstCell = String(row?.[0] ?? '').trim();
-        if (['失败任务', '待处理任务', '需重新处理任务', '可自动处理任务'].includes(firstCell)) {
+        if (['失败任务', '待处理任务', '需重新处理任务', '可自动处理任务', '未映射旧报告审计'].includes(firstCell)) {
             return true;
         }
         return /^(?:failed tasks?|pending tasks?|tasks? to reprocess)$/i.test(firstCell);
@@ -8967,6 +8978,7 @@ function initTranslateTool() {
                 : importedReportEntries;
             let reviewedEntries = reviewedReportEntries;
             let reportMissingEntries = [];
+            let unmatchedImportedEntries = [];
             let coverageCheckedAt = 0;
             let coverageTaskCount = 0;
             const coverageProfiles = getSelectedTranslateProfiles();
@@ -8978,6 +8990,7 @@ function initTranslateTool() {
                 );
                 reviewedEntries = coverageMerge.entries;
                 reportMissingEntries = coverageMerge.reportMissingEntries;
+                unmatchedImportedEntries = coverageMerge.unmatchedEntries || [];
                 coverageCheckedAt = Date.now();
                 coverageTaskCount = currentTasks.length;
             }
@@ -9013,6 +9026,7 @@ function initTranslateTool() {
                 coverageCheckedAt,
                 coverageTaskCount,
                 continuationPlan,
+                unmatchedEntries: unmatchedImportedEntries,
                 skippedCount: parsedEntries.skippedCount
             };
             if (importedTargetLang && targetLangSelect) {
@@ -9044,10 +9058,13 @@ function initTranslateTool() {
             const normalizedLegacyText = normalizedLegacyOutput.removedColumnCount
                 ? `已安全归并移除 ${normalizedLegacyOutput.removedColumnCount} 个旧版生成列；`
                 : '';
+            const unmatchedText = unmatchedImportedEntries.length
+                ? `${unmatchedImportedEntries.length} 条旧报告记录无法唯一映射，已隔离到审计区且不参与当前交付；`
+                : '';
             setStatus(
                 'success',
                 '翻译报告已导入',
-                `${normalizedLegacyText}${shouldAutoReview ? '已按当前规则自动重检；' : ''}${coverageText}已复用 ${reusableEntries.length} 条；必须处理 ${failedOrMissingCount} 条；建议复核 ${reviewEntries.length} 条。建议项不会调用 AI 或阻断交付。${languageText} ${timingText}。`
+                `${normalizedLegacyText}${shouldAutoReview ? '已按当前规则自动重检；' : ''}${coverageText}${unmatchedText}已复用 ${reusableEntries.length} 条；必须处理 ${failedOrMissingCount} 条；建议复核 ${reviewEntries.length} 条。建议项不会调用 AI 或阻断交付。${languageText} ${timingText}。`
             );
             return {
                 status: 'success',
@@ -9056,6 +9073,7 @@ function initTranslateTool() {
                 reusableCount: reusableEntries.length,
                 failedOrMissingCount,
                 reportMissingCount: reportMissingEntries.length,
+                unmatchedCount: unmatchedImportedEntries.length,
                 issueSummary
             };
         } catch (error) {
@@ -9128,7 +9146,7 @@ function initTranslateTool() {
                     setStatus(
                         'processing',
                         `正在重译 ${getTranslateLanguageName(importResult.targetLang)} 的硬问题 (${index + 1}/${reportFiles.length})`,
-                        `已复用 ${importResult.reusableCount} 条通过译文；${importResult.failedOrMissingCount} 条翻译失败、结果缺失或硬质检问题会重新处理，${importResult.issueSummary?.softRisk || 0} 条软性需确认保留当前译文。`
+                        `已复用 ${importResult.reusableCount} 条通过译文；${importResult.failedOrMissingCount} 条未获得可用译文、结果缺失或硬质检问题会重新处理，${importResult.issueSummary?.softRisk || 0} 条软性需确认保留当前译文。`
                     );
                     const repairableEntries = importedTranslateProgressState.entries.filter(isRepairableTranslationReportEntry);
                     const runResult = await retrySuspiciousImportedTranslations({
@@ -9743,7 +9761,7 @@ function initTranslateTool() {
                 }
                 parsed.sheets.forEach(sheet => {
                     if (embeddedReport?.sheet === sheet) return;
-                    if (embeddedReport && /^(?:未验证说明|unverified(?:\s+translation)?\s+notice)$/i.test(String(sheet.sheetName || '').trim())) return;
+                    if (isGeneratedTranslationNoticeSheet(sheet)) return;
                     if (sheet.hidden) {
                         skippedHiddenSheets.push(`${file.name} / ${sheet.sheetName}`);
                         return;
@@ -9802,6 +9820,9 @@ function initTranslateTool() {
                     targetLang,
                     entries,
                     reusableEntries,
+                    blockingEntries: [],
+                    reviewEntries: [],
+                    unmatchedEntries: [],
                     suspiciousEntries: [],
                     reviewedAt: 0,
                     reviewContextKey: '',
@@ -10932,11 +10953,39 @@ function initTranslateTool() {
     }
 
     function getTranslationReportIssueSummary(entries = translationRunReport?.entries || []) {
+        const sourceEntries = Array.isArray(entries) ? entries : [];
         const groups = getTranslationReportIssueGroups(entries);
         const softRisk = groups.length.length + groups.soft.length;
-        const actualFailed = groups.hard.filter(isActualTranslationFailureReportEntry).length;
-        const hardQa = Math.max(0, groups.hard.length - actualFailed);
-        const failedOrMissing = actualFailed + groups.missing.length;
+        const requestFailureOutcomes = new Set([
+            'request_failed', 'timeout', 'rate_limited', 'quota_depleted',
+            'output_truncated', 'batch_structure_error'
+        ]);
+        const noContent = sourceEntries.filter(entry => entry?.executionOutcome === 'no_content').length;
+        const requestFailed = sourceEntries.filter(entry => requestFailureOutcomes.has(entry?.executionOutcome)).length;
+        const candidateRejected = sourceEntries.filter(entry => entry?.executionOutcome === 'candidate_rejected').length;
+        const notProcessed = sourceEntries.filter(entry => entry?.executionOutcome === 'not_processed').length;
+        const importMissing = sourceEntries.filter(entry =>
+            entry?.executionOutcome === 'import_missing' ||
+            /导入报告缺少|报告缺失/.test(String(entry?.error || entry?.qaStatus || ''))
+        ).length;
+        const classifiedMissing = groups.missing.filter(entry =>
+            entry?.executionOutcome === 'no_content' ||
+            requestFailureOutcomes.has(entry?.executionOutcome) ||
+            entry?.executionOutcome === 'candidate_rejected' ||
+            entry?.executionOutcome === 'not_processed' ||
+            entry?.executionOutcome === 'import_missing' ||
+            /导入报告缺少|报告缺失/.test(String(entry?.error || entry?.qaStatus || ''))
+        ).length;
+        const otherMissing = Math.max(0, groups.missing.length - classifiedMissing);
+        const legacyActualFailed = sourceEntries.filter(entry =>
+            !entry?.executionOutcome &&
+            isActualTranslationFailureReportEntry(entry) &&
+            !/导入报告缺少|报告缺失/.test(String(entry?.error || entry?.qaStatus || ''))
+        ).length;
+        const actualFailed = noContent + requestFailed + legacyActualFailed;
+        const hardActualFailed = groups.hard.filter(isActualTranslationFailureReportEntry).length;
+        const hardQa = Math.max(0, groups.hard.length - hardActualFailed);
+        const failedOrMissing = hardActualFailed + groups.missing.length;
         const autoRepairable = failedOrMissing + hardQa;
         const totalIssues = autoRepairable + softRisk;
         const success = Math.max(0, (entries || []).length - totalIssues);
@@ -10948,6 +10997,12 @@ function initTranslateTool() {
             soft: groups.soft.length,
             softRisk,
             actualFailed,
+            noContent,
+            requestFailed,
+            candidateRejected,
+            notProcessed,
+            importMissing,
+            otherMissing,
             failedOrMissing,
             hardQa,
             autoRepairable,
@@ -10975,11 +11030,15 @@ function initTranslateTool() {
 
     function formatTranslationReportIssueSummary(summary) {
         if (!summary) return '';
-        const parts = [
-            `翻译失败/未返回 ${summary.failedOrMissing || 0}`,
-            `硬质检未通过 ${summary.hardQa || 0}`,
-            `软性需确认 ${summary.softRisk || 0}`
-        ];
+        const parts = [];
+        if (summary.noContent) parts.push(`模型未返回 ${summary.noContent}`);
+        if (summary.requestFailed) parts.push(`请求失败 ${summary.requestFailed}`);
+        if (summary.candidateRejected) parts.push(`候选未采用 ${summary.candidateRejected}`);
+        if (summary.notProcessed) parts.push(`尚未处理 ${summary.notProcessed}`);
+        if (summary.importMissing) parts.push(`导入缺项 ${summary.importMissing}`);
+        if (summary.otherMissing) parts.push(`其他缺失 ${summary.otherMissing}`);
+        parts.push(`硬质检未通过 ${summary.hardQa || 0}`);
+        parts.push(`软性需确认 ${summary.softRisk || 0}`);
         if (summary.length) parts.push(`超长 ${summary.length}`);
         return parts.join(' / ');
     }
@@ -11969,15 +12028,16 @@ function initTranslateTool() {
     }
 
     function restoreCompletedTranslationTasks(tasks, savedEntries, targetLang = '', options = {}) {
-        const taskKeys = new Set(tasks.map(task => task.taskKey));
-        const entries = savedEntries.filter(entry => taskKeys.has(entry.taskKey));
-        const entriesByKey = new Map(entries.map(entry => [entry.taskKey, entry]));
+        const entriesByKey = new Map((savedEntries || [])
+            .filter(entry => entry?.taskKey)
+            .map(entry => [entry.taskKey, entry]));
         const completedTaskKeys = new Set();
         translationProgressTasks = new Map();
         const restoredReportEntries = [];
 
         tasks.forEach(task => {
-            const entry = entriesByKey.get(task.taskKey);
+            const entry = entriesByKey.get(task.taskKey) ||
+                (task.legacyTaskKey ? entriesByKey.get(task.legacyTaskKey) : null);
             if (!entry) return;
             const savedStatus = String(entry.status || '').trim().toLowerCase();
             const canRestoreAsCompleted =
@@ -12066,20 +12126,12 @@ function initTranslateTool() {
         const sheetName = task.source?.sheetName || '';
         const rowNumber = task.originalRowNumber || task.rowIndex + 1;
         const column = task.colIndex + 1;
-        const model = task.profile?.model || '';
-        const profile = task.profile?.name || getCompactModelLabel(task.profile);
         const sourceText = task.text || '';
-        const modelKeys = [...new Set([model, profile].filter(Boolean))];
-        const keys = [];
-        modelKeys.forEach(modelKey => {
-            keys.push(makeTranslateImportMatchKey([sourceFile, sheetName, rowNumber, column, modelKey, sourceText]));
-            keys.push(makeTranslateImportMatchKey([sheetName, rowNumber, column, modelKey, sourceText]));
-            keys.push(makeTranslateImportMatchKey([rowNumber, column, modelKey, sourceText]));
-        });
-        keys.push(makeTranslateImportMatchKey([sourceFile, sheetName, rowNumber, column, sourceText]));
-        keys.push(makeTranslateImportMatchKey([sheetName, rowNumber, column, sourceText]));
-        keys.push(makeTranslateImportMatchKey([rowNumber, column, sourceText]));
-        return [...new Set(keys)];
+        return [...new Set([
+            makeTranslateImportMatchKey([sourceFile, sheetName, rowNumber, column, sourceText]),
+            makeTranslateImportMatchKey([sheetName, rowNumber, column, sourceText]),
+            makeTranslateImportMatchKey([rowNumber, column, sourceText])
+        ])];
     }
 
     function getImportedEntryMatchKeys(entry) {
@@ -12088,17 +12140,11 @@ function initTranslateTool() {
         const rowNumber = entry.rowNumber || '';
         const column = entry.column || '';
         const sourceText = entry.sourceText || '';
-        const modelKeys = [...new Set([entry.model, entry.profile].filter(Boolean))];
-        const keys = [];
-        modelKeys.forEach(modelKey => {
-            keys.push(makeTranslateImportMatchKey([sourceFile, sheetName, rowNumber, column, modelKey, sourceText]));
-            keys.push(makeTranslateImportMatchKey([sheetName, rowNumber, column, modelKey, sourceText]));
-            keys.push(makeTranslateImportMatchKey([rowNumber, column, modelKey, sourceText]));
-        });
-        keys.push(makeTranslateImportMatchKey([sourceFile, sheetName, rowNumber, column, sourceText]));
-        keys.push(makeTranslateImportMatchKey([sheetName, rowNumber, column, sourceText]));
-        keys.push(makeTranslateImportMatchKey([rowNumber, column, sourceText]));
-        return [...new Set(keys)].filter(key => key.replace(/\u001f/g, '').trim());
+        return [...new Set([
+            makeTranslateImportMatchKey([sourceFile, sheetName, rowNumber, column, sourceText]),
+            makeTranslateImportMatchKey([sheetName, rowNumber, column, sourceText]),
+            makeTranslateImportMatchKey([rowNumber, column, sourceText])
+        ])].filter(key => key.replace(/\u001f/g, '').trim());
     }
 
     function buildTranslateImportTaskIndex(tasks = []) {
@@ -12130,19 +12176,14 @@ function initTranslateTool() {
             }
         }
         for (const key of getImportedEntryMatchKeys(entry)) {
-            const matches = fallbackIndex.get(key) || [];
+            const matches = [...new Map((fallbackIndex.get(key) || [])
+                .filter(task => task?.taskKey)
+                .map(task => [task.taskKey, task])).values()];
             if (!matches.length) continue;
             if (matches.length === 1) return matches[0];
-            const modelKeys = new Set(
-                [entry.model, entry.profile]
-                    .filter(Boolean)
-                    .map(normalizeTranslateImportKeyPart)
-            );
-            const modelMatch = matches.find(task =>
-                modelKeys.has(normalizeTranslateImportKeyPart(task.profile?.model || '')) ||
-                modelKeys.has(normalizeTranslateImportKeyPart(task.profile?.name || getCompactModelLabel(task.profile)))
-            );
-            return modelMatch || matches[0];
+            // Ambiguous fallback matches must never be resolved by model name
+            // or list order: neither is part of the logical cell identity.
+            return null;
         }
         return null;
     }
@@ -12450,6 +12491,7 @@ function initTranslateTool() {
         const reviewGlossaryTerms = getSelectedTranslateGlossaryTerms();
         const reviewedEntries = reviewAndDedupeImportedTranslationEntries(state.entries, targetLang, reviewGlossaryTerms);
         let reportMissingEntries = [];
+        let unmatchedImportedEntries = Array.isArray(state.unmatchedEntries) ? state.unmatchedEntries : [];
         let mergedReviewedEntries = reviewedEntries;
         let coverageCheckedAt = Number(state.coverageCheckedAt) || 0;
         let coverageTaskCount = Number(state.coverageTaskCount) || 0;
@@ -12458,6 +12500,7 @@ function initTranslateTool() {
             const coverageMerge = mergeImportedTranslationEntriesWithCurrentTasks(reviewedEntries, allTasks);
             mergedReviewedEntries = coverageMerge.entries;
             reportMissingEntries = coverageMerge.reportMissingEntries;
+            unmatchedImportedEntries = coverageMerge.unmatchedEntries || [];
             coverageCheckedAt = Date.now();
             coverageTaskCount = allTasks.length;
         }
@@ -12489,7 +12532,8 @@ function initTranslateTool() {
             failedOrMissingCount,
             coverageCheckedAt,
             coverageTaskCount,
-            continuationPlan
+            continuationPlan,
+            unmatchedEntries: unmatchedImportedEntries
         };
         updateTranslateProgressImportStatus();
         if (blockingEntries.length) {
@@ -12518,14 +12562,10 @@ function initTranslateTool() {
             const exact = tasks.find(task => task.taskKey === entry.taskKey);
             if (exact && importedEntryMatchesTask(entry, exact)) return exact;
         }
-        const candidates = tasks.filter(task => importedEntryMatchesTask(entry, task));
-        if (!candidates.length) return null;
-        const modelKeys = new Set([entry.model, entry.profile].filter(Boolean).map(normalizeTranslateImportKeyPart));
-        const modelMatch = candidates.find(task =>
-            modelKeys.has(normalizeTranslateImportKeyPart(task.profile?.model || '')) ||
-            modelKeys.has(normalizeTranslateImportKeyPart(task.profile?.name || getCompactModelLabel(task.profile)))
-        );
-        return modelMatch || candidates[0];
+        const candidates = [...new Map(tasks
+            .filter(task => importedEntryMatchesTask(entry, task) && task?.taskKey)
+            .map(task => [task.taskKey, task])).values()];
+        return candidates.length === 1 ? candidates[0] : null;
     }
 
     function buildImportedReportMissingTaskEntries(tasks = [], entries = []) {
@@ -12572,12 +12612,40 @@ function initTranslateTool() {
     function mergeImportedTranslationEntriesWithCurrentTasks(entries = [], tasks = []) {
         const reportEntries = dedupeTranslationReportEntries(entries || []);
         if (!tasks.length) {
-            return { entries: reportEntries, reportMissingEntries: [] };
+            return { entries: [], reportMissingEntries: [], unmatchedEntries: reportEntries };
         }
-        const reportMissingEntries = buildImportedReportMissingTaskEntries(tasks, reportEntries);
+        const taskLookup = buildTranslateImportTaskLookup(tasks);
+        const mappedEntries = [];
+        const unmatchedEntries = [];
+        const usedTaskKeys = new Set();
+        reportEntries.forEach(entry => {
+            const task = findImportedTranslationTaskMatch(
+                entry,
+                taskLookup.taskByKey,
+                taskLookup.fallbackIndex
+            );
+            if (!task?.taskKey || usedTaskKeys.has(task.taskKey)) {
+                unmatchedEntries.push(entry);
+                return;
+            }
+            usedTaskKeys.add(task.taskKey);
+            mappedEntries.push({
+                ...entry,
+                taskKey: task.taskKey,
+                sourceFile: task.source?.fileName || '',
+                sheetName: task.source?.sheetName || '',
+                rowNumber: task.originalRowNumber || task.rowIndex + 1,
+                column: task.colIndex + 1,
+                outputSlotId: 'primary',
+                sourceText: task.text || '',
+                referenceText: task.referenceText || ''
+            });
+        });
+        const reportMissingEntries = buildImportedReportMissingTaskEntries(tasks, mappedEntries);
         return {
-            entries: dedupeTranslationReportEntries([...reportEntries, ...reportMissingEntries]),
-            reportMissingEntries
+            entries: dedupeTranslationReportEntries([...mappedEntries, ...reportMissingEntries]),
+            reportMissingEntries,
+            unmatchedEntries
         };
     }
 
@@ -12621,6 +12689,10 @@ function initTranslateTool() {
     }
 
     function initializeTranslateOutputFromImportedReport(tasks = [], targetLang = '', options = {}) {
+        // This map describes every canonical output cell, not only the subset
+        // that may need another AI request. Complete-report reuse can export
+        // without entering startTranslate, so initialize it here as well.
+        setExpectedTranslationTasks(tasks);
         translateSources.forEach(source => {
             source.outputRows = (source.rows || []).map(row => Array.isArray(row) ? [...row] : []);
             source.outputHeader = source.outputRows[0] || [];
@@ -12646,24 +12718,31 @@ function initTranslateTool() {
             !targetLang ||
             importedTranslateProgressState.targetLang === targetLang
         ) ? (importedTranslateProgressState?.entries || []) : []);
+        const unmatchedImportedEntries = [];
         importedEntriesForTarget.forEach(entry => {
             const task = findImportedTranslationTaskMatch(entry, taskLookup.taskByKey, taskLookup.fallbackIndex);
-            const preserved = task
-                ? {
-                    ...entry,
-                    taskKey: getStableReportOutputTaskKey(entry, task),
-                    sourceFile: task.source?.fileName || entry.sourceFile || '',
-                    sheetName: task.source?.sheetName || entry.sheetName || '',
-                    rowNumber: task.originalRowNumber || task.rowIndex + 1,
-                    column: task.colIndex + 1,
-                    sourceText: task.text || entry.sourceText || '',
-                    referenceText: task.referenceText || entry.referenceText || ''
-                }
-                : entry;
+            if (!task) {
+                unmatchedImportedEntries.push(entry);
+                return;
+            }
+            const preserved = {
+                ...entry,
+                taskKey: getStableReportOutputTaskKey(entry, task),
+                sourceFile: task.source?.fileName || entry.sourceFile || '',
+                sheetName: task.source?.sheetName || entry.sheetName || '',
+                rowNumber: task.originalRowNumber || task.rowIndex + 1,
+                column: task.colIndex + 1,
+                sourceText: task.text || entry.sourceText || '',
+                referenceText: task.referenceText || entry.referenceText || ''
+            };
             const identity = preserved.taskKey || getTranslationReportEntryDedupeKey(preserved);
             if (identity) preservedByIdentity.set(identity, preserved);
         });
         translationRunReport.entries = [...preservedByIdentity.values()];
+        translationRunReport.unmatchedImportedEntries = [
+            ...(importedTranslateProgressState?.unmatchedEntries || []),
+            ...unmatchedImportedEntries
+        ];
         const fullOutputRestore = restoreImportedReportEntriesToOutput(
             tasks,
             importedEntriesForTarget,
@@ -12676,7 +12755,8 @@ function initTranslateTool() {
             skippedTargetMismatch: importedEntriesForTarget.length ? 0 : (importedTranslateProgressState?.entries?.length || 0),
             reviewedForCurrentContext: true,
             fullOutputMatched: fullOutputRestore.matched,
-            fullOutputUnmatched: fullOutputRestore.unmatched
+            fullOutputUnmatched: fullOutputRestore.unmatched,
+            unmatchedEntries: translationRunReport.unmatchedImportedEntries
         };
     }
 
@@ -13002,13 +13082,27 @@ function initTranslateTool() {
         return { matched, unmatched };
     }
 
-    function buildTranslationTaskKey(source, rowIndex, colIndex, targetLangOverride = null) {
+    function buildTranslationTaskKey(source, originalRowIndex, colIndex, targetLangOverride = null) {
         const keyTargetLang = targetLangOverride || document.getElementById('targetLang')?.value || '';
         return [
             source?.fileName || '',
             source?.sheetName || '',
             keyTargetLang,
-            rowIndex,
+            originalRowIndex,
+            colIndex
+        ].join('|');
+    }
+
+    // Read-only compatibility alias for v1.5.4 progress written with the
+    // merged/global row index. Remove with the profile-bound key adapter in
+    // v1.7.0; new progress always writes the source-local canonical key.
+    function buildLegacyGlobalTranslationTaskKey(source, globalRowIndex, colIndex, targetLangOverride = null) {
+        const keyTargetLang = targetLangOverride || document.getElementById('targetLang')?.value || '';
+        return [
+            source?.fileName || '',
+            source?.sheetName || '',
+            keyTargetLang,
+            globalRowIndex,
             colIndex
         ].join('|');
     }
@@ -13027,6 +13121,7 @@ function initTranslateTool() {
             if (!row) continue;
             const source = findTranslateSourceForRow(i);
             if (!source) continue;
+            const originalRowIndex = source.rowMap?.get(i) ?? i;
 
             for (const originalColIndex of selectedColumns) {
                 const cell = row[originalColIndex];
@@ -13050,9 +13145,11 @@ function initTranslateTool() {
                 const referenceColIndex = referenceText ? referenceColumn : null;
                 const passthrough = isSpecialCode(cellText, targetLang);
                 if (passthrough) filteredSpecial++;
+                const taskKey = buildTranslationTaskKey(source, originalRowIndex, originalColIndex, targetLang);
+                const legacyTaskKey = buildLegacyGlobalTranslationTaskKey(source, i, originalColIndex, targetLang);
                 tasks.push({
                     rowIndex: i,
-                    originalRowIndex: source.rowMap?.get(i) ?? i,
+                    originalRowIndex,
                     originalRowNumber: getTranslateOriginalRowNumber(i),
                     colIndex: originalColIndex,
                     sourceColumnName: getTranslateColumnName(originalColIndex),
@@ -13066,7 +13163,8 @@ function initTranslateTool() {
                     outputSlotId: 'primary',
                     passthrough,
                     glossaryTerms: glossary,
-                    taskKey: buildTranslationTaskKey(source, i, originalColIndex, targetLang)
+                    taskKey,
+                    legacyTaskKey: legacyTaskKey === taskKey ? '' : legacyTaskKey
                 });
             }
         }
@@ -13110,9 +13208,43 @@ function initTranslateTool() {
         throw new Error('工作表名称冲突过多，无法生成译文文件');
     }
 
+    function assertTranslationOutputConsistency() {
+        if (!translationRunReport?.entries?.length) return;
+        const selectedSourceIds = new Set(getSelectedTranslateSources().map(source => source.id));
+        const problems = [];
+        for (const entry of translationRunReport.entries) {
+            if (!entry?.translatedText || isTranslateFailureText(entry.translatedText)) continue;
+            const expected = translationExpectedTaskMap.get(entry.taskKey);
+            const task = expected?.task;
+            if (!task || !selectedSourceIds.has(task.source?.id)) {
+                problems.push({ taskKey: entry.taskKey || '', reason: 'report_entry_not_mapped_to_selected_source' });
+                continue;
+            }
+            const outputRows = getTranslateSourceOutput(task.source);
+            const outputRowIndex = task.originalRowIndex ?? task.rowIndex;
+            const cols = ensureTranslateOutputColumn(task);
+            const outputTranslated = String(outputRows?.[outputRowIndex]?.[cols.translationCol] ?? '').trim();
+            if (outputTranslated !== String(entry.translatedText || '').trim()) {
+                problems.push({ taskKey: entry.taskKey || '', reason: 'report_output_value_mismatch' });
+            }
+            const expectedQa = String(getTranslationQaDisplayText(entry) || '').trim();
+            const outputQa = String(outputRows?.[outputRowIndex]?.[cols.qaCol] ?? '').trim();
+            if (cols.qaCol >= 0 && expectedQa !== outputQa) {
+                problems.push({ taskKey: entry.taskKey || '', reason: 'report_output_qa_mismatch' });
+            }
+            if (problems.length >= 20) break;
+        }
+        if (!problems.length) return;
+        const error = new Error(`译文输出一致性检查失败：${problems.length} 个当前报告条目未正确写入所选工作表`);
+        error.code = 'TRANSLATION_OUTPUT_CONSISTENCY_FAILED';
+        error.problems = problems;
+        throw error;
+    }
+
     function buildTranslationWorkbook(options = {}) {
         const selectedSources = getSelectedTranslateSources();
         if (!selectedSources.length) return null;
+        assertTranslationOutputConsistency();
 
         const workbook = XLSX.utils.book_new();
         selectedSources.forEach((source, index) => {
@@ -13251,7 +13383,7 @@ function initTranslateTool() {
             rows.push([]);
             rows.push([
                 '需重新处理任务',
-                `共 ${retryableEntries.length} 条；可能是翻译失败、未返回译文，或已有译文但硬质检未通过`
+                `共 ${retryableEntries.length} 条；包含未获得可用译文或已有译文但硬质检未通过的当前阻断项`
             ]);
             rows.push([
                 '任务Key',
@@ -13302,17 +13434,49 @@ function initTranslateTool() {
             });
         }
 
+        const unmatchedImportedEntries = Array.isArray(translationRunReport?.unmatchedImportedEntries)
+            ? translationRunReport.unmatchedImportedEntries
+            : [];
+        if (unmatchedImportedEntries.length) {
+            rows.push([]);
+            rows.push([
+                '未映射旧报告审计',
+                `共 ${unmatchedImportedEntries.length} 条；这些旧记录无法唯一定位到当前文件，不参与当前译文、交付门禁或自动修复`
+            ]);
+            rows.push(['任务Key', '来源文件', '工作表', '原始行号', '列', '原文', '旧译文', '旧状态', '旧质检', '未采用原因']);
+            unmatchedImportedEntries.forEach(entry => {
+                rows.push([
+                    entry.taskKey || '',
+                    entry.sourceFile || '',
+                    entry.sheetName || '',
+                    entry.rowNumber || '',
+                    entry.column || '',
+                    entry.sourceText || '',
+                    entry.translatedText || '',
+                    entry.status || '',
+                    entry.qaStatus || '',
+                    '无法唯一映射到当前源单元格'
+                ]);
+            });
+        }
+
         return rows;
     }
 
     function sanitizeTranslationFileStem(value) {
-        return String(value || 'translation')
+        let stem = String(value || 'translation')
             .replace(/\.(csv|xlsx|xls)$/i, '')
             .replace(/[\\/:*?"<>|]+/g, '_')
             .replace(/\s+/g, '_')
             .replace(/_+/g, '_')
-            .replace(/^_+|_+$/g, '')
-            .slice(0, 120) || 'translation';
+            .replace(/^_+|_+$/g, '');
+        const generatedArtifactSuffix = /_(?:(?:[a-z]{2,3}(?:-[a-z]{2})?)_)?(?:translated(?:_unverified)?|translation_report)(?:-\d+)?$/i;
+        let previous = '';
+        while (stem && stem !== previous && generatedArtifactSuffix.test(stem)) {
+            previous = stem;
+            stem = stem.replace(generatedArtifactSuffix, '');
+        }
+        return stem.replace(/^_+|_+$/g, '').slice(0, 120) || 'translation';
     }
 
     function getTranslationOutputFileName(kind) {
@@ -13540,7 +13704,7 @@ function initTranslateTool() {
                     `报告中有 ${formatTranslationReportIssueSummary(issueSummary)}；共有 ${failedEntries.length} 个可自动处理项，当前文件和列可定位 ${restoredTasks.length} 个。未定位项请确认原文件、工作表、原文列和目标语言没有变化。`
                 );
             } else {
-                setStatus('processing', '已准备硬问题重译任务', `已从翻译报告恢复 ${restoredTasks.length} 个翻译失败、结果缺失或硬质检问题；软性需确认不会自动重译。`);
+                setStatus('processing', '已准备硬问题重译任务', `已从翻译报告恢复 ${restoredTasks.length} 个未获得可用译文、结果缺失或硬质检问题；软性需确认不会自动重译。`);
             }
             updateTranslationRunActions();
         }
@@ -14107,7 +14271,10 @@ function initTranslateTool() {
                     ? getRelevantTranslateConsistencyExamples(task, translateConsistencyExamplePool)
                     : [];
             });
-            setExpectedTranslationTasks(allTranslationTasks);
+            const expectedTranslationTasks = retryTasks
+                ? collectTranslationTasks(activeProfiles, { deferGlossary: true })
+                : allTranslationTasks;
+            setExpectedTranslationTasks(expectedTranslationTasks);
             let translationTasks = allTranslationTasks;
             const translationMemory = new Map();
             const translationMemoryPromises = new Map();
@@ -14283,7 +14450,7 @@ function initTranslateTool() {
                         ? `已复用导入报告 ${importedRestoreSummary.matched} 条，没有剩余需要翻译的文本。`
                         : '没有需要翻译的有效文本。');
                 const repairableText = hasRepairableFailures
-                    ? `仍有 ${runRepairableCount} 个翻译失败、结果缺失或硬质检问题可自动处理。`
+                    ? `仍有 ${runRepairableCount} 个未获得可用译文、结果缺失或硬质检问题可自动处理。`
                     : '';
                 setTranslateDownloadLanguageSummary(
                     `${getTranslateLanguageName(targetLang)}已恢复。${restoredCompleteText}${repairableText}`
@@ -14488,6 +14655,33 @@ function initTranslateTool() {
                 const normalizedTranslated = reportEntry.translatedText;
                 const qaStatus = reportEntry.qaStatus || '';
                 const status = getTranslationReportStatus(normalizedTranslated, qaStatus);
+                if (retryTasks) {
+                    const repairCellId = getRepairAttemptCellId(task);
+                    const existingAttempt = repairAttemptLedger.peek(repairCellId);
+                    if (!existingAttempt || existingAttempt.primaryClaims === 0) {
+                        repairAttemptLedger.claimPrimaryBatch(repairCellId, 'retry_first_stage');
+                        if (task.batchFallbackTriggered) {
+                            repairAttemptLedger.claimNoContentSubstitute(repairCellId);
+                        }
+                        if (reportEntry.candidateReturned === true) {
+                            repairAttemptLedger.recordCandidate(
+                                repairCellId,
+                                task.batchFallbackTriggered ? 'no_content_substitute' : 'retry_first_stage'
+                            );
+                            repairAttemptLedger.settle(
+                                repairCellId,
+                                reportEntry.candidateDecision === 'rejected' ? 'rejected' : 'accepted',
+                                reportEntry.candidateRejectReason || reportEntry.candidateDecision || ''
+                            );
+                        } else if (reportEntry.candidateReturned === false) {
+                            repairAttemptLedger.settle(
+                                repairCellId,
+                                'no_content',
+                                reportEntry.executionOutcome || 'no_content'
+                            );
+                        }
+                    }
+                }
                 previousTaskKeys.forEach(previousTaskKey => {
                     const previousProgressEntry = translationProgressTasks.get(previousTaskKey);
                     if (!previousProgressEntry) return;
@@ -15880,8 +16074,7 @@ function initTranslateTool() {
                     stopReason: continuousRepairEnabled && initialJobs.length === 0
                         ? (initialRemainingJobs.length === 0 ? 'cleared' : 'attempts_exhausted')
                         : '',
-                    continuous: continuousRepairEnabled,
-                    limitedByBudget: false
+                    continuous: continuousRepairEnabled
                 };
                 if (!initialJobs.length) return summary;
                 translateCompletionHistory = [];
@@ -15889,31 +16082,29 @@ function initTranslateTool() {
                 const attemptsByIdentity = new Map();
                 const candidateHistoryByIdentity = new Map();
                 let continuousRepairFatalError = null;
+                let deferredRepairStopError = null;
+                let deferredRepairStopReason = '';
                 let loopState = {
                     noProgressSweeps: 0,
                     fingerprintHistory: []
                 };
                 let continuousSweepAttempt = 0;
                 let continuousSweepBaselineCount = initialJobs.length;
-                let jobs = initialJobs;
-                if (!continuousRepairEnabled && !shouldRunDeferredTranslationRepair(initialJobs.length)) {
-                    summary.limitedByBudget = true;
-                    const cursor = Math.max(0, Number(translationRunReport?.deferredRepairCursor || 0)) % initialJobs.length;
-                    const rotatedJobs = [...initialJobs.slice(cursor), ...initialJobs.slice(0, cursor)];
-                    jobs = rotatedJobs.slice(0, TRANSLATION_RETRY_DEEP_REPAIR_LIMIT);
-                    translationRunReport.deferredRepairCursor = (cursor + jobs.length) % initialJobs.length;
-                    summary.deferred = Math.max(0, initialJobs.length - jobs.length);
-                    updateTranslateRunSummary(
-                        totalTasks,
-                        totalTasks,
-                        `${runLanguageLabel}批量重译完成，本轮深修 ${jobs.length}/${initialJobs.length} 个硬问题`
-                    );
-                    setStatus(
-                        'warning',
-                        '已限制第二阶段修复规模',
-                        `批量重译后仍有 ${initialJobs.length} 个阻断问题；本轮按安全预算只深度处理 ${jobs.length} 个，其余 ${summary.deferred} 个保留原结果，避免再次形成上千次逐条请求。下轮会从后续条目继续。`
-                    );
-                }
+                const ordinaryRepairWaves = !continuousRepairEnabled
+                    ? (strictPolicy?.splitRepairWaves
+                        ? strictPolicy.splitRepairWaves(initialJobs, attemptsByIdentity, {
+                            waveSize: strictPolicy.DEFAULT_WAVE_SIZE || TRANSLATION_REPAIR_WAVE_SIZE,
+                            maxAttempts: 1,
+                            getKey: job => getContinuousRepairTaskIdentity(job.task)
+                        })
+                        : Array.from(
+                            { length: Math.ceil(initialJobs.length / TRANSLATION_REPAIR_WAVE_SIZE) },
+                            (_, index) => initialJobs.slice(
+                                index * TRANSLATION_REPAIR_WAVE_SIZE,
+                                (index + 1) * TRANSLATION_REPAIR_WAVE_SIZE
+                            )
+                        ))
+                    : [];
 
                 async function processRepairWave(waveJobs) {
                     let nextIndex = 0;
@@ -15940,6 +16131,7 @@ function initTranslateTool() {
 
                     async function worker() {
                         while (true) {
+                            if (deferredRepairStopError || isTranslationCancelled) return;
                             const jobIndex = nextIndex++;
                             if (jobIndex >= waveJobs.length) return;
                             const { task, entry, kind } = waveJobs[jobIndex];
@@ -15997,6 +16189,18 @@ function initTranslateTool() {
                                         });
                                     } else {
                                         repairAttemptLedger.settle(repairCellId, 'no_content', 'missing replacement returned no content');
+                                        const executionError = task.lastExecutionError;
+                                        if (isApiQuotaDepletedError(executionError)) {
+                                            deferredRepairStopError = deferredRepairStopError || executionError;
+                                            deferredRepairStopReason = 'quota_depleted';
+                                        } else if (
+                                            task.lastExecutionOutcome === 'request_failed' &&
+                                            executionError &&
+                                            !isTemporaryTranslateApiError(executionError)
+                                        ) {
+                                            deferredRepairStopError = deferredRepairStopError || executionError;
+                                            deferredRepairStopReason = 'api_error';
+                                        }
                                     }
                                 } else {
                                     prepared = await prepareTranslationForCommit(task, entry.translatedText, {
@@ -16006,9 +16210,21 @@ function initTranslateTool() {
                                 }
 
                                 if (prepared) {
-                                    if (continuousRepairEnabled && prepared.repairError) {
+                                    if (prepared.repairError) {
                                         summary.errors++;
-                                        continuousRepairFatalError = continuousRepairFatalError || prepared.repairError;
+                                        if (continuousRepairEnabled) {
+                                            continuousRepairFatalError = continuousRepairFatalError || prepared.repairError;
+                                        }
+                                        if (
+                                            isApiQuotaDepletedError(prepared.repairError) ||
+                                            !isTemporaryTranslateApiError(prepared.repairError) ||
+                                            continuousRepairEnabled
+                                        ) {
+                                            deferredRepairStopError = deferredRepairStopError || prepared.repairError;
+                                            deferredRepairStopReason = isApiQuotaDepletedError(prepared.repairError)
+                                                ? 'quota_depleted'
+                                                : 'api_error';
+                                        }
                                         return;
                                     }
                                     const candidateFingerprint = getContinuousRepairEntryFingerprint({
@@ -16041,6 +16257,13 @@ function initTranslateTool() {
                                     throw error;
                                 }
                                 summary.errors++;
+                                if (isApiQuotaDepletedError(error)) {
+                                    deferredRepairStopError = deferredRepairStopError || error;
+                                    deferredRepairStopReason = 'quota_depleted';
+                                } else if (!isTemporaryTranslateApiError(error)) {
+                                    deferredRepairStopError = deferredRepairStopError || error;
+                                    deferredRepairStopReason = 'api_error';
+                                }
                                 console.warn('Deferred retry repair failed; preserving the first-stage result:', error);
                             } finally {
                                 const attemptRecord = repairAttemptLedger.get(repairCellId);
@@ -16068,11 +16291,19 @@ function initTranslateTool() {
 
                     await Promise.all(Array.from({ length: workerCount }, () => worker()));
                     await flushTranslationTaskProgress();
-                    if (continuousRepairEnabled) await saveCurrentTranslationProgress(1);
+                    await saveCurrentTranslationProgress(1);
                 }
 
                 if (!continuousRepairEnabled) {
-                    await processRepairWave(jobs);
+                    for (const repairWave of ordinaryRepairWaves) {
+                        await processRepairWave(repairWave);
+                        if (deferredRepairStopError || isTranslationCancelled) break;
+                    }
+                    summary.stopReason = deferredRepairStopReason ||
+                        (getRemainingRetryRepairJobs().length === 0 ? 'cleared' : 'attempts_exhausted');
+                    if (deferredRepairStopError) {
+                        summary.lastErrorMessage = deferredRepairStopError?.message || String(deferredRepairStopError);
+                    }
                 } else {
                     while (true) {
                         const beforeJobs = getDeferredRetryRepairJobs();
@@ -16084,21 +16315,24 @@ function initTranslateTool() {
                         }
                         const wave = strictPolicy?.selectRepairWave
                             ? strictPolicy.selectRepairWave(beforeJobs, attemptsByIdentity, {
-                                waveSize: strictPolicy.DEFAULT_WAVE_SIZE || TRANSLATION_RETRY_DEEP_REPAIR_LIMIT,
+                                waveSize: strictPolicy.DEFAULT_WAVE_SIZE || TRANSLATION_REPAIR_WAVE_SIZE,
                                 maxAttempts: strictPolicy.DEFAULT_MAX_ATTEMPTS || 2,
                                 getKey: job => getContinuousRepairTaskIdentity(job.task)
                             })
                             : beforeJobs
                                 .filter(job => (attemptsByIdentity.get(getContinuousRepairTaskIdentity(job.task)) || 0) < 2)
-                                .slice(0, TRANSLATION_RETRY_DEEP_REPAIR_LIMIT);
+                                .slice(0, TRANSLATION_REPAIR_WAVE_SIZE);
                         if (!wave.length) {
                             summary.stopReason = 'attempts_exhausted';
                             break;
                         }
                         await processRepairWave(wave);
-                        if (continuousRepairFatalError) {
-                            summary.stopReason = 'api_error';
-                            summary.lastErrorMessage = continuousRepairFatalError?.message || String(continuousRepairFatalError);
+                        if (deferredRepairStopError || continuousRepairFatalError || isTranslationCancelled) {
+                            const terminalError = deferredRepairStopError || continuousRepairFatalError;
+                            summary.stopReason = isTranslationCancelled
+                                ? 'cancelled'
+                                : (deferredRepairStopReason || 'api_error');
+                            summary.lastErrorMessage = terminalError?.message || String(terminalError || '');
                             break;
                         }
                         const afterJobs = getDeferredRetryRepairJobs();
@@ -17089,8 +17323,6 @@ function initTranslateTool() {
             const deferredRepairMessage = deferredRetryRepairSummary
                 ? (deferredRetryRepairSummary.continuous
                     ? `自动运行 ${deferredRetryRepairSummary.waves} 波，深度检查 ${deferredRetryRepairSummary.attempted} 次，更新 ${deferredRetryRepairSummary.changed} 条；${continuousRepairStopLabels[deferredRetryRepairSummary.stopReason] || '流程已停止'}${continuousRepairRemaining ? `，剩余 ${continuousRepairRemaining} 条` : ''}${deferredRetryRepairSummary.oscillations ? `，跳过振荡 ${deferredRetryRepairSummary.oscillations} 条` : ''}${deferredRetryRepairSummary.lastErrorMessage ? `，原因：${deferredRetryRepairSummary.lastErrorMessage}` : ''}。`
-                    : deferredRetryRepairSummary.limitedByBudget
-                    ? `批量重译后有 ${deferredRetryRepairSummary.eligible} 个阻断项；本轮按预算深度检查 ${deferredRetryRepairSummary.attempted} 条，其余 ${deferredRetryRepairSummary.deferred} 条保留原结果并轮转到后续批次。`
                     : (deferredRetryRepairSummary.eligible > 0
                         ? `第二阶段深度检查 ${deferredRetryRepairSummary.attempted} 条，更新 ${deferredRetryRepairSummary.changed} 条，解除阻断 ${deferredRetryRepairSummary.resolved} 条${deferredRetryRepairSummary.errors ? `，保留异常 ${deferredRetryRepairSummary.errors} 条原结果` : ''}。`
                         : '批量重译后没有残余硬问题，无需逐条 AI 修复。'))
@@ -17290,7 +17522,7 @@ function initTranslateTool() {
             setStatus(
                 'warning',
                 '阻断问题未清零，不能下载交付版',
-                `当前还有 ${deliveryGate.blockingCount} 条翻译失败、结果缺失或硬质检问题。未验证版可供查看和人工修改，但不能直接交付。`
+                `当前还有 ${deliveryGate.blockingCount} 条未获得可用译文、结果缺失或硬质检问题。未验证版可供查看和人工修改，但不能直接交付。`
             );
             return;
         }
@@ -17359,11 +17591,16 @@ function initTranslateTool() {
             ['文件状态', `包含 ${deliveryGate.blockingCount} 条阻断问题，尚未达到正式交付条件`],
             ['目标语言', languageName],
             ['生成时间', new Date().toLocaleString('zh-CN')],
-            ['翻译失败 / 未返回', issueSummary.failedOrMissing || 0],
+            ['模型未返回内容', issueSummary.noContent || 0],
+            ['请求失败', issueSummary.requestFailed || 0],
+            ['候选未采用', issueSummary.candidateRejected || 0],
+            ['尚未处理', issueSummary.notProcessed || 0],
+            ['导入缺项', issueSummary.importMissing || 0],
+            ['其他缺失阻断', issueSummary.otherMissing || 0],
             ['硬质检未通过', issueSummary.hardQa || 0],
             ['软性需确认', issueSummary.softRisk || 0],
             [],
-            ['正式交付条件', '翻译失败、结果缺失和硬质检问题全部清零'],
+            ['正式交付条件', '未获得可用译文、结果缺失和硬质检问题全部清零'],
             ['建议操作', '加载相同原文件，导入同时生成的独立 translation_report.xlsx 后点击“继续处理”；工具会开始新的有界任务，只处理仍然阻断的高置信问题'],
             ['数据说明', '后续数据工作表是当前译文快照；具体问题和位置保存在同时生成的独立 translation_report.xlsx 中'],
             ['文件命名', '*_translated_unverified.xlsx 只用于查看、人工修改或内部确认，不等同于 *_translated.xlsx 交付版']
@@ -18129,6 +18366,7 @@ ${text}`;
         if (context && typeof context === 'object') {
             context.lastExecutionOutcome = '';
             context.lastResponseDiagnostic = null;
+            context.lastExecutionError = null;
         }
 
         let lastError = null;
@@ -18181,6 +18419,7 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                     if (context && typeof context === 'object') {
                         context.lastExecutionOutcome = context.batchFallbackTriggered ? 'accepted_after_batch_fallback' : 'accepted';
                         context.lastResponseDiagnostic ||= context.batchFallbackDiagnostic || null;
+                        context.lastExecutionError = null;
                     }
                     return restoredTranslation;
                 }
@@ -18228,6 +18467,7 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                 if (context && typeof context === 'object') {
                     context.lastExecutionOutcome = context.batchFallbackTriggered ? 'accepted_after_batch_fallback' : 'accepted';
                     context.lastResponseDiagnostic ||= context.batchFallbackDiagnostic || null;
+                    context.lastExecutionError = null;
                 }
                 return translated;
 
@@ -18243,6 +18483,7 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                 lastError = error;
                 if (context && typeof context === 'object') {
                     context.lastExecutionOutcome = classifyTranslateExecutionError(error);
+                    context.lastExecutionError = error;
                     if (error?.safeDiagnostic) context.lastResponseDiagnostic = error.safeDiagnostic;
                 }
                 console.error(`Translate attempt ${attempt + 1} failed:`, error);
@@ -18257,6 +18498,7 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
         }
         if (context && typeof context === 'object') {
             context.lastExecutionOutcome = classifyTranslateExecutionError(lastError);
+            context.lastExecutionError = lastError;
             if (lastError?.safeDiagnostic) context.lastResponseDiagnostic = lastError.safeDiagnostic;
         }
         return makeTranslateFailureText(text, summarizeTranslateError(lastError));

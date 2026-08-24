@@ -49,6 +49,7 @@ const dedupeEntriesSource = extractFunction(sourceText, 'function dedupeTranslat
 const stripLegacyColumnsSource = extractFunction(sourceText, 'function stripLegacyTranslationArtifactColumns(');
 const ensureOutputColumnSource = extractFunction(sourceText, 'function ensureTranslateOutputColumn(');
 const buildTaskKeySource = extractFunction(sourceText, 'function buildTranslationTaskKey(');
+const buildLegacyTaskKeySource = extractFunction(sourceText, 'function buildLegacyGlobalTranslationTaskKey(');
 const collectTasksSource = extractFunction(sourceText, 'function collectTranslationTasks(');
 const writeResultSource = extractFunction(sourceText, 'function writeTranslationResult(');
 const buildReportEntrySource = extractFunction(sourceText, 'function buildTranslationReportEntry(');
@@ -77,7 +78,7 @@ function createTaskCollector(activeSheetData, activeSelectedColumns, activeSourc
         'isSpecialCode',
         'getTranslateOriginalRowNumber',
         'getTranslateColumnName',
-        `${buildTaskKeySource}\n${collectTasksSource}\nreturn collectTranslationTasks;`
+        `${buildTaskKeySource}\n${buildLegacyTaskKeySource}\n${collectTasksSource}\nreturn collectTranslationTasks;`
     )(
         activeSheetData,
         activeSelectedColumns,

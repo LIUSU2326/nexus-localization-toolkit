@@ -42,7 +42,12 @@ assert.match(
 assert.match(
     initializeOutputSource,
     /importedTranslateProgressState\?\.entries[\s\S]*preservedByIdentity[\s\S]*translationRunReport\.entries = \[\.\.\.preservedByIdentity\.values\(\)\]/,
-    'all imported report rows, including blank, failed, and unmapped blockers, must remain in the live delivery gate'
+    'all uniquely mapped imported rows must remain in the canonical live delivery gate'
+);
+assert.match(
+    initializeOutputSource,
+    /setExpectedTranslationTasks\(tasks\)/,
+    'complete-report reuse must initialize the full canonical output map before a zero-AI direct export'
 );
 assert.match(
     targetedRetrySource,

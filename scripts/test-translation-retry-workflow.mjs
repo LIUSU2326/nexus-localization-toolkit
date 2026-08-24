@@ -32,7 +32,6 @@ function extractFunction(functionSource, signature) {
 
 const deferPolicySource = extractFunction(source, 'function shouldDeferRetryQaRepair(');
 const twoStagePolicySource = extractFunction(source, 'function shouldUseTwoStageTranslationRetry(');
-const boundedPolicySource = extractFunction(source, 'function shouldRunDeferredTranslationRepair(');
 const rebuildSource = extractFunction(source, 'function rebuildFailedTranslationTasksFromReport(');
 const retrySource = extractFunction(source, 'async function retryFailedTranslations(');
 const importedRetrySource = extractFunction(source, 'async function retrySuspiciousImportedTranslations(');
@@ -48,14 +47,11 @@ const replaceSource = extractFunction(source, 'function replaceCommittedTranslat
 const translateBatchSource = extractFunction(source, 'async function translateBatchWithRetry(');
 
 const policy = new Function(`
-    const TRANSLATION_RETRY_DEEP_REPAIR_LIMIT = 60;
     ${deferPolicySource}
     ${twoStagePolicySource}
-    ${boundedPolicySource}
     return {
         shouldDeferRetryQaRepair,
-        shouldUseTwoStageTranslationRetry,
-        shouldRunDeferredTranslationRepair
+        shouldUseTwoStageTranslationRetry
     };
 `)();
 
@@ -65,10 +61,6 @@ assert.equal(policy.shouldDeferRetryQaRepair({ deferAutoQaRepair: false }), fals
 assert.equal(policy.shouldUseTwoStageTranslationRetry([{}]), true);
 assert.equal(policy.shouldUseTwoStageTranslationRetry([{}], { twoStageRetry: false }), false);
 assert.equal(policy.shouldUseTwoStageTranslationRetry([], {}), true, 'ordinary first translation must auto-run the bounded repair phase');
-assert.equal(policy.shouldRunDeferredTranslationRepair(1), true);
-assert.equal(policy.shouldRunDeferredTranslationRepair(60), true);
-assert.equal(policy.shouldRunDeferredTranslationRepair(61), false);
-assert.equal(policy.shouldRunDeferredTranslationRepair(0), false);
 
 assert.match(
     rebuildSource,
@@ -192,8 +184,8 @@ assert.match(
 );
 assert.match(
     deferredSource,
-    /!continuousRepairEnabled && !shouldRunDeferredTranslationRepair\(initialJobs\.length\)[\s\S]*rotatedJobs\.slice\(0, TRANSLATION_RETRY_DEEP_REPAIR_LIMIT\)/,
-    'ordinary large residual queues must retain the rotating bounded repair budget'
+    /splitRepairWaves\(initialJobs,[\s\S]*maxAttempts:\s*1[\s\S]*for \(const repairWave of ordinaryRepairWaves\)/,
+    'ordinary residual queues must exhaust all cells in bounded waves without raising the per-cell attempt budget'
 );
 assert.match(
     deferredSource,
@@ -207,7 +199,7 @@ assert.match(
 );
 assert.match(
     deferredSource,
-    /prepared\.repairError[\s\S]*stopReason = 'api_error'/,
+    /prepared\.repairError[\s\S]*deferredRepairStopReason = [\s\S]*'api_error'/,
     'continuous repair must stop after a surfaced API repair failure instead of burning later waves'
 );
 assert.match(

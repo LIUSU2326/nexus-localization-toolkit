@@ -299,6 +299,8 @@ const createHarness = new Function(
         function getTranslationIssueIdentity(entry = {}) {
             return entry.taskKey || [entry.sourceFile, entry.sheetName, entry.rowNumber, entry.column].join('|');
         }
+        function assertTranslationOutputConsistency() {}
+        function setExpectedTranslationTasks() {}
 
         ${productionFunctions}
 

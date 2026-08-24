@@ -39,6 +39,7 @@ const makeKeySource = extractFunction(source, 'function makeTranslateImportMatch
 const taskKeysSource = extractFunction(source, 'function getTaskImportMatchKeys(');
 const entryKeysSource = extractFunction(source, 'function getImportedEntryMatchKeys(');
 const taskIndexSource = extractFunction(source, 'function buildTranslateImportTaskIndex(');
+const taskLookupSource = extractFunction(source, 'function buildTranslateImportTaskLookup(');
 const importedEntryMatchesTaskSource = extractFunction(source, 'function importedEntryMatchesTask(');
 const findMatchSource = extractFunction(source, 'function findImportedTranslationTaskMatch(');
 const missingEntriesSource = extractFunction(source, 'function buildImportedReportMissingTaskEntries(');
@@ -55,9 +56,15 @@ const continuationPlanSource = extractFunction(source, 'function buildImportedCo
 const retryPreviewSource = extractFunction(source, 'function getImportedIssueRetryPreview(');
 const ensureExpectedCoverageSource = extractFunction(source, 'function ensureTranslationReportCoversExpectedTasks(');
 const reportDisplayStatusSource = extractFunction(source, 'function getTranslationReportDisplayStatus(');
+const issueSummarySource = extractFunction(source, 'function getTranslationReportIssueSummary(');
+const formatIssueSummarySource = extractFunction(source, 'function formatTranslationReportIssueSummary(');
 const addTranslationItemSource = extractFunction(source, 'function addTranslationItem(');
 
-const { mergeImportedTranslationEntriesWithCurrentTasks } = new Function(
+const {
+    buildTranslateImportTaskIndex,
+    findImportedTranslationTaskMatch,
+    mergeImportedTranslationEntriesWithCurrentTasks
+} = new Function(
     'getCompactModelLabel',
     'isTranslateFailureText',
     'classifyTranslationReportEntry',
@@ -66,6 +73,7 @@ const { mergeImportedTranslationEntriesWithCurrentTasks } = new Function(
     ${taskKeysSource}
     ${entryKeysSource}
     ${taskIndexSource}
+    ${taskLookupSource}
     ${importedEntryMatchesTaskSource}
     ${findMatchSource}
     ${missingEntriesSource}
@@ -77,7 +85,11 @@ const { mergeImportedTranslationEntriesWithCurrentTasks } = new Function(
     ${selectPreferredEntrySource}
     ${dedupeEntriesSource}
     ${mergeEntriesSource}
-    return { mergeImportedTranslationEntriesWithCurrentTasks };`
+    return {
+        buildTranslateImportTaskIndex,
+        findImportedTranslationTaskMatch,
+        mergeImportedTranslationEntriesWithCurrentTasks
+    };`
 )(
     profile => profile?.name || profile?.model || '',
     text => /^\[(?:翻译失败|TRANSLATION_FAILED)/.test(String(text || '')),
@@ -87,6 +99,32 @@ const { mergeImportedTranslationEntriesWithCurrentTasks } = new Function(
         return globalThis.NexusTranslationIssuePolicy.classifyEntry(entry)
             .some(finding => finding.tier === 'required') ? 'hard' : 'soft';
     }
+);
+
+const {
+    getTranslationReportIssueSummary,
+    formatTranslationReportIssueSummary
+} = new Function(
+    'getTranslationReportIssueGroups',
+    'isActualTranslationFailureReportEntry',
+    'classifyTranslationReportEntry',
+    `${issueSummarySource}
+    ${formatIssueSummarySource}
+    return {
+        getTranslationReportIssueSummary,
+        formatTranslationReportIssueSummary
+    };`
+)(
+    entries => ({
+        missing: entries.filter(entry => ['no_content', 'not_processed', 'import_missing'].includes(entry.executionOutcome)),
+        hard: entries.filter(entry => ['request_failed', 'candidate_rejected'].includes(entry.executionOutcome)),
+        length: [],
+        soft: []
+    }),
+    entry => entry.executionOutcome === 'request_failed',
+    entry => ['no_content', 'not_processed', 'import_missing'].includes(entry.executionOutcome)
+        ? 'missing'
+        : 'hard'
 );
 
 const { getImportedIssueRetryPreview } = new Function(
@@ -231,6 +269,85 @@ function makeReportEntry(task, overrides = {}) {
         'a changed API channel/model should still match the same source row by file, sheet, row, column and source text'
     );
     assert.equal(merged.entries.length, 1);
+}
+
+{
+    const firstTask = makeTask(0, {
+        taskKey: 'file-a-row-2',
+        source: { fileName: '文件A.xlsx', sheetName: '全文本' }
+    });
+    const secondTask = makeTask(0, {
+        taskKey: 'file-b-row-2',
+        source: { fileName: '文件B.xlsx', sheetName: '全文本' }
+    });
+    const tasks = [firstTask, secondTask];
+    const taskByKey = new Map(tasks.map(task => [task.taskKey, task]));
+    const fallbackIndex = buildTranslateImportTaskIndex(tasks);
+    const ambiguousLegacyEntry = makeReportEntry(firstTask, {
+        taskKey: '',
+        sourceFile: '',
+        profile: '',
+        model: '',
+        translatedText: '旧报告中的有效译文'
+    });
+
+    assert.equal(
+        findImportedTranslationTaskMatch(ambiguousLegacyEntry, taskByKey, fallbackIndex),
+        null,
+        'a weak fallback key that matches multiple logical cells must remain unmatched instead of choosing the first task'
+    );
+
+    const explicitFileEntry = { ...ambiguousLegacyEntry, sourceFile: secondTask.source.fileName };
+    assert.equal(
+        findImportedTranslationTaskMatch(explicitFileEntry, taskByKey, fallbackIndex)?.taskKey,
+        secondTask.taskKey,
+        'a uniquely identifying source file may still resolve an otherwise identical row'
+    );
+
+    const merged = mergeImportedTranslationEntriesWithCurrentTasks([ambiguousLegacyEntry], tasks);
+    assert.equal(
+        merged.reportMissingEntries.length,
+        tasks.length,
+        'an ambiguous old report row must not claim coverage for either current logical cell'
+    );
+    assert.equal(
+        merged.entries.length,
+        tasks.length,
+        'canonical delivery entries must contain current logical cells only, excluding unmatched old report rows'
+    );
+    assert.ok(
+        merged.entries.every(entry => entry.executionOutcome === 'import_missing'),
+        'both unresolved current cells must remain explicit canonical import gaps'
+    );
+    assert.equal(merged.unmatchedEntries?.length, 1);
+    assert.equal(merged.unmatchedEntries[0].translatedText, ambiguousLegacyEntry.translatedText);
+    assert.equal(
+        merged.unmatchedEntries[0].sourceText,
+        ambiguousLegacyEntry.sourceText,
+        'unmatched old rows should remain available for migration audit without entering canonical delivery counts'
+    );
+}
+
+{
+    const currentTask = makeTask(0);
+    const unrelatedLegacyEntry = makeReportEntry(currentTask, {
+        taskKey: 'unrelated-old-task',
+        sourceFile: '另一份文件.xlsx',
+        sheetName: '旧工作表',
+        rowNumber: 999,
+        sourceText: '另一条旧原文',
+        translatedText: '不应计入当前交付的旧译文'
+    });
+    const merged = mergeImportedTranslationEntriesWithCurrentTasks([unrelatedLegacyEntry], [currentTask]);
+    assert.equal(merged.entries.length, 1);
+    assert.equal(merged.entries[0].taskKey, currentTask.taskKey);
+    assert.equal(merged.entries[0].executionOutcome, 'import_missing');
+    assert.equal(merged.unmatchedEntries?.length, 1);
+    assert.equal(
+        merged.unmatchedEntries[0].translatedText,
+        unrelatedLegacyEntry.translatedText,
+        'an unrelated legacy row must be audited separately and never counted as canonical success'
+    );
 }
 
 {
@@ -402,6 +519,40 @@ function makeReportEntry(task, overrides = {}) {
         candidateReturned: true
     });
     assert.match(rejectedHtml, /候选未通过确定性质检/);
+}
+
+{
+    const entries = [
+        { executionOutcome: 'no_content', candidateReturned: false },
+        { executionOutcome: 'request_failed', candidateReturned: false },
+        { executionOutcome: 'candidate_rejected', candidateReturned: true, translatedText: '保留此前译文' },
+        { executionOutcome: 'not_processed', candidateReturned: null },
+        { executionOutcome: 'import_missing', candidateReturned: null }
+    ];
+    const summary = getTranslationReportIssueSummary(entries);
+
+    assert.equal(summary.noContent, 1, 'model no-content must have its own summary count');
+    assert.equal(summary.requestFailed, 1, 'transport/provider request failure must have its own summary count');
+    assert.equal(summary.candidateRejected, 1, 'returned-but-rejected candidates must not be called model failures');
+    assert.equal(summary.notProcessed, 1, 'work not attempted in this run must be counted separately');
+    assert.equal(summary.importMissing, 1, 'an old report coverage gap must remain an import state, not a model failure');
+    assert.equal(
+        summary.actualFailed,
+        2,
+        'only no-content and request-failed outcomes are actual model/request failures in this fixture'
+    );
+
+    const formatted = formatTranslationReportIssueSummary(summary);
+    assert.doesNotMatch(
+        formatted,
+        /翻译失败\/未返回/,
+        'the visible summary must not collapse execution, rejection and import states into one ambiguous count'
+    );
+    assert.match(formatted, /模型未返回\s*1/, 'the visible summary must expose no-content separately');
+    assert.match(formatted, /请求失败\s*1/, 'the visible summary must expose request failures separately');
+    assert.match(formatted, /候选未采用\s*1/, 'the visible summary must expose candidate rejection separately');
+    assert.match(formatted, /尚未处理\s*1/, 'the visible summary must expose unattempted rows separately');
+    assert.match(formatted, /导入(?:报告)?缺(?:少|项)\s*1/, 'the visible summary must expose imported report gaps separately');
 }
 
 assert.doesNotMatch(source, /TRANSLATE_IMPORT_ISSUE_FILTERS/);
