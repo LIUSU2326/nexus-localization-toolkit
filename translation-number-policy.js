@@ -2,10 +2,13 @@
 (function installNexusTranslationNumberPolicy(root) {
     'use strict';
 
-    const POLICY_VERSION = '2.1.0';
+    const POLICY_VERSION = '2.2.0';
     const profiles = root.NexusLanguageQualityProfiles;
     const formatTokens = root.NexusTranslationFormatTokenPolicy;
-    const TOKEN_PATTERN = /(?<![\d%])[+\-−]?\d+(?:(?:[.,]\d+)|(?:[ \u00a0]\d{3}))*(?:%)?/g;
+    // Percent signs can be written before or after the magnitude depending on
+    // locale (for example Turkish "%5" and English "5%"). Both forms carry
+    // the same deterministic numeric invariant.
+    const TOKEN_PATTERN = /(?<![\d%])(?:%[+\-−]?\d+(?:(?:[.,]\d+)|(?:[ \u00a0]\d{3}))*|[+\-−]?\d+(?:(?:[.,]\d+)|(?:[ \u00a0]\d{3}))*(?:%)?)/g;
     const CLOCK_HOUR_SUFFIX_PATTERN = /^\s*(?:点|點|时|時)/u;
 
     function isUnsupportedLeadingDecimal(input, index) {
@@ -61,9 +64,16 @@
             // normalization instead of misreading them as the integer 5.
             if (isUnsupportedLeadingDecimal(input, match.index)) continue;
             const raw = match[0];
-            const sign = /^[+\-−]/.test(raw) ? raw[0].replace('−', '-') : '';
-            const percent = raw.endsWith('%');
-            const unsigned = raw.slice(sign ? 1 : 0, percent ? -1 : undefined);
+            const percentPrefix = raw.startsWith('%');
+            const percentSuffix = raw.endsWith('%');
+            const numericStart = percentPrefix ? 1 : 0;
+            const signRaw = raw[numericStart] || '';
+            const sign = /^[+\-−]$/.test(signRaw) ? signRaw.replace('−', '-') : '';
+            const percent = percentPrefix || percentSuffix;
+            const unsigned = raw.slice(
+                numericStart + (sign ? 1 : 0),
+                percentSuffix ? -1 : undefined
+            );
             const comparatorText = input.slice(Math.max(0, match.index - 3), match.index);
             const comparatorMatch = comparatorText.match(/(?:>=|<=|>|<|≥|≤)\s*$/);
             const comparatorRaw = comparatorMatch?.[0]?.trim() || '';

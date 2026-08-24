@@ -3749,6 +3749,7 @@ function getApiProfileRuntimeStatusTag(profile, hasCredentials = true) {
 
 function getTranslationBatchSize(profile) {
     if (profile?.provider === 'youdaoTranslate') return 20;
+    if (isReasoningHeavyModel(profile?.model || '')) return 10;
     if (profile?.provider === 'deepseek') return 20;
     if (profile?.provider === 'agnes') return 20;
     return 20;
@@ -5483,7 +5484,7 @@ function isGeminiProfile(apiConfig) {
 }
 
 function isReasoningHeavyModel(model = '') {
-    return /reasoner|reasoning|thinking|v4-pro|v2-pro|mimo-v2|claude|opus|sonnet|gpt-5|r1|o1|o3|o4|gemini-3/i.test(String(model || ''));
+    return /reasoner|reasoning|thinking|v4-(?:flash|pro)|v2-pro|mimo-v2|claude|opus|sonnet|gpt-5|r1|o1|o3|o4|gemini-3/i.test(String(model || ''));
 }
 
 function getPreflightMaxTokens(apiConfig, model, attempt = 0) {
@@ -17894,6 +17895,7 @@ function initTranslateTool() {
         const itemCount = Math.max(1, Number(options.itemCount || texts.length || 1));
         const attempt = Math.max(0, Number(options.attempt || 0));
         const isBatch = mode === 'batch' || itemCount > 1;
+        const reasoningHeavy = isReasoningHeavyModel(options.model || '');
         const multiplier = targetLang === 'zh-TW'
             ? 5
             : (targetLang === 'en' ? 4 : 3.4);
@@ -17901,10 +17903,10 @@ function initTranslateTool() {
         const structuralOverhead = isBatch ? 512 : 160;
         const estimated = Math.ceil(length * multiplier) + itemCount * perItemOverhead + structuralOverhead;
         const minimum = isBatch
-            ? Math.min(8192, Math.max(1536, itemCount * 96))
-            : (mode === 'repair' ? 384 : 256);
-        const upperLimit = isBatch ? 8192 : 1536;
-        const boosted = Math.ceil(Math.max(minimum, estimated) * (1 + attempt * 0.75));
+            ? Math.min(8192, Math.max(reasoningHeavy ? 4096 : 1536, itemCount * (reasoningHeavy ? 192 : 96)))
+            : (reasoningHeavy ? 2048 : (mode === 'repair' ? 384 : 256));
+        const upperLimit = isBatch ? 8192 : (reasoningHeavy ? 4096 : 1536);
+        const boosted = Math.ceil(Math.max(minimum, estimated) * (1 + attempt * (reasoningHeavy ? 0.5 : 0.75)));
         return Math.max(minimum, Math.min(upperLimit, boosted));
     }
 
@@ -18261,13 +18263,17 @@ ${text}`;
                                 max_tokens: getTranslationMaxTokens(contextTexts, targetLang, {
                                     mode: 'batch',
                                     itemCount: tasks.length,
-                                    attempt
+                                    attempt,
+                                    model
                                 })
                             },
                             signal,
                             API_REQUEST_TIMEOUT_MS,
                             {
-                                rejectTruncated: true,
+                                // Explicit stable IDs allow the batch parser to
+                                // retain every complete object from a truncated
+                                // tail and only fall back the missing IDs.
+                                rejectTruncated: false,
                                 onSafeDiagnostic: diagnostic => {
                                     responseDiagnostic = diagnostic;
                                 }
@@ -18329,9 +18335,10 @@ ${text}`;
                     error
                 });
                 if (error?.safeDiagnostic) responseDiagnostic = error.safeDiagnostic;
-                const willRetry = attempt < retries - 1 && (
-                    Boolean(error?.isOutputTruncated) || !isSplittableTranslationBatchError(error)
-                );
+                // A truncated/structurally invalid batch is a size problem.
+                // Retrying the identical batch only burns another long request;
+                // return it to the bounded split planner immediately instead.
+                const willRetry = attempt < retries - 1 && !isSplittableTranslationBatchError(error);
                 console.warn(`Batch translate attempt ${attempt + 1} failed:`, error);
                 options.onBatchStatus?.({
                     attempt: attempt + 1,
@@ -18442,7 +18449,8 @@ ${buildTranslateConsistencyPromptSection(nextContext.consistencyTerms || [], nex
                             temperature: 0.1,
                             max_tokens: getTranslationMaxTokens([text, context.referenceText].filter(Boolean), targetLang, {
                                 mode: 'single',
-                                attempt
+                                attempt,
+                                model
                             })
                         },
                         signal,
@@ -18717,7 +18725,8 @@ ${protectedContext.fields.currentTranslation}`;
                                 max_tokens: getTranslationMaxTokens(promptParts.tokenTexts, targetLang, {
                                     mode: 'repair-batch',
                                     itemCount: requestModels.length,
-                                    attempt
+                                    attempt,
+                                    model
                                 })
                             },
                             signal,
@@ -18854,7 +18863,8 @@ ${protectedContext.fields.currentTranslation}`;
                             temperature: 0,
                             max_tokens: getTranslationMaxTokens([task.text, task.referenceText, currentTranslation].filter(Boolean), targetLang, {
                                 mode: 'repair',
-                                attempt
+                                attempt,
+                                model
                             })
                         },
                         signal,

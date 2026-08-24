@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "fixtureVersion": "2026-08-23.3",
+  "fixtureVersion": "2026-08-24.1",
   "description": "Anonymized real-world and synthetic gold cases for deterministic translation QA.",
   "cases": [
     {
@@ -103,6 +103,22 @@
       "source": "提升20%的伤害",
       "target": "+20% obrażeń",
       "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "number-turkish-prefix-percent-pass",
+      "kind": "number",
+      "targetLang": "tr",
+      "source": "学习后，守护兽提供的属性增加5%",
+      "target": "Öğrenildiğinde Koruyucu Canavarın sağladığı özellikler %5 artar",
+      "expected": { "hardIssues": [] }
+    },
+    {
+      "id": "number-turkish-prefix-percent-change-hard",
+      "kind": "number",
+      "targetLang": "tr",
+      "source": "学习后，守护兽提供的属性增加5%",
+      "target": "Öğrenildiğinde özellikler %6 artar",
+      "expected": { "hardContains": ["缺少 5%"] }
     },
     {
       "id": "number-time-localization-review-only",

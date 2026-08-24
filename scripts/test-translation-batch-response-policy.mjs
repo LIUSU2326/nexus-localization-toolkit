@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 await import('../translation-batch-response-policy.js');
 const policy = globalThis.NexusTranslationBatchResponsePolicy;
 assert.ok(policy);
-assert.equal(policy.POLICY_VERSION, '1.0.0');
+assert.equal(policy.POLICY_VERSION, '1.1.0');
 
 {
     const result = policy.parseTranslationBatchResponse(JSON.stringify([
@@ -65,6 +65,24 @@ assert.equal(policy.POLICY_VERSION, '1.0.0');
     );
     assert.equal(singleObject.valuesById.get('t2'), 'two');
     assert.deepEqual(singleObject.fallbackIds, ['t1']);
+}
+
+{
+    const truncated = policy.parseTranslationBatchResponse(
+        '[{"id":"t2","translation":"two"},{"id":"t1","translation":"one"},{"id":"t3","translation":"cut',
+        ['t1', 't2', 't3']
+    );
+    assert.equal(truncated.mode, 'truncated_id_objects');
+    assert.deepEqual([...truncated.valuesById.entries()].sort(), [['t1', 'one'], ['t2', 'two']]);
+    assert.deepEqual(truncated.fallbackIds, ['t3']);
+}
+
+{
+    const unsafeTruncatedPositional = policy.parseTranslationBatchResponse(
+        '["one","two',
+        ['t1', 't2']
+    );
+    assert.equal(unsafeTruncatedPositional.valuesById.size, 0, 'truncated positional output must never be salvaged');
 }
 
 console.log('translation-batch-response-policy: stable ID parsing and bounded legacy compatibility passed');

@@ -8,7 +8,7 @@
 (function installNexusTranslationBatchResponsePolicy(root) {
     'use strict';
 
-    const POLICY_VERSION = '1.0.0';
+    const POLICY_VERSION = '1.1.0';
 
     function cleanResponseEnvelope(value) {
         let text = String(value ?? '').trim();
@@ -164,12 +164,63 @@
         return finalizeResult(result, expectedIds, presentIds);
     }
 
+    function parseCompleteIdObjectFragments(value) {
+        const text = String(value ?? '')
+            .replace(/<think>[\s\S]*?<\/think>/gi, '')
+            .replace(/^```(?:json)?\s*/i, '')
+            .replace(/\s*```$/i, '');
+        const arrayStart = text.indexOf('[');
+        if (arrayStart < 0) return [];
+        const fragments = [];
+        let objectStart = -1;
+        let objectDepth = 0;
+        let inString = false;
+        let escaped = false;
+        for (let index = arrayStart + 1; index < text.length; index += 1) {
+            const char = text[index];
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (char === '\\') escaped = true;
+                else if (char === '"') inString = false;
+                continue;
+            }
+            if (char === '"') {
+                inString = true;
+                continue;
+            }
+            if (char === '{') {
+                if (objectDepth === 0) objectStart = index;
+                objectDepth += 1;
+                continue;
+            }
+            if (char !== '}' || objectDepth === 0) continue;
+            objectDepth -= 1;
+            if (objectDepth !== 0 || objectStart < 0) continue;
+            try {
+                const parsed = JSON.parse(text.slice(objectStart, index + 1));
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) fragments.push(parsed);
+            } catch {
+                // Ignore an incomplete object. Only independently valid,
+                // explicitly ID-tagged objects may be salvaged.
+            }
+            objectStart = -1;
+        }
+        return fragments;
+    }
+
     function parseTranslationBatchResponse(value, expectedIds = []) {
         const normalizedExpectedIds = normalizeExpectedIds(expectedIds);
         let parsed;
         try {
             parsed = JSON.parse(cleanResponseEnvelope(value));
         } catch (error) {
+            const fragments = parseCompleteIdObjectFragments(value);
+            if (fragments.length) {
+                const salvaged = parseIdObjectArray(fragments, normalizedExpectedIds);
+                salvaged.mode = 'truncated_id_objects';
+                salvaged.parseError = String(error?.message || error || '').slice(0, 160);
+                return salvaged;
+            }
             const result = createResult(normalizedExpectedIds, 'invalid_json');
             result.structuralError = 'invalid_json';
             result.parseError = String(error?.message || error || '').slice(0, 160);
@@ -210,6 +261,7 @@
 
     root.NexusTranslationBatchResponsePolicy = Object.freeze({
         POLICY_VERSION,
-        parseTranslationBatchResponse
+        parseTranslationBatchResponse,
+        parseCompleteIdObjectFragments
     });
 })(typeof globalThis !== 'undefined' ? globalThis : window);

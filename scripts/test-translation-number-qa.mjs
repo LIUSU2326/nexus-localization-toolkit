@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 await import('../language-quality-profiles.js');
 await import('../translation-format-token-policy.js');
 await import('../translation-number-policy.js');
+await import('../translation-issue-policy.js');
 
 const policy = globalThis.NexusTranslationNumberPolicy;
+const issuePolicy = globalThis.NexusTranslationIssuePolicy;
 assert.ok(policy, 'NexusTranslationNumberPolicy should be installed');
 
 function evaluate(source, target, targetLang = 'en') {
@@ -93,6 +95,41 @@ assert.deepEqual(
     'Chinese number words versus target digits are review-only'
 );
 assert.deepEqual(evaluate('提升20%的伤害', '+20% obrażeń', 'pl').hardIssues, []);
+assert.deepEqual(
+    evaluate('学习后，守护兽提供的属性增加5%', 'Öğrenildiğinde Koruyucu Canavarın sağladığı özellikler %5 artar', 'tr').hardIssues,
+    [],
+    'a locale-valid prefix percent must preserve the same deterministic magnitude'
+);
+{
+    const source = '学习后，守护兽提供的属性增加5%';
+    const candidate = 'Öğrenildiğinde Koruyucu Canavarın sağladığı özellikler %5 artar';
+    const numberResult = evaluate(source, candidate, 'tr');
+    const decision = issuePolicy.decideCandidate({
+        previous: {
+            status: 'missing',
+            translatedText: `[翻译失败：未返回结果] ${source}`,
+            text: `[翻译失败：未返回结果] ${source}`,
+            qaStatus: '疑似未翻译 / 报告缺失'
+        },
+        candidate: {
+            status: 'success',
+            translatedText: candidate,
+            text: candidate,
+            qaStatus: numberResult.hardIssues.length ? `需确认：${numberResult.hardIssues.join('；')}` : '通过'
+        },
+        mode: 'ordinary'
+    });
+    assert.equal(
+        decision.accept,
+        true,
+        'a valid Turkish prefix-percent candidate must replace the previous missing/failure placeholder'
+    );
+}
+assert.ok(
+    evaluate('学习后，守护兽提供的属性增加5%', 'Öğrenildiğinde özellikler %6 artar', 'tr')
+        .hardIssues.some(issue => issue.includes('缺少 5%')),
+    'prefix-percent support must still detect a real magnitude change'
+);
 assert.deepEqual(evaluate('每天8点刷新', 'Odświeżanie codziennie o 8:00', 'pl').hardIssues, []);
 {
     const result = evaluate('每日0点刷新', '매일 자정에 새로고침', 'ko');
