@@ -169,7 +169,7 @@ npm run desktop:build
 
 ## 📖 License
 
-MIT License
+[MIT License](LICENSE) © 2026 LIUSU2326。
 
 ## 🤝 贡献
 

@@ -2,6 +2,7 @@
   "name": "transmate-localization-toolkit",
   "version": "1.5.7",
   "description": "TransMate AI desktop assistant for game localization workflows.",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {

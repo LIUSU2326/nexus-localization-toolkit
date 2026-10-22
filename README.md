@@ -182,7 +182,7 @@ The app supports OpenAI-compatible APIs.
 
 ## 📖 License
 
-MIT License
+[MIT License](LICENSE) © 2026 LIUSU2326.
 
 ## 🤝 Contributing
 
